@@ -77,6 +77,12 @@ export default function App() {
   const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
   const [focusedPairIndex, setFocusedPairIndex] = useState<number>(0); // Which stereo pair (0 = ch 1-2, 1 = ch 3-4, etc)
 
+  // Resizable panel sizes
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(256);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(256);
+  const [mixerHeight, setMixerHeight] = useState(256);
+  const [masterWidth, setMasterWidth] = useState(288);
+
   // Wire drawing state
   const [drawingWire, setDrawingWire] = useState<{
     fromNode: string;
@@ -399,6 +405,48 @@ export default function App() {
     };
   }, [handleDragMove, handleDragEnd]);
 
+  // --- Panel Resize Handlers ---
+
+  const handleResizeStart = useCallback((
+    e: React.MouseEvent,
+    direction: 'left' | 'right' | 'top' | 'master',
+    currentValue: number,
+    setter: (value: number) => void,
+    minValue: number,
+    maxValue: number
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const startPos = direction === 'top' ? e.clientY : e.clientX;
+    const startValue = currentValue;
+
+    const handleMove = (ev: MouseEvent) => {
+      const currentPos = direction === 'top' ? ev.clientY : ev.clientX;
+      let delta = currentPos - startPos;
+      
+      // Invert delta for right sidebar, master, and top (mixer)
+      if (direction === 'right' || direction === 'top' || direction === 'master') {
+        delta = -delta;
+      }
+
+      const newValue = Math.min(maxValue, Math.max(minValue, startValue + delta));
+      setter(newValue);
+    };
+
+    const handleEnd = () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = direction === 'top' ? 'ns-resize' : 'ew-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleEnd);
+  }, []);
+
   // --- Wire Drawing ---
 
   // Convert screen coordinates to canvas local coordinates (accounting for pan & zoom)
@@ -534,7 +582,11 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden">
 
         {/* LEFT SIDEBAR: SOURCES LIBRARY */}
-        <div className="w-64 bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl" onClick={e => e.stopPropagation()}>
+        <div 
+          className="bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" 
+          style={{ width: leftSidebarWidth }}
+          onClick={e => e.stopPropagation()}
+        >
           <div className="p-4 border-b border-slate-800 bg-slate-900/50">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2">
               <LogOut className="w-3 h-3" /> Sources
@@ -572,6 +624,12 @@ export default function App() {
             })}
           </div>
         </div>
+
+        {/* LEFT RESIZE HANDLE */}
+        <div
+          className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors"
+          onMouseDown={(e) => handleResizeStart(e, 'left', leftSidebarWidth, setLeftSidebarWidth, 180, 400)}
+        />
 
         {/* CENTER: PATCH CANVAS */}
         <div
@@ -716,8 +774,18 @@ export default function App() {
           </div>
         </div>
 
+        {/* RIGHT RESIZE HANDLE */}
+        <div
+          className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors"
+          onMouseDown={(e) => handleResizeStart(e, 'right', rightSidebarWidth, setRightSidebarWidth, 180, 400)}
+        />
+
         {/* RIGHT SIDEBAR: OUTPUTS LIBRARY */}
-        <div className="w-64 bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 z-10 shadow-xl" onClick={e => e.stopPropagation()}>
+        <div 
+          className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" 
+          style={{ width: rightSidebarWidth }}
+          onClick={e => e.stopPropagation()}
+        >
           <div className="p-4 border-b border-slate-800 bg-slate-900/50">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
               <LinkIcon className="w-3 h-3" /> Output Devices
@@ -754,8 +822,17 @@ export default function App() {
 
       </div>
 
+      {/* MIXER RESIZE HANDLE */}
+      <div
+        className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors"
+        onMouseDown={(e) => handleResizeStart(e, 'top', mixerHeight, setMixerHeight, 150, 400)}
+      />
+
       {/* BOTTOM: INTEGRATED MIXER & MASTER CONTROL */}
-      <div className="h-64 bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30">
+      <div 
+        className="bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30"
+        style={{ height: mixerHeight }}
+      >
 
         {/* MIXER AREA (LEFT) */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#162032]">
@@ -815,8 +892,17 @@ export default function App() {
           </div>
         </div>
 
+        {/* MASTER RESIZE HANDLE */}
+        <div
+          className="w-1 bg-transparent hover:bg-amber-500/50 cursor-ew-resize z-40 shrink-0 transition-colors"
+          onMouseDown={(e) => handleResizeStart(e, 'master', masterWidth, setMasterWidth, 200, 450)}
+        />
+
         {/* MASTER SECTION (RIGHT) */}
-        <div className="w-72 bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl min-h-0">
+        <div 
+          className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl min-h-0"
+          style={{ width: masterWidth }}
+        >
           <div className="p-2 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between shrink-0">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
               <Monitor className="w-3 h-3" /> Master & Monitor
