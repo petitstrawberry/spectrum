@@ -195,29 +195,51 @@ export default function App() {
     setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, volume: val } : n));
   };
 
-  // --- D&D Handlers (Library items) ---
+  // --- D&D Handlers (Library items) - Using mouse events instead of native D&D ---
 
-  const handleDragStart = (e: React.DragEvent, type: string, id: string) => {
-    e.dataTransfer.setData('application/json', JSON.stringify({ type, id }));
-  };
+  const [libraryDrag, setLibraryDrag] = useState<{
+    type: 'lib_source' | 'lib_target';
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleLibraryMouseDown = useCallback((e: React.MouseEvent, type: 'lib_source' | 'lib_target', id: string) => {
     e.preventDefault();
-    const dataStr = e.dataTransfer.getData('application/json');
-    if (!dataStr) return;
-    const data = JSON.parse(dataStr);
+    e.stopPropagation();
 
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const x = e.clientX - rect.left - 90;
-    const y = e.clientY - rect.top - 30;
+    const startX = e.clientX;
+    const startY = e.clientY;
 
-    const type: NodeType = data.type === 'lib_source' ? 'source' : 'target';
-    const newNode = createNode(data.id, type, x, y);
-    setNodes(prev => [...prev, newNode]);
+    setLibraryDrag({ type, id, x: startX, y: startY });
 
-    if (type === 'target') setFocusedOutputId(newNode.id);
-  };
+    const handleMouseMove = (ev: MouseEvent) => {
+      setLibraryDrag(prev => prev ? { ...prev, x: ev.clientX, y: ev.clientY } : null);
+    };
+
+    const handleMouseUp = (ev: MouseEvent) => {
+      // Check if dropped on canvas
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect && ev.clientX >= rect.left && ev.clientX <= rect.right &&
+          ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+        const x = ev.clientX - rect.left - 90;
+        const y = ev.clientY - rect.top - 30;
+
+        const nodeType: NodeType = type === 'lib_source' ? 'source' : 'target';
+        const newNode = createNode(id, nodeType, x, y);
+        setNodes(prev => [...prev, newNode]);
+
+        if (nodeType === 'target') setFocusedOutputId(newNode.id);
+      }
+
+      setLibraryDrag(null);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, []);
 
   // --- Node Dragging (DOM-based, no state during drag) ---
 
@@ -424,8 +446,7 @@ export default function App() {
               return (
                 <div
                   key={item.id}
-                  draggable={!isUsed}
-                  onDragStart={(e) => handleDragStart(e, 'lib_source', item.id)}
+                  onMouseDown={!isUsed ? (e) => handleLibraryMouseDown(e, 'lib_source', item.id) : undefined}
                   className={`
                     group flex items-center gap-3 p-3 rounded-xl border transition-all
                     ${isUsed
@@ -451,8 +472,6 @@ export default function App() {
         <div
           ref={canvasRef}
           className="flex-1 bg-[#0b1120] relative overflow-hidden cursor-crosshair"
-          onDrop={handleDrop}
-          onDragOver={(e) => e.preventDefault()}
         >
           {/* Grid */}
           <div className="absolute inset-0 pointer-events-none opacity-20" style={{ backgroundImage: 'radial-gradient(#475569 1px, transparent 1px)', backgroundSize: '24px 24px' }}></div>
@@ -572,8 +591,7 @@ export default function App() {
               return (
                 <div
                   key={item.id}
-                  draggable={!isUsed}
-                  onDragStart={(e) => handleDragStart(e, 'lib_target', item.id)}
+                  onMouseDown={!isUsed ? (e) => handleLibraryMouseDown(e, 'lib_target', item.id) : undefined}
                   className={`
                     group flex items-center gap-3 p-3 rounded-xl border transition-all
                     ${isUsed
@@ -731,6 +749,21 @@ export default function App() {
         </div>
 
       </div>
+
+      {/* Library drag preview */}
+      {libraryDrag && (
+        <div
+          className="fixed pointer-events-none z-50 bg-slate-800 border-2 border-cyan-500 rounded-lg px-4 py-2 shadow-xl opacity-80"
+          style={{ left: libraryDrag.x + 10, top: libraryDrag.y + 10 }}
+        >
+          <span className="text-xs font-bold text-white">
+            {libraryDrag.type === 'lib_source'
+              ? LIBRARY_SOURCES.find(s => s.id === libraryDrag.id)?.name
+              : LIBRARY_TARGETS.find(t => t.id === libraryDrag.id)?.name
+            }
+          </span>
+        </div>
+      )}
     </div>
   );
 }
