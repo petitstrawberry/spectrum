@@ -75,6 +75,7 @@ export default function App() {
   // Selection State
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
+  const [focusedPairIndex, setFocusedPairIndex] = useState<number>(0); // Which stereo pair (0 = ch 1-2, 1 = ch 3-4, etc)
 
   // Wire drawing state
   const [drawingWire, setDrawingWire] = useState<{
@@ -88,6 +89,11 @@ export default function App() {
 
   // Drag offset for cable updates during drag
   const [dragOffset, setDragOffset] = useState<{ nodeId: string; dx: number; dy: number } | null>(null);
+
+  // Canvas pan and zoom state
+  const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
 
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -109,13 +115,11 @@ export default function App() {
 
     setNodes([n1, n2, t1, t2]);
 
+    // Connections now use pair indices (0 = ch 1-2, 1 = ch 3-4, etc.)
     setConnections([
       { id: 'c1', fromNodeId: n1.id, fromChannel: 0, toNodeId: t1.id, toChannel: 0, sendLevel: 80, muted: false },
-      { id: 'c2', fromNodeId: n1.id, fromChannel: 1, toNodeId: t1.id, toChannel: 1, sendLevel: 80, muted: false },
-      { id: 'c3', fromNodeId: n2.id, fromChannel: 0, toNodeId: t1.id, toChannel: 0, sendLevel: 90, muted: false },
-      { id: 'c4', fromNodeId: n2.id, fromChannel: 1, toNodeId: t1.id, toChannel: 1, sendLevel: 90, muted: false },
-      { id: 'c5', fromNodeId: n1.id, fromChannel: 0, toNodeId: t2.id, toChannel: 0, sendLevel: 60, muted: false },
-      { id: 'c6', fromNodeId: n1.id, fromChannel: 1, toNodeId: t2.id, toChannel: 1, sendLevel: 60, muted: false },
+      { id: 'c2', fromNodeId: n2.id, fromChannel: 0, toNodeId: t1.id, toChannel: 0, sendLevel: 90, muted: false },
+      { id: 'c3', fromNodeId: n1.id, fromChannel: 0, toNodeId: t2.id, toChannel: 0, sendLevel: 60, muted: false },
     ]);
 
     setFocusedOutputId(t1.id);
@@ -146,12 +150,12 @@ export default function App() {
     };
   };
 
-  const getPortPosition = useCallback((node: NodeData, channelIndex: number, isInput: boolean) => {
+  const getPortPosition = useCallback((node: NodeData, pairIndex: number, isInput: boolean) => {
     const headerHeight = 36;
     const portHeight = 20;
     const portSpacing = 4;
     const startY = node.y + headerHeight + 16;
-    const y = startY + (channelIndex * (portHeight + portSpacing)) + (portHeight / 2);
+    const y = startY + (pairIndex * (portHeight + portSpacing)) + (portHeight / 2);
     const x = isInput ? node.x : node.x + 180;
 
     // Apply drag offset if this node is being dragged
@@ -177,16 +181,16 @@ export default function App() {
     setConnections(prev => prev.filter(c => c.id !== id));
   };
 
-  const updateSendLevel = (sourceId: string, targetId: string, level: number) => {
+  const updateSendLevel = (sourceId: string, targetId: string, pairIndex: number, level: number) => {
     setConnections(prev => prev.map(c => {
-      if (c.fromNodeId === sourceId && c.toNodeId === targetId) return { ...c, sendLevel: level };
+      if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, sendLevel: level };
       return c;
     }));
   };
 
-  const toggleConnectionMute = (sourceId: string, targetId: string) => {
+  const toggleConnectionMute = (sourceId: string, targetId: string, pairIndex: number) => {
     setConnections(prev => prev.map(c => {
-      if (c.fromNodeId === sourceId && c.toNodeId === targetId) return { ...c, muted: !c.muted };
+      if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, muted: !c.muted };
       return c;
     }));
   };
@@ -222,11 +226,14 @@ export default function App() {
       const rect = canvasRef.current?.getBoundingClientRect();
       if (rect && ev.clientX >= rect.left && ev.clientX <= rect.right &&
           ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
-        const x = ev.clientX - rect.left - 90;
-        const y = ev.clientY - rect.top - 30;
+        // Convert screen coords to canvas coords (accounting for pan & zoom)
+        const screenX = ev.clientX - rect.left;
+        const screenY = ev.clientY - rect.top;
+        const canvasX = (screenX - canvasTransform.x) / canvasTransform.scale - 90;
+        const canvasY = (screenY - canvasTransform.y) / canvasTransform.scale - 30;
 
         const nodeType: NodeType = type === 'lib_source' ? 'source' : 'target';
-        const newNode = createNode(id, nodeType, x, y);
+        const newNode = createNode(id, nodeType, canvasX, canvasY);
         setNodes(prev => [...prev, newNode]);
 
         if (nodeType === 'target') setFocusedOutputId(newNode.id);
@@ -239,7 +246,7 @@ export default function App() {
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, []);
+  }, [canvasTransform]);
 
   // --- Node Dragging (DOM-based, no state during drag) ---
 
@@ -247,8 +254,9 @@ export default function App() {
     if (!dragRef.current) return;
 
     const { nodeId, startX, startY } = dragRef.current;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
+    // Convert screen delta to canvas delta (accounting for zoom)
+    const dx = (e.clientX - startX) / canvasTransform.scale;
+    const dy = (e.clientY - startY) / canvasTransform.scale;
 
     const nodeEl = nodeRefs.current.get(nodeId);
     if (nodeEl) {
@@ -257,14 +265,15 @@ export default function App() {
 
     // Update drag offset for cable rendering
     setDragOffset({ nodeId, dx, dy });
-  }, []);
+  }, [canvasTransform.scale]);
 
   const handleDragEnd = useCallback((e: MouseEvent) => {
     if (!dragRef.current) return;
 
     const { nodeId, startX, startY, nodeStartX, nodeStartY } = dragRef.current;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
+    // Convert screen delta to canvas delta (accounting for zoom)
+    const dx = (e.clientX - startX) / canvasTransform.scale;
+    const dy = (e.clientY - startY) / canvasTransform.scale;
 
     // Reset transform and update state once
     const nodeEl = nodeRefs.current.get(nodeId);
@@ -284,7 +293,7 @@ export default function App() {
     dragRef.current = null;
     document.removeEventListener('mousemove', handleDragMove);
     document.removeEventListener('mouseup', handleDragEnd);
-  }, [handleDragMove]);
+  }, [handleDragMove, canvasTransform.scale]);
 
   const handleNodeMouseDown = useCallback((e: React.MouseEvent, nodeId: string) => {
     // Don't interfere with native drag events from library items
@@ -313,6 +322,75 @@ export default function App() {
     document.addEventListener('mouseup', handleDragEnd);
   }, [nodes, handleDragMove, handleDragEnd]);
 
+  // --- Canvas Pan & Zoom ---
+
+  const handleCanvasWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Pinch gesture (ctrlKey is set on trackpad pinch)
+    if (e.ctrlKey) {
+      // Zoom with pinch - use smaller factor for smoother zoom
+      const zoomIntensity = 0.01;
+      const zoomFactor = 1 - e.deltaY * zoomIntensity;
+      const newScale = Math.min(Math.max(canvasTransform.scale * zoomFactor, 0.25), 3);
+
+      // Adjust pan to zoom toward mouse position
+      const scaleChange = newScale / canvasTransform.scale;
+      const newX = mouseX - (mouseX - canvasTransform.x) * scaleChange;
+      const newY = mouseY - (mouseY - canvasTransform.y) * scaleChange;
+
+      setCanvasTransform({ x: newX, y: newY, scale: newScale });
+    } else {
+      // Two-finger scroll for panning (like Chrome)
+      setCanvasTransform(prev => ({
+        ...prev,
+        x: prev.x - e.deltaX,
+        y: prev.y - e.deltaY,
+      }));
+    }
+  }, [canvasTransform]);
+
+  const handleCanvasPanStart = useCallback((e: React.MouseEvent) => {
+    // Only start pan if clicking on empty canvas (not on nodes)
+    if ((e.target as HTMLElement).closest('.canvas-node')) return;
+    if (e.button !== 0) return; // Left click only
+
+    e.preventDefault();
+    setIsPanning(true);
+    panStart.current = {
+      x: e.clientX,
+      y: e.clientY,
+      canvasX: canvasTransform.x,
+      canvasY: canvasTransform.y,
+    };
+
+    const handlePanMove = (ev: MouseEvent) => {
+      if (!panStart.current) return;
+      const dx = ev.clientX - panStart.current.x;
+      const dy = ev.clientY - panStart.current.y;
+      setCanvasTransform(prev => ({
+        ...prev,
+        x: panStart.current!.canvasX + dx,
+        y: panStart.current!.canvasY + dy,
+      }));
+    };
+
+    const handlePanEnd = () => {
+      setIsPanning(false);
+      panStart.current = null;
+      document.removeEventListener('mousemove', handlePanMove);
+      document.removeEventListener('mouseup', handlePanEnd);
+    };
+
+    document.addEventListener('mousemove', handlePanMove);
+    document.addEventListener('mouseup', handlePanEnd);
+  }, [canvasTransform]);
+
   // Cleanup event listeners on unmount
   useEffect(() => {
     return () => {
@@ -323,35 +401,56 @@ export default function App() {
 
   // --- Wire Drawing ---
 
+  // Convert screen coordinates to canvas local coordinates (accounting for pan & zoom)
+  const screenToCanvas = useCallback((clientX: number, clientY: number) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    
+    const screenX = clientX - rect.left;
+    const screenY = clientY - rect.top;
+    
+    // Reverse the transform: subtract pan, then divide by scale
+    const canvasX = (screenX - canvasTransform.x) / canvasTransform.scale;
+    const canvasY = (screenY - canvasTransform.y) / canvasTransform.scale;
+    
+    return { x: canvasX, y: canvasY };
+  }, [canvasTransform]);
+
   const startWire = useCallback((e: React.MouseEvent, nodeId: string, channelIndex: number) => {
     e.stopPropagation();
     e.preventDefault();
-
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
 
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
 
     const pos = getPortPosition(node, channelIndex, false);
+    const mousePos = screenToCanvas(e.clientX, e.clientY);
 
     setDrawingWire({
       fromNode: nodeId,
       fromCh: channelIndex,
       startX: pos.x,
       startY: pos.y,
-      currentX: e.clientX - rect.left,
-      currentY: e.clientY - rect.top,
+      currentX: mousePos.x,
+      currentY: mousePos.y,
     });
 
     const handleWireMove = (ev: MouseEvent) => {
-      const r = canvasRef.current?.getBoundingClientRect();
-      if (!r) return;
-      setDrawingWire(prev => prev ? {
-        ...prev,
-        currentX: ev.clientX - r.left,
-        currentY: ev.clientY - r.top,
-      } : null);
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      
+      // Need to get current transform state
+      setDrawingWire(prev => {
+        if (!prev) return null;
+        const screenX = ev.clientX - rect.left;
+        const screenY = ev.clientY - rect.top;
+        return {
+          ...prev,
+          currentX: screenX,
+          currentY: screenY,
+          // Store screen coords, we'll convert in render
+        };
+      });
     };
 
     const handleWireEnd = () => {
@@ -362,7 +461,7 @@ export default function App() {
 
     document.addEventListener('mousemove', handleWireMove);
     document.addEventListener('mouseup', handleWireEnd);
-  }, [nodes]);
+  }, [nodes, screenToCanvas]);
 
   const endWire = useCallback((e: React.MouseEvent, nodeId: string, channelIndex: number) => {
     e.stopPropagation();
@@ -392,17 +491,23 @@ export default function App() {
   const activeTargets = nodes.filter(n => n.type === 'target');
   const focusedTarget = nodes.find(n => n.id === focusedOutputId);
 
+  // Calculate stereo pairs for focused target
+  const focusedTargetPairs = focusedTarget
+    ? Math.ceil(focusedTarget.channelCount / 2)
+    : 0;
+
+  // Filter connections to only show sources connected to the selected pair
   const mixSourceIds = Array.from(new Set(connections
-    .filter(c => c.toNodeId === focusedOutputId)
+    .filter(c => c.toNodeId === focusedOutputId && c.toChannel === focusedPairIndex)
     .map(c => c.fromNodeId)));
   const mixSources = nodes.filter(n => n.type === 'source' && mixSourceIds.includes(n.id));
 
-  const targetGroups = activeTargets.reduce((acc, target) => {
-    const type = target.subLabel?.split('/')[1]?.trim() || 'Other';
-    if (!acc[type]) acc[type] = [];
-    acc[type].push(target);
-    return acc;
-  }, {} as Record<string, NodeData[]>);
+  // Helper to get stereo pair label (1-2, 3-4, etc.)
+  const getPairLabel = (pairIndex: number) => {
+    const ch1 = pairIndex * 2 + 1;
+    const ch2 = pairIndex * 2 + 2;
+    return `${ch1}-${ch2}`;
+  };
 
   return (
     <div className="flex flex-col h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden select-none"
@@ -439,7 +544,7 @@ export default function App() {
               <input type="text" placeholder="Apps..." className="w-full bg-slate-950 border border-slate-700 rounded-md py-1.5 pl-9 pr-3 text-xs text-slate-300 focus:border-cyan-500 focus:outline-none" />
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-3 space-y-2">
             {LIBRARY_SOURCES.map(item => {
               const isUsed = isLibraryItemUsed(item.id);
               const ItemIcon = item.icon;
@@ -471,71 +576,97 @@ export default function App() {
         {/* CENTER: PATCH CANVAS */}
         <div
           ref={canvasRef}
-          className="flex-1 bg-[#0b1120] relative overflow-hidden cursor-crosshair"
+          className={`flex-1 bg-[#0b1120] relative overflow-hidden ${isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+          onWheel={handleCanvasWheel}
+          onMouseDown={handleCanvasPanStart}
         >
-          {/* Grid */}
-          <div className="absolute inset-0 pointer-events-none opacity-20" style={{ backgroundImage: 'radial-gradient(#475569 1px, transparent 1px)', backgroundSize: '24px 24px' }}></div>
+          {/* Transformable Canvas Content */}
+          <div
+            className="absolute inset-0 origin-top-left"
+            style={{
+              transform: `translate(${canvasTransform.x}px, ${canvasTransform.y}px) scale(${canvasTransform.scale})`,
+            }}
+          >
+            {/* Grid */}
+            <div
+              className="absolute pointer-events-none opacity-20"
+              style={{
+                backgroundImage: 'radial-gradient(#475569 1px, transparent 1px)',
+                backgroundSize: '24px 24px',
+                width: '4000px',
+                height: '4000px',
+                left: '-2000px',
+                top: '-2000px',
+              }}
+            ></div>
 
-          {/* Connection Lines */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none z-0">
-            {connections.map(conn => {
-              const start = nodes.find(n => n.id === conn.fromNodeId);
-              const end = nodes.find(n => n.id === conn.toNodeId);
-              if (!start || !end) return null;
+            {/* Connection Lines */}
+            <svg className="absolute pointer-events-none z-0" style={{ width: '4000px', height: '4000px', left: '-2000px', top: '-2000px', overflow: 'visible' }}>
+              <g transform="translate(2000, 2000)">
+                {connections.map(conn => {
+                  const start = nodes.find(n => n.id === conn.fromNodeId);
+                  const end = nodes.find(n => n.id === conn.toNodeId);
+                  if (!start || !end) return null;
 
-              const startPos = getPortPosition(start, conn.fromChannel, false);
-              const endPos = getPortPosition(end, conn.toChannel, true);
+                  const startPos = getPortPosition(start, conn.fromChannel, false);
+                  const endPos = getPortPosition(end, conn.toChannel, true);
 
-              const isActive = end.id === focusedOutputId;
-              const strokeColor = isActive ? (end.color.includes('cyan') ? '#22d3ee' : '#f472b6') : '#475569';
+                  const isActive = end.id === focusedOutputId;
+                  const strokeColor = isActive ? (end.color.includes('cyan') ? '#22d3ee' : '#f472b6') : '#475569';
 
-              const path = `M ${startPos.x} ${startPos.y} C ${startPos.x + 50} ${startPos.y}, ${endPos.x - 50} ${endPos.y}, ${endPos.x} ${endPos.y}`;
+                  const path = `M ${startPos.x} ${startPos.y} C ${startPos.x + 50} ${startPos.y}, ${endPos.x - 50} ${endPos.y}, ${endPos.x} ${endPos.y}`;
+
+                  return (
+                    <g key={conn.id} className="pointer-events-auto group cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteConnection(conn.id); }}>
+                      <path d={path} fill="none" stroke="transparent" strokeWidth="10" />
+                      <path d={path} fill="none" stroke={strokeColor} strokeWidth={isActive ? 2 : 1} className="group-hover:stroke-red-400" />
+                      {isActive && (
+                        <circle r="3" fill="#fff" opacity="0.8">
+                          <animateMotion dur="2s" repeatCount="indefinite" path={path} />
+                        </circle>
+                      )}
+                    </g>
+                  );
+                })}
+
+                {drawingWire && (() => {
+                    // Convert screen coords to canvas coords for the current mouse position
+                    const currentCanvasX = (drawingWire.currentX - canvasTransform.x) / canvasTransform.scale;
+                    const currentCanvasY = (drawingWire.currentY - canvasTransform.y) / canvasTransform.scale;
+                    return (
+                        <path
+                            d={`M ${drawingWire.startX} ${drawingWire.startY} C ${drawingWire.startX + 50} ${drawingWire.startY}, ${currentCanvasX - 50} ${currentCanvasY}, ${currentCanvasX} ${currentCanvasY}`}
+                            fill="none"
+                            stroke="#fff"
+                            strokeWidth="2"
+                            strokeDasharray="4,4"
+                        />
+                    );
+                })()}
+              </g>
+            </svg>
+
+            {/* Nodes */}
+            {nodes.map(node => {
+              const NodeIcon = node.icon;
+              const isSelected = selectedNodeId === node.id;
+              const isFocused = focusedOutputId === node.id;
+              const pairCount = Math.ceil(node.channelCount / 2);
+              const nodeHeight = 36 + 16 + (pairCount * 24);
+
+              let borderClass = 'border-slate-700';
+              if (node.type === 'source') borderClass = 'border-cyan-500/30 hover:border-cyan-500';
+              if (node.type === 'target') borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
+              if (isSelected) borderClass = 'border-white ring-2 ring-white/20';
 
               return (
-                <g key={conn.id} className="pointer-events-auto group cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteConnection(conn.id); }}>
-                  <path d={path} fill="none" stroke="transparent" strokeWidth="10" />
-                  <path d={path} fill="none" stroke={strokeColor} strokeWidth={isActive ? 2 : 1} className="group-hover:stroke-red-400" />
-                  {isActive && (
-                    <circle r="3" fill="#fff" opacity="0.8">
-                      <animateMotion dur="2s" repeatCount="indefinite" path={path} />
-                    </circle>
-                  )}
-                </g>
-              );
-            })}
-
-            {drawingWire && (
-                <path
-                    d={`M ${drawingWire.startX} ${drawingWire.startY} C ${drawingWire.startX + 50} ${drawingWire.startY}, ${drawingWire.currentX - 50} ${drawingWire.currentY}, ${drawingWire.currentX} ${drawingWire.currentY}`}
-                    fill="none"
-                    stroke="#fff"
-                    strokeWidth="2"
-                    strokeDasharray="4,4"
-                />
-            )}
-          </svg>
-
-          {/* Nodes */}
-          {nodes.map(node => {
-            const NodeIcon = node.icon;
-            const isSelected = selectedNodeId === node.id;
-            const isFocused = focusedOutputId === node.id;
-            const portCount = node.channelCount;
-            const nodeHeight = 36 + 16 + (portCount * 24);
-
-            let borderClass = 'border-slate-700';
-            if (node.type === 'source') borderClass = 'border-cyan-500/30 hover:border-cyan-500';
-            if (node.type === 'target') borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
-            if (isSelected) borderClass = 'border-white ring-2 ring-white/20';
-
-            return (
-              <div
-                key={node.id}
-                ref={el => { if (el) nodeRefs.current.set(node.id, el); }}
-                onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
-                className={`absolute w-[180px] bg-slate-800 rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass}`}
-                style={{ left: node.x, top: node.y, height: nodeHeight }}
-              >
+                <div
+                  key={node.id}
+                  ref={el => { if (el) nodeRefs.current.set(node.id, el); }}
+                  onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+                  className={`canvas-node absolute w-[180px] bg-slate-800 rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass}`}
+                  style={{ left: node.x, top: node.y, height: nodeHeight }}
+                >
                 {/* Header */}
                 <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing">
                   <div className={`w-2 h-2 rounded-full ${node.color} shadow-[0_0_8px_currentColor]`}></div>
@@ -544,37 +675,45 @@ export default function App() {
                   <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
                 </div>
 
-                {/* Ports Body */}
+                {/* Ports Body - Stereo Pairs */}
                 <div className="p-2 space-y-1 relative">
-                    {Array.from({length: portCount}).map((_, i) => (
-                        <div key={i} className="flex items-center justify-between h-5 relative">
-                            {/* Input Port (Target Only) */}
-                            <div className="w-3 relative">
-                                {node.type === 'target' && (
-                                    <div
-                                        className="absolute -left-3 w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20"
-                                        onMouseUp={(e) => endWire(e, node.id, i)}
-                                    ></div>
-                                )}
-                            </div>
+                    {Array.from({length: pairCount}).map((_, pairIdx) => {
+                        const ch1 = pairIdx * 2 + 1;
+                        const ch2 = pairIdx * 2 + 2;
+                        const isLastOdd = node.channelCount % 2 === 1 && pairIdx === pairCount - 1;
+                        const label = isLastOdd ? `CH ${ch1}` : `CH ${ch1}-${ch2}`;
 
-                            <div className="text-[9px] text-slate-500 font-mono flex-1 text-center">CH {i+1}</div>
+                        return (
+                            <div key={pairIdx} className="flex items-center justify-between h-5 relative">
+                                {/* Input Port (Target Only) */}
+                                <div className="w-3 relative">
+                                    {node.type === 'target' && (
+                                        <div
+                                            className="absolute -left-3 w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20"
+                                            onMouseUp={(e) => endWire(e, node.id, pairIdx)}
+                                        ></div>
+                                    )}
+                                </div>
 
-                            {/* Output Port (Source Only) */}
-                            <div className="w-3 relative">
-                                {node.type === 'source' && (
-                                    <div
-                                        className="absolute -right-3 w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20"
-                                        onMouseDown={(e) => startWire(e, node.id, i)}
-                                    ></div>
-                                )}
+                                <div className="text-[9px] text-slate-500 font-mono flex-1 text-center">{label}</div>
+
+                                {/* Output Port (Source Only) */}
+                                <div className="w-3 relative">
+                                    {node.type === 'source' && (
+                                        <div
+                                            className="absolute -right-3 w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20"
+                                            onMouseDown={(e) => startWire(e, node.id, pairIdx)}
+                                        ></div>
+                                    )}
+                                </div>
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
               </div>
             );
           })}
+          </div>
         </div>
 
         {/* RIGHT SIDEBAR: OUTPUTS LIBRARY */}
@@ -584,7 +723,7 @@ export default function App() {
               <LinkIcon className="w-3 h-3" /> Output Devices
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-3 space-y-2">
             {LIBRARY_TARGETS.map(item => {
               const isUsed = nodes.some(n => n.libraryId === item.id);
               const ItemIcon = item.icon;
@@ -625,7 +764,11 @@ export default function App() {
               <Maximize2 className="w-3 h-3 text-slate-500" />
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                 {focusedTarget ? (
-                  <>Mixing for <span className={`text-white ${focusedTarget.color} ml-1`}>{focusedTarget.label}</span></>
+                  <>Mixing for <span className={`text-white ${focusedTarget.color} ml-1`}>{focusedTarget.label}</span>
+                    {focusedTargetPairs > 1 && (
+                      <span className="text-slate-400 ml-1">Ch {getPairLabel(focusedPairIndex)}</span>
+                    )}
+                  </>
                 ) : (
                   'Select Output on Canvas to Mix'
                 )}
@@ -633,9 +776,9 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch custom-scrollbar">
+          <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
             {mixSources.map(node => {
-                const conn = connections.find(c => c.fromNodeId === node.id && c.toNodeId === focusedOutputId);
+                const conn = connections.find(c => c.fromNodeId === node.id && c.toNodeId === focusedOutputId && c.toChannel === focusedPairIndex);
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
                 const NodeIcon = node.icon;
@@ -657,14 +800,14 @@ export default function App() {
                     <div className="w-1.5 h-full bg-slate-950 rounded-full relative group/fader">
                         <input
                             type="range" min="0" max="100" value={level} disabled={isMuted}
-                            onChange={(e) => updateSendLevel(node.id, focusedOutputId!, Number(e.target.value))}
+                            onChange={(e) => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, Number(e.target.value))}
                             className={`absolute inset-0 h-full w-6 -left-2 opacity-0 z-20 appearance-slider-vertical ${isMuted ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         />
                         <div className={`absolute left-1/2 -translate-x-1/2 w-6 h-3 bg-slate-700 border-t border-b border-slate-500 rounded shadow pointer-events-none z-10 ${isMuted ? 'grayscale opacity-50' : ''}`} style={{ bottom: `calc(${level}% - 6px)` }}></div>
                     </div>
                     </div>
                     <div className="flex gap-1 mt-2 w-full px-1">
-                    <button onClick={() => toggleConnectionMute(node.id, focusedOutputId!)} className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'}`}>M</button>
+                    <button onClick={() => toggleConnectionMute(node.id, focusedOutputId!, focusedPairIndex)} className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'}`}>M</button>
                     </div>
                 </div>
                 )
@@ -673,49 +816,72 @@ export default function App() {
         </div>
 
         {/* MASTER SECTION (RIGHT) */}
-        <div className="w-64 bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl">
-          <div className="p-2 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between">
+        <div className="w-72 bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl min-h-0">
+          <div className="p-2 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between shrink-0">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
               <Monitor className="w-3 h-3" /> Master & Monitor
             </div>
           </div>
 
-          <div className="flex-1 flex gap-2 p-3">
+          <div className="flex-1 flex gap-2 p-3 min-h-0">
 
-             {/* 1. Monitor Selection (Left) */}
-             <div className="flex-1 flex flex-col gap-2 overflow-y-auto custom-scrollbar">
-                {Object.keys(targetGroups).map(type => (
-                    <div key={type} className="mb-2">
-                        <div className="text-[9px] font-bold text-slate-600 px-1 mb-1">{type.toUpperCase()}</div>
-                        {targetGroups[type].map(node => {
-                            const isSelected = focusedOutputId === node.id;
-                            const Icon = node.icon;
-                            return (
-                                <div
-                                    key={node.id}
-                                    onClick={() => setFocusedOutputId(node.id)}
-                                    className={`
-                                        flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all mb-1
-                                        ${isSelected
-                                        ? `bg-slate-800 border-${node.color.split('-')[1]}-500/50 ring-1 ring-${node.color.split('-')[1]}-500/50`
-                                        : 'border-slate-800 hover:border-slate-600'}
-                                    `}
-                                >
-                                    <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.color}`}>
-                                        <Icon className="w-3 h-3" />
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className={`text-[10px] font-bold truncate ${isSelected ? 'text-white' : 'text-slate-400'}`}>{node.label}</div>
-                                    </div>
-                                    {isSelected && <div className={`w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
-                                </div>
-                            );
-                        })}
-                    </div>
-                ))}
+             {/* 1. Channel Pair Selector (Left) */}
+             {focusedTarget && focusedTargetPairs > 1 && (
+               <div className="w-14 flex flex-col gap-1 overflow-y-auto border-r border-slate-800 pr-2 min-h-0">
+                 <div className="text-[8px] font-bold text-slate-600 mb-1 text-center shrink-0">CH</div>
+                 {Array.from({ length: focusedTargetPairs }).map((_, pairIdx) => {
+                   const isPairSelected = focusedPairIndex === pairIdx;
+                   return (
+                     <button
+                       key={pairIdx}
+                       onClick={() => setFocusedPairIndex(pairIdx)}
+                       className={`
+                         w-full py-1.5 rounded text-[9px] font-bold border transition-all text-center shrink-0
+                         ${isPairSelected
+                           ? `bg-${focusedTarget.color.split('-')[1]}-500/20 border-${focusedTarget.color.split('-')[1]}-500 text-white`
+                           : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'}
+                       `}
+                     >
+                       {getPairLabel(pairIdx)}
+                     </button>
+                   );
+                 })}
+               </div>
+             )}
+
+             {/* 2. Output Device Selection (Middle) */}
+             <div className="flex-1 flex flex-col gap-1 overflow-y-auto min-h-0">
+                {activeTargets.map(node => {
+                    const isSelected = focusedOutputId === node.id;
+                    const Icon = node.icon;
+
+                    return (
+                        <div
+                            key={node.id}
+                            onClick={() => {
+                                setFocusedOutputId(node.id);
+                                setFocusedPairIndex(0);
+                            }}
+                            className={`
+                                flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0
+                                ${isSelected
+                                ? `bg-slate-800 border-${node.color.split('-')[1]}-500/50`
+                                : 'border-slate-800 hover:border-slate-600'}
+                            `}
+                        >
+                            <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.color}`}>
+                                <Icon className="w-3 h-3" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className={`text-[10px] font-bold truncate ${isSelected ? 'text-white' : 'text-slate-400'}`}>{node.label}</div>
+                            </div>
+                            {isSelected && <div className={`w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
+                        </div>
+                    );
+                })}
              </div>
 
-             {/* 2. Master Fader (Right) */}
+             {/* 3. Master Fader (Right) */}
              {focusedTarget && (
                  <div className="w-16 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
                     <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
