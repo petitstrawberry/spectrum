@@ -1,0 +1,15 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-C", "link-arg=-weak_framework",
+  "-C", "link-arg=CoreAudio",
+  "-C", "link-arg=-weak_framework",
+  "-C", "link-arg=AudioToolbox",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-C", "link-arg=-weak_framework",
+  "-C", "link-arg=CoreAudio",
+  "-C", "link-arg=-weak_framework",
+  "-C", "link-arg=AudioToolbox",
+]

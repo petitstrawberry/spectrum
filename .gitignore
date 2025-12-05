@@ -1,0 +1,25 @@
+# Nix
+.direnv/
+result
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+target/
+
+# Logs
+*.log
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Tauri
+src-tauri/target/

@@ -1,0 +1,33 @@
+[package]
+name = "spectrum"
+version = "0.1.0"
+description = "Prism Audio Mixer & Router"
+authors = ["petitstrawberry"]
+license = "MIT"
+repository = "https://github.com/petitstrawberry/spectrum"
+edition = "2021"
+
+[lib]
+name = "spectrum_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+coreaudio-rs = "0.12"
+tokio = { version = "1", features = ["full", "rt-multi-thread"] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
