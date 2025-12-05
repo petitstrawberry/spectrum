@@ -160,8 +160,11 @@ export default function App() {
     const headerHeight = 36;
     const portHeight = 20;
     const portSpacing = 4;
-    const startY = node.y + headerHeight + 16;
-    const y = startY + (pairIndex * (portHeight + portSpacing)) + (portHeight / 2);
+    const paddingTop = 8; // p-2 = 8px
+    const circleTop = 4; // top-[4px]
+    const circleRadius = 6; // w-3 h-3 = 12px, radius = 6px
+    const startY = node.y + headerHeight + paddingTop;
+    const y = startY + (pairIndex * (portHeight + portSpacing)) + circleTop + circleRadius + 2;
     const x = isInput ? node.x : node.x + 180;
 
     // Apply drag offset if this node is being dragged
@@ -222,6 +225,7 @@ export default function App() {
     const startY = e.clientY;
 
     setLibraryDrag({ type, id, x: startX, y: startY });
+    document.body.style.cursor = 'grabbing';
 
     const handleMouseMove = (ev: MouseEvent) => {
       setLibraryDrag(prev => prev ? { ...prev, x: ev.clientX, y: ev.clientY } : null);
@@ -233,10 +237,11 @@ export default function App() {
       if (rect && ev.clientX >= rect.left && ev.clientX <= rect.right &&
           ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
         // Convert screen coords to canvas coords (accounting for pan & zoom)
+        // Offset so node center is at cursor position (node width=180, estimated height ~60)
         const screenX = ev.clientX - rect.left;
         const screenY = ev.clientY - rect.top;
         const canvasX = (screenX - canvasTransform.x) / canvasTransform.scale - 90;
-        const canvasY = (screenY - canvasTransform.y) / canvasTransform.scale - 30;
+        const canvasY = (screenY - canvasTransform.y) / canvasTransform.scale - 40;
 
         const nodeType: NodeType = type === 'lib_source' ? 'source' : 'target';
         const newNode = createNode(id, nodeType, canvasX, canvasY);
@@ -246,6 +251,7 @@ export default function App() {
       }
 
       setLibraryDrag(null);
+      document.body.style.cursor = '';
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
@@ -744,10 +750,10 @@ export default function App() {
                         return (
                             <div key={pairIdx} className="flex items-center justify-between h-5 relative">
                                 {/* Input Port (Target Only) */}
-                                <div className="w-3 relative">
+                                <div className="w-3 relative h-full flex items-center">
                                     {node.type === 'target' && (
                                         <div
-                                            className="absolute -left-3 w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20"
+                                            className="absolute -left-[15px] w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20 top-[4px]"
                                             onMouseUp={(e) => endWire(e, node.id, pairIdx)}
                                         ></div>
                                     )}
@@ -756,10 +762,10 @@ export default function App() {
                                 <div className="text-[9px] text-slate-500 font-mono flex-1 text-center">{label}</div>
 
                                 {/* Output Port (Source Only) */}
-                                <div className="w-3 relative">
+                                <div className="w-3 relative h-full flex items-center">
                                     {node.type === 'source' && (
                                         <div
-                                            className="absolute -right-3 w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20"
+                                            className="absolute -right-[15px] w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20 top-[4px]"
                                             onMouseDown={(e) => startWire(e, node.id, pairIdx)}
                                         ></div>
                                     )}
@@ -1006,7 +1012,7 @@ export default function App() {
       {libraryDrag && (
         <div
           className="fixed pointer-events-none z-50 bg-slate-800 border-2 border-cyan-500 rounded-lg px-4 py-2 shadow-xl opacity-80"
-          style={{ left: libraryDrag.x + 10, top: libraryDrag.y + 10 }}
+          style={{ left: libraryDrag.x - 90, top: libraryDrag.y - 20, transform: 'translate(0, 0)' }}
         >
           <span className="text-xs font-bold text-white">
             {libraryDrag.type === 'lib_source'
