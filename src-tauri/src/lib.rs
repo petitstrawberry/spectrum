@@ -439,18 +439,10 @@ fn restart_app(app: tauri::AppHandle) {
 }
 
 /// Open Prism.app (companion app for channel assignment)
+/// Uses URL scheme prism://popup for popup mode
 #[tauri::command]
 fn open_prism_app() -> Result<bool, String> {
     use std::process::Command;
-    
-    // Try common locations for Prism.app
-    let possible_paths = [
-        "/Applications/Prism.app",
-        "~/Applications/Prism.app",
-        // Development build location
-        "../prism-app/src-tauri/target/release/bundle/macos/Prism.app",
-        "../prism-app/src-tauri/target/debug/bundle/macos/Prism.app",
-    ];
     
     // First check if Prism.app is already running
     let output = Command::new("pgrep")
@@ -459,7 +451,17 @@ fn open_prism_app() -> Result<bool, String> {
     
     if let Ok(out) = output {
         if !out.stdout.is_empty() {
-            // Already running, bring to front using AppleScript
+            // Already running, send deep link to activate popup mode
+            let result = Command::new("open")
+                .arg("prism://popup?size=800x600")
+                .spawn();
+            
+            if result.is_ok() {
+                println!("[Spectrum] Prism.app already running, sent popup deep link");
+                return Ok(true);
+            }
+            
+            // Fallback: bring to front using AppleScript
             let _ = Command::new("osascript")
                 .args(["-e", "tell application \"Prism\" to activate"])
                 .spawn();
@@ -468,7 +470,29 @@ fn open_prism_app() -> Result<bool, String> {
         }
     }
     
-    // Try to open Prism.app
+    // Try to open via URL scheme first (this registers/opens Prism.app)
+    match Command::new("open")
+        .arg("prism://popup?size=800x600")
+        .spawn()
+    {
+        Ok(_) => {
+            println!("[Spectrum] Opened Prism.app via URL scheme (popup mode)");
+            return Ok(true);
+        }
+        Err(e) => {
+            println!("[Spectrum] URL scheme failed: {}, trying fallback...", e);
+        }
+    }
+    
+    // Fallback: Try common locations for Prism.app
+    let possible_paths = [
+        "/Applications/Prism.app",
+        "~/Applications/Prism.app",
+        // Development build location
+        "../prism-app/src-tauri/target/release/bundle/macos/Prism.app",
+        "../prism-app/src-tauri/target/debug/bundle/macos/Prism.app",
+    ];
+    
     for path in &possible_paths {
         let expanded_path = shellexpand::tilde(path);
         if std::path::Path::new(expanded_path.as_ref()).exists() {
