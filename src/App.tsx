@@ -1358,7 +1358,34 @@ export default function App() {
 
             {/* Nodes */}
             {nodes.map(node => {
-              const NodeIcon = node.icon;
+              // For source nodes, get dynamic info from channelSources
+              const channelData = node.type === 'source' ? channelSources.find(c => c.id === node.libraryId) : null;
+              const dynamicLabel = channelData ? `Ch ${channelData.channelLabel}` : node.label;
+              const dynamicSubLabel = channelData
+                ? (channelData.isMain
+                    ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
+                    : (channelData.apps.map(a => a.name).join(', ') || 'Empty'))
+                : node.subLabel;
+              const dynamicIcon = channelData
+                ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
+                : node.icon;
+              const dynamicColor = channelData
+                ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
+                : node.color;
+              const NodeIcon = dynamicIcon;
+
+              // Get level data for source nodes
+              const pairIndex = channelData ? channelData.channelOffset / 2 : 0;
+              const levelData = node.type === 'source' ? inputLevels[pairIndex] : null;
+              const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
+              const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
+              const maxDb = Math.max(leftDb, rightDb);
+              const avgLevel = dbToMeterPercent(maxDb);
+              const meterColorClass = maxDb > 0 ? 'from-red-500/30' :
+                                      maxDb > -6 ? 'from-amber-500/25' :
+                                      maxDb > -12 ? 'from-yellow-500/20' :
+                                      'from-green-500/20';
+
               const isSelected = selectedNodeId === node.id;
               const isFocused = focusedOutputId === node.id;
               const pairCount = Math.ceil(node.channelCount / 2);
@@ -1377,19 +1404,26 @@ export default function App() {
                   className={`canvas-node absolute w-[180px] bg-slate-800 rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass}`}
                   style={{ left: node.x, top: node.y, height: nodeHeight }}
                 >
-                {/* Header */}
-                <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing">
-                  <div className={`w-2 h-2 rounded-full ${node.color} shadow-[0_0_8px_currentColor]`}></div>
-                  <NodeIcon className={`w-4 h-4 ${node.color}`} />
-                  <div className="flex-1 min-w-0">
+                {/* Header with level meter for source nodes */}
+                <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing relative overflow-hidden">
+                  {/* Level meter background for source nodes */}
+                  {node.type === 'source' && (
+                    <div
+                      className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${meterColorClass} to-transparent transition-all duration-75 pointer-events-none`}
+                      style={{ width: `${Math.min(avgLevel, 100)}%` }}
+                    />
+                  )}
+                  <div className={`w-2 h-2 rounded-full ${dynamicColor} shadow-[0_0_8px_currentColor] relative z-10`}></div>
+                  <NodeIcon className={`w-4 h-4 ${dynamicColor} relative z-10`} />
+                  <div className="flex-1 min-w-0 relative z-10">
                     <span className="text-xs font-bold text-slate-200 truncate block">
-                      {node.type === 'source' ? node.subLabel : node.label}
+                      {node.type === 'source' ? dynamicSubLabel : node.label}
                     </span>
                     {node.type === 'source' && (
-                      <span className="text-[9px] text-slate-500 truncate block">{node.label}</span>
+                      <span className="text-[9px] text-slate-500 truncate block">{dynamicLabel}</span>
                     )}
                   </div>
-                  <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
+                  <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity relative z-10"><Trash2 className="w-3 h-3"/></button>
                 </div>
 
                 {/* Ports Body - Stereo Pairs */}
@@ -1521,7 +1555,22 @@ export default function App() {
                 const conn = connections.find(c => c.fromNodeId === node.id && c.toNodeId === focusedOutputId && c.toChannel === focusedPairIndex);
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
-                const NodeIcon = node.icon;
+
+                // Get dynamic info from channelSources
+                const channelData = channelSources.find(c => c.id === node.libraryId);
+                const dynamicLabel = channelData ? `Ch ${channelData.channelLabel}` : node.label;
+                const dynamicSubLabel = channelData
+                  ? (channelData.isMain
+                      ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
+                      : (channelData.apps.map(a => a.name).join(', ') || 'Empty'))
+                  : node.subLabel;
+                const dynamicIcon = channelData
+                  ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
+                  : node.icon;
+                const dynamicColor = channelData
+                  ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
+                  : node.color;
+                const NodeIcon = dynamicIcon;
 
                 // Get real input levels for this channel (dB conversion)
                 const channelOffset = node.channelOffset ?? 0;
@@ -1540,12 +1589,13 @@ export default function App() {
                 return (
                 <div key={node.id} className="w-32 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
                     <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
-                    <div className={`w-6 h-6 rounded-lg bg-slate-800 border border-slate-600 flex items-center justify-center shadow-lg ${node.color}`}>
+                    <div className={`w-6 h-6 rounded-lg bg-slate-800 border border-slate-600 flex items-center justify-center shadow-lg ${dynamicColor}`}>
                         <NodeIcon className="w-3 h-3" />
                     </div>
                     </div>
                     <div className="w-full px-1 text-center mb-2">
-                    <div className="text-[9px] font-bold truncate text-slate-300">{node.label}</div>
+                    <div className="text-[7px] text-slate-500 font-mono">{dynamicLabel}</div>
+                    <div className="text-[9px] font-bold truncate text-slate-300">{dynamicSubLabel || 'Empty'}</div>
                     </div>
                     <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
                     {/* Fader with scale on left */}
