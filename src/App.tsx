@@ -317,7 +317,7 @@ export default function App() {
   // Resizable panel sizes
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(256);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(256);
-  const [mixerHeight, setMixerHeight] = useState(256);
+  const [mixerHeight, setMixerHeight] = useState(350);
   const [masterWidth, setMasterWidth] = useState(288);
 
   // Wire drawing state
@@ -2003,7 +2003,7 @@ export default function App() {
       {/* MIXER RESIZE HANDLE */}
       <div
         className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors"
-        onMouseDown={(e) => handleResizeStart(e, 'top', mixerHeight, setMixerHeight, 150, 400)}
+        onMouseDown={(e) => handleResizeStart(e, 'top', mixerHeight, setMixerHeight, 220, 500)}
       />
 
       {/* BOTTOM: INTEGRATED MIXER & MASTER CONTROL */}
