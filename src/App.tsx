@@ -1148,11 +1148,6 @@ export default function App() {
           <div className="font-black text-xl tracking-tighter bg-gradient-to-r from-cyan-400 to-fuchsia-500 bg-clip-text text-transparent flex items-center gap-2">
             <Workflow className="w-6 h-6 text-cyan-400" /> Spectrum
           </div>
-          <div className="h-6 w-px bg-slate-800"></div>
-          <div className="flex items-center gap-2 text-[10px] text-slate-500 bg-slate-950 px-3 py-1.5 rounded-full border border-slate-800">
-            <span className="w-2 h-2 rounded-full bg-fuchsia-500 animate-pulse"></span>
-            PRISM ENGINE ACTIVE
-          </div>
         </div>
         <button
           onClick={() => setShowSettings(true)}
