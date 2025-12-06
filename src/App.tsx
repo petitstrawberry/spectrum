@@ -90,8 +90,41 @@ interface Connection {
 // --- Output Targets - will be populated from CoreAudio ---
 // Now dynamically generated from actual audio devices
 
-// --- Helper: Get icon for device type ---
-function getIconForDeviceType(device: AudioDevice): React.ComponentType<{ className?: string }> {
+// --- Helper: Get icon for input device ---
+function getIconForInputDevice(device: InputDeviceInfo): React.ComponentType<{ className?: string }> {
+  const name = device.name.toLowerCase();
+  if (device.is_prism) return Volume2; // Prism uses Volume2 (virtual)
+  if (name.includes('microphone') || name.includes('mic')) return Mic;
+  if (name.includes('line in') || name.includes('input')) return Mic;
+  if (name.includes('headphone') || name.includes('headset')) return Headphones;
+  if (name.includes('usb') || name.includes('interface')) return Mic;
+  return Mic; // Default to Mic for input devices
+}
+
+// --- Helper: Get color for input device ---
+function getColorForInputDevice(device: InputDeviceInfo): string {
+  if (device.is_prism) return 'text-cyan-400';
+  return 'text-amber-400'; // All other input devices use amber
+}
+
+// --- Helper: Get icon for device node (used across UI) ---
+function getDeviceNodeIcon(node: NodeData): React.ComponentType<{ className?: string }> {
+  if (node.sourceType === 'device') {
+    return Mic; // All non-Prism input devices use Mic
+  }
+  return node.icon; // Prism channels use their assigned icon
+}
+
+// --- Helper: Get color for device node (used across UI) ---
+function getDeviceNodeColor(node: NodeData): string {
+  if (node.sourceType === 'device') {
+    return 'text-amber-400'; // All device nodes use amber
+  }
+  return node.color;
+}
+
+// --- Helper: Get icon for output device type ---
+function getIconForOutputDevice(device: AudioDevice): React.ComponentType<{ className?: string }> {
   const name = device.name.toLowerCase();
   if (name.includes('headphone')) return Headphones;
   if (name.includes('speaker') || name.includes('built-in output')) return Speaker;
@@ -607,7 +640,7 @@ export default function App() {
         id: `out_${device.id}`,
         name: device.name,
         type: getTypeLabelForDevice(device),
-        icon: getIconForDeviceType(device),
+        icon: getIconForOutputDevice(device),
         color: getColorForDeviceType(device),
         channels: device.output_channels,
         deviceId: device.id,
@@ -635,8 +668,8 @@ export default function App() {
             type,
             label: device.name,
             subLabel: `${device.channels}ch Audio Input`,
-            icon: Headphones,
-            color: 'text-amber-400',
+            icon: getIconForInputDevice(device),
+            color: getColorForInputDevice(device),
             x, y,
             volume: dbToFader(0), // 0dB = unity gain
             muted: false,
@@ -1590,11 +1623,13 @@ export default function App() {
                     ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
                     : (channelData.apps.map(a => a.name).join(', ') || 'Empty'))
                 : node.subLabel;
-              const dynamicIcon = channelData
-                ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
-                : node.icon;
+              const dynamicIcon = isDeviceNode
+                ? getDeviceNodeIcon(node)
+                : (channelData
+                    ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
+                    : node.icon);
               const dynamicColor = isDeviceNode 
-                ? 'text-amber-400' 
+                ? getDeviceNodeColor(node)
                 : (channelData
                     ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
                     : node.color);
@@ -1841,12 +1876,12 @@ export default function App() {
                           : (channelData.apps.map(a => a.name).join(', ') || 'Empty'))
                       : node.subLabel);
                 const dynamicIcon = isDeviceNode
-                  ? Mic
+                  ? getDeviceNodeIcon(node)
                   : (channelData
                       ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
                       : node.icon);
                 const dynamicColor = isDeviceNode
-                  ? 'text-amber-400'
+                  ? getDeviceNodeColor(node)
                   : (channelData
                       ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
                       : node.color);
