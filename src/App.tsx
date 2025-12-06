@@ -1,11 +1,10 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Settings,
   Search,
   Maximize2,
   Grid,
   Workflow,
-  Mic,
   Music,
   MessageSquare,
   Gamepad2,
@@ -19,7 +18,16 @@ import {
   Trash2,
   Monitor,
   Video,
+  RefreshCw,
+  Volume2,
 } from 'lucide-react';
+import { 
+  getPrismApps, 
+  getDriverStatus, 
+  // setRouting, // TODO: Re-enable when channel routing is implemented
+  type AppSource, 
+  type DriverStatus 
+} from './lib/prismd';
 
 // --- Types ---
 
@@ -38,6 +46,7 @@ interface NodeData {
   volume: number;
   muted: boolean;
   channelCount: number;
+  channelOffset?: number; // Prism channel offset (0, 2, 4, ... 62)
 }
 
 interface Connection {
@@ -50,15 +59,7 @@ interface Connection {
   muted: boolean;
 }
 
-// --- Mock Data (will be replaced with real data from prismd) ---
-
-const LIBRARY_SOURCES = [
-  { id: 'src_spotify', name: 'Spotify', icon: Music, color: 'text-green-400', channel: 'Ch 1-2', channels: 2 },
-  { id: 'src_discord', name: 'Discord', icon: MessageSquare, color: 'text-indigo-400', channel: 'Ch 3-4', channels: 2 },
-  { id: 'src_game', name: 'Apex Legends', icon: Gamepad2, color: 'text-red-400', channel: 'Ch 5-6', channels: 6 },
-  { id: 'src_chrome', name: 'Chrome', icon: Globe, color: 'text-blue-400', channel: 'Ch 7-8', channels: 2 },
-  { id: 'src_mic', name: 'Mic Input', icon: Mic, color: 'text-amber-400', channel: 'Ch 9-10', channels: 1 },
-];
+// --- Output Targets (Hardware/Virtual outputs) ---
 
 const LIBRARY_TARGETS = [
   { id: 'out_main', name: 'Main Speakers', type: 'Hardware', icon: Speaker, color: 'text-cyan-400', channels: 2 },
@@ -67,6 +68,18 @@ const LIBRARY_TARGETS = [
   { id: 'out_zoom', name: 'Zoom Mic', type: 'Virtual', icon: Video, color: 'text-purple-400', channels: 1 },
   { id: 'out_blackhole', name: 'BlackHole 16ch', type: 'System', icon: Monitor, color: 'text-slate-400', channels: 16 },
 ];
+
+// --- Icon helpers ---
+
+function getIconForCategory(category: AppSource['category']): React.ComponentType<{ className?: string }> {
+  switch (category) {
+    case 'game': return Gamepad2;
+    case 'browser': return Globe;
+    case 'music': return Music;
+    case 'voice': return MessageSquare;
+    case 'system': return Monitor;
+  }
+}
 
 export default function App() {
   const [nodes, setNodes] = useState<NodeData[]>([]);
@@ -101,6 +114,11 @@ export default function App() {
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
 
+  // Prism daemon state
+  const [prismApps, setPrismApps] = useState<AppSource[]>([]);
+  const [driverStatus, setDriverStatus] = useState<DriverStatus | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -112,49 +130,145 @@ export default function App() {
   } | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
+  // --- Prism Daemon Communication ---
+  const fetchPrismData = async () => {
+    try {
+      const [apps, status] = await Promise.all([
+        getPrismApps(),
+        getDriverStatus(),
+      ]);
+      setPrismApps(apps);
+      setDriverStatus(status);
+    } catch (error) {
+      console.error('Failed to fetch prism data:', error);
+      setDriverStatus({ connected: false, sample_rate: 0, buffer_size: 0 });
+    }
+  };
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await fetchPrismData();
+    setTimeout(() => setIsRefreshing(false), 500);
+  };
+
+  // Fetch on mount and poll every 2 seconds
+  useEffect(() => {
+    fetchPrismData();
+    const interval = setInterval(fetchPrismData, 2000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Channel-based source type for UI (32 stereo pairs = 64 channels)
+  type ChannelSource = {
+    id: string;           // e.g., "ch_0" for Ch 1-2
+    channelOffset: number; // 0, 2, 4, ... 62
+    channelLabel: string;  // "1-2", "3-4", etc.
+    apps: Array<{
+      name: string;
+      icon: React.ComponentType<{ className?: string }>;
+      color: string;
+      pid: number;
+      clientCount: number;
+    }>;
+    hasApps: boolean;
+    isMain: boolean;
+  };
+
+  // Generate 32 stereo channel pairs with app assignments
+  const channelSources = useMemo((): ChannelSource[] => {
+    const channels: ChannelSource[] = [];
+    
+    for (let i = 0; i < 32; i++) {
+      const offset = i * 2;
+      const ch1 = offset + 1;
+      const ch2 = offset + 2;
+      
+      // Ch 1-2 is the MAIN (full mix) channel
+      const isMain = offset === 0;
+      
+      // Find apps assigned to this channel
+      const assignedApps = prismApps
+        .filter(app => app.clients.some(c => c.offset === offset))
+        .map(app => ({
+          name: app.name,
+          icon: getIconForCategory(app.category),
+          color: app.color,
+          pid: app.pid,
+          clientCount: app.clients.filter(c => c.offset === offset).length,
+        }));
+      
+      channels.push({
+        id: `ch_${offset}`,
+        channelOffset: offset,
+        channelLabel: `${ch1}-${ch2}`,
+        apps: assignedApps,
+        hasApps: assignedApps.length > 0,
+        isMain,
+      });
+    }
+    
+    return channels;
+  }, [prismApps]);
+
   // --- Initial Setup ---
   useEffect(() => {
-    const n1 = createNode('src_spotify', 'source', 100, 100);
-    const n2 = createNode('src_discord', 'source', 100, 250);
+    // Create initial target nodes only (sources will be added from prism apps)
     const t1 = createNode('out_main', 'target', 600, 100);
     const t2 = createNode('out_obs', 'target', 600, 250);
 
-    setNodes([n1, n2, t1, t2]);
-
-    // Connections now use pair indices (0 = ch 1-2, 1 = ch 3-4, etc.)
-    setConnections([
-      { id: 'c1', fromNodeId: n1.id, fromChannel: 0, toNodeId: t1.id, toChannel: 0, sendLevel: 80, muted: false },
-      { id: 'c2', fromNodeId: n2.id, fromChannel: 0, toNodeId: t1.id, toChannel: 0, sendLevel: 90, muted: false },
-      { id: 'c3', fromNodeId: n1.id, fromChannel: 0, toNodeId: t2.id, toChannel: 0, sendLevel: 60, muted: false },
-    ]);
-
+    setNodes([t1, t2]);
+    setConnections([]);
     setFocusedOutputId(t1.id);
   }, []);
 
   // --- Helpers ---
 
-  const createNode = (libraryId: string, type: NodeType, x: number, y: number): NodeData => {
-    let data: (typeof LIBRARY_SOURCES[0]) | (typeof LIBRARY_TARGETS[0]) | undefined;
-    if (type === 'source') data = LIBRARY_SOURCES.find(s => s.id === libraryId);
-    else data = LIBRARY_TARGETS.find(t => t.id === libraryId);
-
-    const sourceData = data as typeof LIBRARY_SOURCES[0] | undefined;
-    const targetData = data as typeof LIBRARY_TARGETS[0] | undefined;
-
+  const createNode = useCallback((libraryId: string, type: NodeType, x: number, y: number): NodeData => {
+    if (type === 'source') {
+      // Source nodes are channel-based
+      const channelData = channelSources.find(c => c.id === libraryId);
+      if (channelData) {
+        // Get app names for label
+        const isMain = channelData.isMain;
+        const appNames = isMain 
+          ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
+          : (channelData.apps.map(a => a.name).join(', ') || 'Empty');
+        const icon = isMain ? Volume2 : (channelData.apps[0]?.icon || Music);
+        const color = isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500');
+        
+        return {
+          id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          libraryId,
+          type,
+          label: `Ch ${channelData.channelLabel}`,
+          subLabel: appNames,
+          icon,
+          color,
+          x, y,
+          volume: 100,
+          muted: false,
+          channelCount: 2, // Always stereo pair
+          channelOffset: channelData.channelOffset,
+        };
+      }
+    }
+    
+    // Target nodes
+    const targetData = LIBRARY_TARGETS.find(t => t.id === libraryId);
     return {
       id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       libraryId,
       type,
-      label: data?.name || 'Unknown',
-      subLabel: type === 'source' ? sourceData?.channel : `${targetData?.channels}ch / ${targetData?.type}`,
-      icon: data?.icon || Grid,
-      color: data?.color || 'text-slate-400',
+      label: targetData?.name || 'Unknown',
+      subLabel: `${targetData?.channels}ch / ${targetData?.type}`,
+      icon: targetData?.icon || Grid,
+      color: targetData?.color || 'text-slate-400',
       x, y,
       volume: 100,
       muted: false,
-      channelCount: data?.channels || 2
+      channelCount: targetData?.channels || 2,
     };
-  };
+  }, [channelSources]);
 
   const getPortPosition = useCallback((node: NodeData, pairIndex: number, isInput: boolean) => {
     const headerHeight = 36;
@@ -258,7 +372,7 @@ export default function App() {
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [canvasTransform]);
+  }, [canvasTransform, createNode]);
 
   // --- Node Dragging (DOM-based, no state during drag) ---
 
@@ -528,6 +642,19 @@ export default function App() {
       );
 
       if (!exists && drawingWire.fromNode !== nodeId) {
+        // Find the source node to get channel offset
+        const sourceNode = nodes.find(n => n.id === drawingWire.fromNode);
+        
+        // Calculate channel offset based on target channel pair
+        // Each pair is 2 channels, so pair 0 = offset 0, pair 1 = offset 2, etc.
+        const targetChannelOffset = channelIndex * 2;
+
+        // TODO: Implement channel-to-channel routing
+        // For now, log the routing attempt
+        if (sourceNode?.channelOffset !== undefined) {
+          console.log(`Route from channel ${sourceNode.channelOffset} to channel ${targetChannelOffset}`);
+        }
+
         setConnections(prev => [...prev, {
           id: `c_${Date.now()}`,
           fromNodeId: drawingWire.fromNode,
@@ -540,7 +667,7 @@ export default function App() {
       }
       setDrawingWire(null);
     }
-  }, [drawingWire, connections]);
+  }, [drawingWire, connections, nodes]);
 
   const activeTargets = nodes.filter(n => n.type === 'target');
   const focusedTarget = nodes.find(n => n.id === focusedOutputId);
@@ -595,36 +722,84 @@ export default function App() {
         >
           <div className="p-4 border-b border-slate-800 bg-slate-900/50">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2">
-              <LogOut className="w-3 h-3" /> Sources
+              <LogOut className="w-3 h-3" /> Prism Channels
+              {/* Connection status indicator */}
+              {driverStatus && (
+                <span className={`ml-auto flex items-center gap-1 ${driverStatus.connected ? 'text-green-400' : 'text-red-400'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${driverStatus.connected ? 'bg-green-400' : 'bg-red-400'}`} />
+                  <span className="text-[9px]">{driverStatus.connected ? 'Connected' : 'Disconnected'}</span>
+                </span>
+              )}
+              <button
+                onClick={handleRefresh}
+                className="ml-1 p-1 hover:bg-slate-700 rounded transition-colors"
+                title="Refresh"
+              >
+                <RefreshCw className={`w-3 h-3 text-slate-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+              </button>
             </div>
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-500" />
-              <input type="text" placeholder="Apps..." className="w-full bg-slate-950 border border-slate-700 rounded-md py-1.5 pl-9 pr-3 text-xs text-slate-300 focus:border-cyan-500 focus:outline-none" />
+              <input type="text" placeholder="Channels..." className="w-full bg-slate-950 border border-slate-700 rounded-md py-1.5 pl-9 pr-3 text-xs text-slate-300 focus:border-cyan-500 focus:outline-none" />
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2">
-            {LIBRARY_SOURCES.map(item => {
-              const isUsed = isLibraryItemUsed(item.id);
-              const ItemIcon = item.icon;
+          <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+            {channelSources.map(channel => {
+              const isUsed = isLibraryItemUsed(channel.id);
+              const hasApps = channel.hasApps;
+              const FirstIcon = channel.apps[0]?.icon || Music;
+              
               return (
                 <div
-                  key={item.id}
-                  onMouseDown={!isUsed ? (e) => handleLibraryMouseDown(e, 'lib_source', item.id) : undefined}
+                  key={channel.id}
+                  onMouseDown={!isUsed ? (e) => handleLibraryMouseDown(e, 'lib_source', channel.id) : undefined}
                   className={`
-                    group flex items-center gap-3 p-3 rounded-xl border transition-all
+                    group flex items-center gap-2 px-2 py-1.5 rounded-lg border transition-all
                     ${isUsed
-                      ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-default grayscale'
-                      : 'border-slate-700 bg-slate-800/80 hover:border-cyan-500/50 hover:bg-slate-800 cursor-grab active:cursor-grabbing hover:shadow-md'}
+                      ? 'border-transparent bg-slate-900/30 opacity-40 cursor-default'
+                      : hasApps
+                        ? 'border-slate-700/50 bg-slate-800/60 hover:border-cyan-500/50 hover:bg-slate-800 cursor-grab active:cursor-grabbing'
+                        : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 cursor-grab active:cursor-grabbing'}
                   `}
                 >
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center bg-slate-950 ${item.color}`}>
-                    <ItemIcon className="w-4 h-4" />
+                  {/* Channel number */}
+                  <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'}`}>
+                    {channel.channelLabel}
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-bold text-slate-200 truncate">{item.name}</div>
-                    <div className="text-[9px] text-slate-500 font-mono">{item.channel}</div>
-                  </div>
-                  {!isUsed && <Plus className="w-4 h-4 text-slate-600 group-hover:text-cyan-400 transition-colors" />}
+                  
+                  {/* App info */}
+                  {channel.isMain ? (
+                    // MAIN channel - show icon and app count
+                    <div className="flex-1 flex items-center gap-2 min-w-0">
+                      <div className="w-5 h-5 rounded flex items-center justify-center bg-cyan-900/50 text-cyan-400">
+                        <Volume2 className="w-3 h-3" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[10px] text-cyan-300">MAIN</div>
+                        {channel.apps.length > 0 && (
+                          <div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : hasApps ? (
+                    <div className="flex-1 flex items-center gap-2 min-w-0">
+                      <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${channel.apps[0].color}`}>
+                        <FirstIcon className="w-3 h-3" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[10px] text-slate-300 truncate">
+                          {channel.apps.map(a => a.name).join(', ')}
+                        </div>
+                        {channel.apps.length > 1 && (
+                          <div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 text-[10px] text-slate-600 italic">Empty</div>
+                  )}
+                  
+                  {!isUsed && <Plus className="w-3 h-3 text-slate-700 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100" />}
                 </div>
               );
             })}
@@ -1012,11 +1187,14 @@ export default function App() {
       {libraryDrag && (
         <div
           className="fixed pointer-events-none z-50 bg-slate-800 border-2 border-cyan-500 rounded-lg px-4 py-2 shadow-xl opacity-80"
-          style={{ left: libraryDrag.x - 90, top: libraryDrag.y - 20, transform: 'translate(0, 0)' }}
+          style={{ left: libraryDrag.x - 60, top: libraryDrag.y - 20, transform: 'translate(0, 0)' }}
         >
           <span className="text-xs font-bold text-white">
             {libraryDrag.type === 'lib_source'
-              ? LIBRARY_SOURCES.find(s => s.id === libraryDrag.id)?.name
+              ? (() => {
+                  const ch = channelSources.find(c => c.id === libraryDrag.id);
+                  return ch?.isMain ? 'Ch 1-2 (MAIN)' : `Ch ${ch?.channelLabel || '?'}`;
+                })()
               : LIBRARY_TARGETS.find(t => t.id === libraryDrag.id)?.name
             }
           </span>

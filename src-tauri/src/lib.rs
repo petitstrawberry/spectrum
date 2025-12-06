@@ -6,7 +6,9 @@ mod audio;
 mod prismd;
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+
+// Re-export prismd types
+pub use prismd::{ClientInfo, RoutingUpdate, ClientRoutingUpdate};
 
 // --- Types ---
 
@@ -17,16 +19,6 @@ pub struct AudioDevice {
     pub channels: u32,
     pub is_input: bool,
     pub is_output: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrismClient {
-    pub pid: u32,
-    pub client_id: u32,
-    pub channel_offset: u32,
-    pub process_name: Option<String>,
-    pub responsible_pid: Option<u32>,
-    pub responsible_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,15 +36,29 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
 }
 
 #[tauri::command]
-async fn get_prism_clients() -> Result<Vec<PrismClient>, String> {
+async fn get_prism_clients() -> Result<Vec<ClientInfo>, String> {
     prismd::get_clients().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+async fn set_routing(pid: i32, offset: u32) -> Result<RoutingUpdate, String> {
+    prismd::set_routing(pid, offset).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_app_routing(app_name: String, offset: u32) -> Result<Vec<RoutingUpdate>, String> {
+    prismd::set_app_routing(app_name, offset).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_client_routing(client_id: u32, offset: u32) -> Result<ClientRoutingUpdate, String> {
+    prismd::set_client_routing(client_id, offset).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_driver_status() -> Result<DriverStatus, String> {
-    // TODO: Implement actual driver status check
     Ok(DriverStatus {
-        connected: true,
+        connected: prismd::is_connected(),
         sample_rate: 48000,
         buffer_size: 128,
     })
@@ -72,6 +78,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_audio_devices,
             get_prism_clients,
+            set_routing,
+            set_app_routing,
+            set_client_routing,
             get_driver_status,
             get_audio_levels,
         ])

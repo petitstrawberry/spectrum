@@ -1,83 +1,119 @@
 //! prismd IPC client for communicating with the Prism daemon
 
-use crate::PrismClient;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 
 const PRISMD_SOCKET_PATH: &str = "/tmp/prismd.sock";
 
+// --- IPC Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum CommandRequest {
+    Clients,
+    Set { pid: i32, offset: u32 },
+    SetApp { app_name: String, offset: u32 },
+    SetClient { client_id: u32, offset: u32 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RpcResponse<T> {
+    pub status: String,
+    pub message: Option<String>,
+    pub data: Option<T>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientInfo {
+    pub pid: i32,
+    pub client_id: u32,
+    pub channel_offset: u32,
+    pub process_name: Option<String>,
+    pub responsible_pid: Option<i32>,
+    pub responsible_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingUpdate {
+    pub pid: i32,
+    pub channel_offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRoutingUpdate {
+    pub client_id: u32,
+    pub channel_offset: u32,
+}
+
+// --- Helper Functions ---
+
+fn send_request<T: for<'de> Deserialize<'de>>(request: &CommandRequest) -> Result<T, Box<dyn Error + Send + Sync>> {
+    let mut stream = UnixStream::connect(PRISMD_SOCKET_PATH)?;
+
+    let payload = serde_json::to_string(request)?;
+    stream.write_all(payload.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response)?;
+
+    let parsed: RpcResponse<T> = serde_json::from_str(&response)?;
+
+    if parsed.status != "ok" {
+        return Err(parsed.message.unwrap_or_else(|| "Unknown error".to_string()).into());
+    }
+
+    parsed.data.ok_or_else(|| "No data in response".into())
+}
+
+// --- Public API ---
+
 /// Get list of Prism clients from prismd
-pub async fn get_clients() -> Result<Vec<PrismClient>, Box<dyn Error + Send + Sync>> {
-    let stream = match UnixStream::connect(PRISMD_SOCKET_PATH).await {
-        Ok(s) => s,
-        Err(_) => {
-            // prismd not running, return empty list
-            return Ok(vec![]);
-        }
-    };
-
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-
-    // Send Clients command
-    writer.write_all(b"Clients\n").await?;
-    writer.flush().await?;
-
-    let mut clients = Vec::new();
-    let mut line = String::new();
-
-    while reader.read_line(&mut line).await? > 0 {
-        let trimmed = line.trim();
-        
-        if trimmed == "End" {
-            break;
-        }
-
-        if trimmed.starts_with("Client:") {
-            if let Some(client) = parse_client_line(trimmed) {
-                clients.push(client);
+pub async fn get_clients() -> Result<Vec<ClientInfo>, Box<dyn Error + Send + Sync>> {
+    // Use blocking I/O in a separate thread to not block the async runtime
+    tokio::task::spawn_blocking(|| {
+        match send_request::<Vec<ClientInfo>>(&CommandRequest::Clients) {
+            Ok(clients) => Ok(clients),
+            Err(e) => {
+                // If prismd is not running, return empty list
+                if e.to_string().contains("connect") {
+                    Ok(vec![])
+                } else {
+                    Err(e)
+                }
             }
         }
-
-        line.clear();
-    }
-
-    Ok(clients)
+    }).await?
 }
 
-fn parse_client_line(line: &str) -> Option<PrismClient> {
-    // Format: Client: PID=1234 ClientId=1 ChannelOffset=0 ProcessName=Spotify ResponsiblePid=... ResponsibleName=...
-    let parts: std::collections::HashMap<&str, &str> = line
-        .strip_prefix("Client: ")?
-        .split_whitespace()
-        .filter_map(|part| {
-            let mut split = part.splitn(2, '=');
-            Some((split.next()?, split.next()?))
-        })
-        .collect();
-
-    Some(PrismClient {
-        pid: parts.get("PID")?.parse().ok()?,
-        client_id: parts.get("ClientId")?.parse().ok()?,
-        channel_offset: parts.get("ChannelOffset")?.parse().ok()?,
-        process_name: parts.get("ProcessName").map(|s| s.to_string()),
-        responsible_pid: parts.get("ResponsiblePid").and_then(|s| s.parse().ok()),
-        responsible_name: parts.get("ResponsibleName").map(|s| s.to_string()),
-    })
+/// Set routing for a specific PID
+pub async fn set_routing(pid: i32, offset: u32) -> Result<RoutingUpdate, Box<dyn Error + Send + Sync>> {
+    tokio::task::spawn_blocking(move || {
+        send_request::<RoutingUpdate>(&CommandRequest::Set { pid, offset })
+    }).await?
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Set routing for all clients of an app
+pub async fn set_app_routing(app_name: String, offset: u32) -> Result<Vec<RoutingUpdate>, Box<dyn Error + Send + Sync>> {
+    tokio::task::spawn_blocking(move || {
+        send_request::<Vec<RoutingUpdate>>(&CommandRequest::SetApp { app_name, offset })
+    }).await?
+}
 
-    #[test]
-    fn test_parse_client_line() {
-        let line = "Client: PID=1234 ClientId=1 ChannelOffset=0 ProcessName=Spotify";
-        let client = parse_client_line(line).unwrap();
-        assert_eq!(client.pid, 1234);
-        assert_eq!(client.client_id, 1);
-        assert_eq!(client.channel_offset, 0);
-        assert_eq!(client.process_name, Some("Spotify".to_string()));
-    }
+/// Set routing for a specific client ID
+pub async fn set_client_routing(client_id: u32, offset: u32) -> Result<ClientRoutingUpdate, Box<dyn Error + Send + Sync>> {
+    tokio::task::spawn_blocking(move || {
+        send_request::<ClientRoutingUpdate>(&CommandRequest::SetClient { client_id, offset })
+    }).await?
+}
+
+/// Check if prismd is running
+pub fn is_connected() -> bool {
+    UnixStream::connect(PRISMD_SOCKET_PATH).is_ok()
 }
