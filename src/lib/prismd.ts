@@ -308,3 +308,17 @@ export async function findOutputDevice(name: string): Promise<number | null> {
 export async function startDefaultOutput(): Promise<void> {
   return invoke('start_default_output');
 }
+
+/**
+ * Get current buffer size setting
+ */
+export async function getBufferSize(): Promise<number> {
+  return invoke<number>('get_buffer_size');
+}
+
+/**
+ * Set buffer size (requires restart to take effect on active captures)
+ */
+export async function setBufferSize(size: number): Promise<void> {
+  return invoke('set_buffer_size', { size });
+}

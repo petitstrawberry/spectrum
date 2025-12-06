@@ -233,6 +233,33 @@ fn start_default_output() -> Result<(), String> {
     audio_output::start_default_output()
 }
 
+/// Get current buffer size setting
+#[tauri::command]
+fn get_buffer_size() -> usize {
+    audio_capture::get_buffer_size_setting()
+}
+
+/// Set buffer size and restart audio engine
+#[tauri::command]
+async fn set_buffer_size(size: usize) -> Result<(), String> {
+    // Validate buffer size (must be power of 2, between 64 and 8192)
+    if size < 64 || size > 8192 {
+        return Err("Buffer size must be between 64 and 8192".to_string());
+    }
+    if !size.is_power_of_two() {
+        return Err("Buffer size must be a power of 2".to_string());
+    }
+    
+    // Set new buffer size
+    audio_capture::set_buffer_size(size);
+    
+    // Restart audio engine with new buffer size
+    audio_capture::restart_capture()?;
+    
+    println!("[Spectrum] Audio engine restarted with buffer size: {} samples", size);
+    Ok(())
+}
+
 // --- Plugin Entry ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -287,6 +314,8 @@ pub fn run() {
             stop_audio_output,
             find_output_device,
             start_default_output,
+            get_buffer_size,
+            set_buffer_size,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

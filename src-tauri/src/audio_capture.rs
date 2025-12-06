@@ -97,6 +97,9 @@ impl ChannelBuffer {
         let len = self.data.len();
         let write_pos = self.write_pos.load(Ordering::Acquire);
         
+        // Normalize read_pos to be within buffer bounds (handles buffer resize)
+        let read_pos = read_pos % len;
+        
         // Calculate available samples
         let available = if write_pos >= read_pos {
             write_pos - read_pos
@@ -475,6 +478,42 @@ pub fn start_capture() -> Result<bool, String> {
 /// Stop audio capture
 pub fn stop_capture() {
     CAPTURE_RUNNING.store(false, Ordering::SeqCst);
+    // Give some time for threads to stop
+    std::thread::sleep(std::time::Duration::from_millis(150));
+}
+
+/// Restart audio capture with new settings
+pub fn restart_capture() -> Result<bool, String> {
+    println!("[AudioCapture] Restarting capture...");
+    
+    // Stop current capture
+    if CAPTURE_RUNNING.load(Ordering::SeqCst) {
+        stop_capture();
+    }
+    
+    // Clear all device read positions (critical for avoiding position mismatch!)
+    {
+        let mut positions = DEVICE_READ_POSITIONS.write();
+        positions.clear();
+        println!("[AudioCapture] Cleared all device read positions");
+    }
+    
+    // Clear existing buffers
+    {
+        let mut buffers = AUDIO_BUFFERS.write();
+        *buffers = None;
+    }
+    
+    // Wait a bit more for output devices to notice the missing buffers
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    
+    // Start capture again (will use new buffer size)
+    let result = start_capture();
+    
+    // After restart, give time for buffers to fill before outputs read
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    
+    result
 }
 
 /// Get current input levels

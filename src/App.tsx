@@ -29,6 +29,8 @@ import {
   updateMixerSend,
   removeMixerSend,
   setOutputVolume,
+  getBufferSize,
+  setBufferSize,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -274,6 +276,10 @@ export default function App() {
   const [editingMasterDb, setEditingMasterDb] = useState<boolean>(false);
   const [editingMasterDbValue, setEditingMasterDbValue] = useState<string>('');
 
+  // Settings modal state
+  const [showSettings, setShowSettings] = useState(false);
+  const [bufferSize, setBufferSizeState] = useState<number>(4096);
+
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -312,9 +318,21 @@ export default function App() {
   // Fetch on mount and poll every 2 seconds
   useEffect(() => {
     fetchPrismData();
+    // Fetch initial buffer size
+    getBufferSize().then(size => setBufferSizeState(size)).catch(console.error);
     const interval = setInterval(fetchPrismData, 2000);
     return () => clearInterval(interval);
   }, []);
+
+  // Handle buffer size change
+  const handleBufferSizeChange = async (size: number) => {
+    try {
+      await setBufferSize(size);
+      setBufferSizeState(size);
+    } catch (error) {
+      console.error('Failed to set buffer size:', error);
+    }
+  };
 
   // High-frequency level meter polling (~30fps)
   useEffect(() => {
@@ -1037,7 +1055,10 @@ export default function App() {
             PRISM ENGINE ACTIVE
           </div>
         </div>
-        <button className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors">
+        <button 
+          onClick={() => setShowSettings(true)}
+          className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
+        >
           <Settings className="w-5 h-5" />
         </button>
       </header>
@@ -1924,6 +1945,82 @@ export default function App() {
               : outputTargets.find(t => t.id === libraryDrag.id)?.name
             }
           </span>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setShowSettings(false)}
+        >
+          <div 
+            className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-6 w-96"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Settings className="w-5 h-5 text-cyan-400" />
+                Settings
+              </h2>
+              <button 
+                onClick={() => setShowSettings(false)}
+                className="text-slate-400 hover:text-white transition-colors p-1 hover:bg-slate-800 rounded"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {/* Buffer Size Setting */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Buffer Size
+                </label>
+                <select
+                  value={bufferSize}
+                  onChange={e => handleBufferSizeChange(Number(e.target.value))}
+                  className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-cyan-500 focus:outline-none"
+                >
+                  <option value={64}>64 samples (~1.3ms @ 48kHz)</option>
+                  <option value={128}>128 samples (~2.7ms @ 48kHz)</option>
+                  <option value={256}>256 samples (~5.3ms @ 48kHz)</option>
+                  <option value={512}>512 samples (~10.7ms @ 48kHz)</option>
+                  <option value={1024}>1024 samples (~21.3ms @ 48kHz)</option>
+                  <option value={2048}>2048 samples (~42.7ms @ 48kHz)</option>
+                  <option value={4096}>4096 samples (~85.3ms @ 48kHz)</option>
+                </select>
+                <p className="mt-2 text-xs text-slate-500">
+                  Lower values reduce latency but require more CPU. Audio engine will restart automatically.
+                </p>
+              </div>
+
+              {/* Driver Status Info */}
+              {driverStatus && (
+                <div className="pt-4 border-t border-slate-700">
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Prism Driver Status
+                  </label>
+                  <div className="bg-slate-800 rounded-lg p-3 space-y-1 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Connection</span>
+                      <span className={driverStatus.connected ? 'text-green-400' : 'text-red-400'}>
+                        {driverStatus.connected ? 'Connected' : 'Disconnected'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Sample Rate</span>
+                      <span className="text-white">{driverStatus.sample_rate} Hz</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Driver Buffer</span>
+                      <span className="text-white">{driverStatus.buffer_size} samples</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
