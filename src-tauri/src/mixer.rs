@@ -118,11 +118,17 @@ impl MixerState {
         }
     }
 
-    /// Set output master fader
-    pub fn set_output_fader(&self, device_id: &str, level: f32) {
+    /// Set output master fader (dB value: -inf to +6)
+    pub fn set_output_fader(&self, device_id: &str, db: f32) {
+        // Convert dB to linear gain
+        let gain = if db <= -100.0 {
+            0.0
+        } else {
+            10.0_f32.powf(db / 20.0).clamp(0.0, 2.0) // +6dB = ~2.0 linear
+        };
         self.output_faders
             .write()
-            .insert(device_id.to_string(), (level / 100.0).clamp(0.0, 1.0));
+            .insert(device_id.to_string(), gain);
     }
 
     /// Get all sends
@@ -183,7 +189,7 @@ impl MixBuffer {
 }
 
 /// Process audio mixing for one buffer
-/// 
+///
 /// This is called from the audio callback and performs the actual mixing
 /// using Accelerate vDSP for hardware acceleration.
 pub fn process_mix(
@@ -221,7 +227,7 @@ pub fn process_mix(
         // Get source channels (stereo pair)
         let left_ch = send.source_offset as usize;
         let right_ch = left_ch + 1;
-        
+
         if left_ch >= PRISM_CHANNELS || right_ch >= PRISM_CHANNELS {
             continue;
         }

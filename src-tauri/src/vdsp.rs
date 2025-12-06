@@ -11,6 +11,17 @@ pub type vDSP_Length = usize;
 
 #[link(name = "Accelerate", kind = "framework")]
 extern "C" {
+    // Vector clip: clips values to [low, high] range
+    pub fn vDSP_vclip(
+        a: *const f32,
+        stride_a: vDSP_Stride,
+        low: *const f32,
+        high: *const f32,
+        c: *mut f32,
+        stride_c: vDSP_Stride,
+        n: vDSP_Length,
+    );
+
     // Vector addition: C = A + B
     pub fn vDSP_vadd(
         a: *const f32,
@@ -123,6 +134,41 @@ extern "C" {
 pub struct VDsp;
 
 impl VDsp {
+    /// Mix input buffer into interleaved output with gain and stride
+    /// This is the DAW-style mixing: out[offset + i*stride] += input[i] * gain
+    /// Fully hardware-accelerated using vDSP_vsma
+    #[inline]
+    pub fn mix_to_interleaved(
+        input: &[f32],
+        gain: f32,
+        output: &mut [f32],
+        offset: usize,
+        stride: usize,
+        count: usize,
+    ) {
+        if count == 0 || offset >= output.len() {
+            return;
+        }
+        let actual_count = count.min((output.len() - offset) / stride + 1).min(input.len());
+        if actual_count == 0 {
+            return;
+        }
+        unsafe {
+            // vDSP_vsma: D = A * scalar + B
+            // With stride, this writes to every stride-th element
+            vDSP_vsma(
+                input.as_ptr(),
+                1, // input stride = 1 (contiguous)
+                &gain,
+                output.as_ptr().add(offset),
+                stride as i32, // read from output with stride
+                output.as_mut_ptr().add(offset),
+                stride as i32, // write to output with stride
+                actual_count,
+            );
+        }
+    }
+
     /// Mix two buffers with a gain factor: out = out + (input * gain)
     /// This is the core mixing operation for summing audio sources
     #[inline]
@@ -237,6 +283,26 @@ impl VDsp {
             0.0
         } else {
             10.0_f32.powf(db / 20.0)
+        }
+    }
+
+    /// Clip buffer values to [low, high] range - hardware accelerated
+    /// This is used for clip protection to prevent digital distortion
+    #[inline]
+    pub fn clip(buf: &mut [f32], low: f32, high: f32) {
+        if buf.is_empty() {
+            return;
+        }
+        unsafe {
+            vDSP_vclip(
+                buf.as_ptr(),
+                1,
+                &low,
+                &high,
+                buf.as_mut_ptr(),
+                1,
+                buf.len(),
+            );
         }
     }
 }

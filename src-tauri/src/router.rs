@@ -190,7 +190,7 @@ pub fn set_source_mute(pair_index: usize, muted: bool) {
     mixer_state.set_source_mute(pair_index, muted);
 }
 
-/// Set output master fader (0-100)
+/// Set output master fader (dB)
 pub fn set_output_fader(device_id: &str, level: f32) {
     let mixer_state = get_mixer_state();
     mixer_state.set_output_fader(device_id, level);

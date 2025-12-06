@@ -271,6 +271,8 @@ export default function App() {
   // dB input editing state
   const [editingDbNodeId, setEditingDbNodeId] = useState<string | null>(null);
   const [editingDbValue, setEditingDbValue] = useState<string>('');
+  const [editingMasterDb, setEditingMasterDb] = useState<boolean>(false);
+  const [editingMasterDbValue, setEditingMasterDbValue] = useState<string>('');
 
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -445,7 +447,7 @@ export default function App() {
           icon,
           color,
           x, y,
-          volume: 100,
+          volume: dbToFader(0), // 0dB = unity gain
           muted: false,
           channelCount: 2, // Always stereo pair
           channelOffset: channelData.channelOffset,
@@ -464,7 +466,7 @@ export default function App() {
       icon: targetData?.icon || Grid,
       color: targetData?.color || 'text-slate-400',
       x, y,
-      volume: 100,
+      volume: dbToFader(0), // 0dB = unity gain
       muted: false,
       channelCount: targetData?.channels || 2,
     };
@@ -481,6 +483,8 @@ export default function App() {
       setNodes([t1]);
       setConnections([]);
       setFocusedOutputId(t1.id);
+      // Initialize backend with 0dB
+      setOutputVolume(firstTarget.deviceId, 0);
     }
   }, [outputTargets, createNode]);
 
@@ -645,7 +649,14 @@ export default function App() {
         const newNode = createNode(id, nodeType, canvasX, canvasY);
         setNodes(prev => [...prev, newNode]);
 
-        if (nodeType === 'target') setFocusedOutputId(newNode.id);
+        if (nodeType === 'target') {
+          setFocusedOutputId(newNode.id);
+          // Initialize backend with 0dB for new output device
+          const targetData = outputTargets.find(t => t.id === id);
+          if (targetData) {
+            setOutputVolume(targetData.deviceId, 0);
+          }
+        }
       }
 
       setLibraryDrag(null);
@@ -1693,71 +1704,203 @@ export default function App() {
                    const pairIdx = channelOffset / 2;
                    const levelData = inputLevels[pairIdx];
                    if (levelData) {
-                     const sendGain = conn.sendLevel / 100;
+                     const sendGain = faderToDb(conn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(conn.sendLevel) / 20);
                      // Sum power (RMS^2) for proper mixing
-                     masterLeftRms += Math.pow(levelData.left_rms * sendGain, 2);
-                     masterRightRms += Math.pow(levelData.right_rms * sendGain, 2);
+                     masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
+                     masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
                    }
                  }
 
                  // Apply master volume and convert to dB for meter display
-                 const masterGain = focusedTarget.volume / 100;
+                 const masterDb = faderToDb(focusedTarget.volume);
+                 const masterGain = masterDb <= -100 ? 0 : Math.pow(10, masterDb / 20);
                  masterLeftRms = Math.sqrt(masterLeftRms) * masterGain;
                  masterRightRms = Math.sqrt(masterRightRms) * masterGain;
 
-                 const rmsToMeterLevel = (rms: number): number => {
-                   if (rms <= 0) return 0;
-                   const db = 20 * Math.log10(rms);
-                   const clampedDb = Math.max(-60, Math.min(0, db));
-                   return ((clampedDb + 60) / 60) * 100;
+                 // Convert to dB for meter display
+                 const masterLeftDb = rmsToDb(masterLeftRms);
+                 const masterRightDb = rmsToDb(masterRightRms);
+
+                 // Helper to update master volume from dB
+                 const updateMasterFromDb = (db: number) => {
+                   const newLevel = dbToFader(db);
+                   updateMasterVolume(focusedTarget.id, newLevel);
+                   const targetData = outputTargets.find(t => t.id === focusedTarget.libraryId);
+                   if (targetData) {
+                     setOutputVolume(targetData.deviceId, db); // Pass dB value to backend
+                   }
                  };
 
-                 const masterLeftLevel = rmsToMeterLevel(masterLeftRms);
-                 const masterRightLevel = rmsToMeterLevel(masterRightRms);
-
                  return (
-                 <div className="w-16 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
+                 <div className="w-28 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
                     <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
-                    <div className="flex-1 w-full px-4 flex gap-1.5 justify-center relative">
-                        {/* Real Multi-channel Meter */}
-                        <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                            <div
-                              className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 transition-all duration-75"
-                              style={{ height: `${masterLeftLevel}%`, opacity: 0.9 }}
-                            ></div>
-                        </div>
-                        <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                            <div
-                              className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 transition-all duration-75"
-                              style={{ height: `${masterRightLevel}%`, opacity: 0.9 }}
-                            ></div>
-                        </div>
-                        {/* Fader */}
-                        <div className="absolute inset-0 w-full group/master">
-                            <input
-                                type="range" min="0" max="100" value={focusedTarget.volume}
-                                onChange={(e) => {
-                                  const vol = Number(e.target.value);
-                                  updateMasterVolume(focusedTarget.id, vol);
-                                  // Also update backend
-                                  const targetData = outputTargets.find(t => t.id === focusedTarget.libraryId);
-                                  if (targetData) {
-                                    setOutputVolume(targetData.deviceId, vol);
-                                  }
-                                }}
-                                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20 appearance-slider-vertical"
-                            />
-                            <div
-                                className="absolute left-1/2 -translate-x-1/2 w-8 h-4 bg-slate-700 border border-slate-500 rounded shadow-lg pointer-events-none z-10 flex items-center justify-center"
-                                style={{ bottom: `calc(${focusedTarget.volume}% - 8px)` }}
-                            >
-                                <div className="w-4 h-0.5 bg-white"></div>
+                    <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
+                        {/* Fader with scale on left */}
+                        <div className="relative mr-2">
+                          {/* Left: Fader Scale (+6dB = top) - matches Logic Pro X */}
+                          <div className="absolute -left-7 top-0 bottom-0 w-7 flex flex-col text-[7px] text-slate-400 font-mono select-none">
+                            {/* Scale tick marks and labels - clickable */}
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ top: '0', transform: 'translateY(-50%)' }} onClick={() => updateMasterFromDb(6)}>
+                              <span className="mr-0.5">+6</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
                             </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(3)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(3)}>
+                              <span className="mr-0.5">+3</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-cyan-400" style={{ bottom: `${dbToFader(0)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(0)}>
+                              <span className="mr-0.5 text-white font-bold">0</span>
+                              <div className="w-2.5 h-px bg-white"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-3)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-3)}>
+                              <span className="mr-0.5">-3</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-6)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-6)}>
+                              <span className="mr-0.5">-6</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-10)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-10)}>
+                              <span className="mr-0.5 text-[6px]">-10</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-15)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-15)}>
+                              <span className="mr-0.5 text-[6px]">-15</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-20)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-20)}>
+                              <span className="mr-0.5 text-[6px]">-20</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-30)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-30)}>
+                              <span className="mr-0.5 text-[6px]">-30</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-40)}%`, transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-40)}>
+                              <span className="mr-0.5 text-[6px]">-40</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                            <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: '0', transform: 'translateY(50%)' }} onClick={() => updateMasterFromDb(-100)}>
+                              <span className="mr-0.5">-∞</span>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                            </div>
+                          </div>
+                          <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
+                              <input
+                                  type="range" min="0" max="100" value={focusedTarget.volume}
+                                  onChange={(e) => {
+                                    const vol = Number(e.target.value);
+                                    updateMasterVolume(focusedTarget.id, vol);
+                                    const targetData = outputTargets.find(t => t.id === focusedTarget.libraryId);
+                                    if (targetData) {
+                                      setOutputVolume(targetData.deviceId, faderToDb(vol)); // Pass dB value to backend
+                                    }
+                                  }}
+                                  className="absolute inset-0 h-full w-6 -left-2 opacity-0 z-20 cursor-pointer appearance-slider-vertical"
+                              />
+                              <div className="absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10" style={{ bottom: `calc(${focusedTarget.volume}% - 5px)` }}></div>
+                          </div>
+                        </div>
+                        {/* Level Meters on right */}
+                        <div className="flex gap-0.5 relative">
+                          {/* Left meter */}
+                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                            <div
+                              className="absolute bottom-0 w-full transition-all duration-75"
+                              style={{
+                                height: `${Math.min(100, Math.max(0, dbToMeterPercent(masterLeftDb)))}%`,
+                                background: getMeterGradient(Math.min(100, dbToMeterPercent(masterLeftDb)), masterLeftDb),
+                              }}
+                            />
+                            {masterLeftDb > 0 && (
+                              <div className="absolute top-0 w-full h-1 bg-red-500" />
+                            )}
+                          </div>
+                          {/* Right meter */}
+                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                            <div
+                              className="absolute bottom-0 w-full transition-all duration-75"
+                              style={{
+                                height: `${Math.min(100, Math.max(0, dbToMeterPercent(masterRightDb)))}%`,
+                                background: getMeterGradient(Math.min(100, dbToMeterPercent(masterRightDb)), masterRightDb),
+                              }}
+                            />
+                            {masterRightDb > 0 && (
+                              <div className="absolute top-0 w-full h-1 bg-red-500" />
+                            )}
+                          </div>
+                          {/* Right: Meter Scale */}
+                          <div className="absolute -right-6 top-0 bottom-0 w-6 flex flex-col text-[7px] text-slate-400 font-mono pointer-events-none select-none">
+                            <div className="absolute left-0 flex items-center" style={{ top: '0', transform: 'translateY(-50%)' }}>
+                              <div className="w-2 h-px bg-red-400"></div>
+                              <span className="ml-0.5 text-red-400 font-bold">0</span>
+                            </div>
+                            <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(6)}%`, transform: 'translateY(50%)' }}>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                              <span className="ml-0.5">6</span>
+                            </div>
+                            <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(12)}%`, transform: 'translateY(50%)' }}>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                              <span className="ml-0.5 text-[6px]">12</span>
+                            </div>
+                            <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(24)}%`, transform: 'translateY(50%)' }}>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                              <span className="ml-0.5 text-[6px]">24</span>
+                            </div>
+                            <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(40)}%`, transform: 'translateY(50%)' }}>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                              <span className="ml-0.5 text-[6px]">40</span>
+                            </div>
+                            <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(60)}%`, transform: 'translateY(50%)' }}>
+                              <div className="w-1.5 h-px bg-slate-500"></div>
+                              <span className="ml-0.5 text-[6px]">60</span>
+                            </div>
+                          </div>
                         </div>
                     </div>
-                    <div className="text-[9px] font-mono font-bold text-slate-300 mt-2">
-                      {focusedTarget.volume === 100 ? '-0.0' : `-${((100 - focusedTarget.volume) / 10).toFixed(1)}`}
-                    </div>
+                    {/* dB readout - click to edit */}
+                    {editingMasterDb ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        className="w-12 text-[8px] font-mono text-center bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 mt-1 text-cyan-400 outline-none"
+                        value={editingMasterDbValue}
+                        onChange={(e) => setEditingMasterDbValue(e.target.value)}
+                        onBlur={() => {
+                          const trimmed = editingMasterDbValue.trim().toLowerCase();
+                          if (trimmed === '-inf' || trimmed === 'inf' || trimmed === '-∞' || trimmed === '∞') {
+                            updateMasterFromDb(-100);
+                          } else {
+                            const parsed = parseFloat(trimmed);
+                            if (!isNaN(parsed)) {
+                              const clampedDb = Math.max(-100, Math.min(6, parsed));
+                              updateMasterFromDb(clampedDb);
+                            }
+                          }
+                          setEditingMasterDb(false);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === 'Escape') {
+                            setEditingMasterDb(false);
+                          }
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <div
+                        className="text-[8px] font-mono text-slate-500 mt-1 cursor-pointer hover:text-cyan-400 hover:bg-slate-800 px-1 rounded"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const currentDb = faderToDb(focusedTarget.volume);
+                          setEditingMasterDbValue(currentDb <= -60 ? '-∞' : currentDb.toFixed(1));
+                          setEditingMasterDb(true);
+                        }}
+                      >
+                        {faderToDb(focusedTarget.volume) <= -60 ? '-∞' : `${faderToDb(focusedTarget.volume) >= 0 ? '+' : ''}${faderToDb(focusedTarget.volume).toFixed(1)}dB`}
+                      </div>
+                    )}
                  </div>
                  );
              })()}

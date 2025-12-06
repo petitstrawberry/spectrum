@@ -179,7 +179,7 @@ fn set_source_mute(pair_index: u32, muted: bool) {
     router::set_source_mute(pair_index as usize, muted);
 }
 
-/// Set output device master fader (0-100)
+/// Set output device master fader (dB value: -inf to +6)
 #[tauri::command]
 fn set_output_volume(device_id: String, level: f32) {
     router::set_output_fader(&device_id, level);
