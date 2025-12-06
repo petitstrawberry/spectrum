@@ -393,6 +393,37 @@ export default function App() {
   // --- Actions ---
 
   const deleteNode = (id: string) => {
+    // Find the node being deleted to determine its type
+    const nodeToDelete = nodes.find(n => n.id === id);
+    
+    // Remove all backend sends for connections involving this node
+    const connectionsToRemove = connections.filter(c => c.fromNodeId === id || c.toNodeId === id);
+    for (const conn of connectionsToRemove) {
+      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+      const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      if (sourceNode && targetNode) {
+        const channelOffset = sourceNode.channelOffset ?? 0;
+        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+        if (targetData) {
+          console.log('[deleteNode] Removing send:', channelOffset, targetData.deviceId, conn.toChannel);
+          removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
+        }
+      }
+    }
+    
+    // Also stop audio output if deleting a target node
+    if (nodeToDelete?.type === 'target') {
+      const targetData = outputTargets.find(t => t.id === nodeToDelete.libraryId);
+      if (targetData) {
+        const deviceIdNum = parseInt(targetData.deviceId);
+        if (!isNaN(deviceIdNum)) {
+          import('./lib/prismd').then(({ stopAudioOutput }) => {
+            stopAudioOutput(deviceIdNum);
+          });
+        }
+      }
+    }
+    
     setNodes(prev => prev.filter(n => n.id !== id));
     setConnections(prev => prev.filter(c => c.fromNodeId !== id && c.toNodeId !== id));
     if (selectedNodeId === id) setSelectedNodeId(null);
@@ -402,14 +433,18 @@ export default function App() {
   const deleteConnection = (id: string) => {
     // Find the connection to get source and target info for backend cleanup
     const conn = connections.find(c => c.id === id);
+    console.log('[deleteConnection] Deleting connection:', id, conn);
     if (conn) {
       const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
       const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      console.log('[deleteConnection] sourceNode:', sourceNode, 'targetNode:', targetNode);
       if (sourceNode && targetNode) {
         const channelOffset = sourceNode.channelOffset ?? 0;
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+        console.log('[deleteConnection] channelOffset:', channelOffset, 'targetData:', targetData, 'toChannel:', conn.toChannel);
         if (targetData) {
           // Remove from backend
+          console.log('[deleteConnection] Calling removeMixerSend:', channelOffset, targetData.deviceId, conn.toChannel);
           removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
         }
       }

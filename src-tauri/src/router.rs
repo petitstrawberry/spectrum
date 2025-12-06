@@ -130,8 +130,24 @@ pub fn update_send(
 
 /// Remove a send connection
 pub fn remove_send(source_offset: u32, target_device: &str, target_pair: u32) {
+    println!("[Router] remove_send called: source_offset={}, target_device={}, target_pair={}", 
+             source_offset, target_device, target_pair);
     let mixer_state = get_mixer_state();
+    
+    // Debug: print all current sends
+    let sends = mixer_state.sends.read();
+    println!("[Router] Current sends ({}):", sends.len());
+    for send in sends.iter() {
+        println!("  - source_offset={}, target_device={}, target_pair={}", 
+                 send.source_offset, send.target_device, send.target_pair);
+    }
+    drop(sends);
+    
     mixer_state.remove_send(source_offset, target_device, target_pair);
+    
+    // Debug: print sends after removal
+    let sends_after = mixer_state.sends.read();
+    println!("[Router] Sends after removal ({}):", sends_after.len());
 }
 
 /// Set source fader level (0-100)
