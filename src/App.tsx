@@ -2514,22 +2514,100 @@ export default function App() {
              {/* 3. Master Fader (Right) */}
              {focusedTarget && (() => {
                  // Calculate master levels from connected sources
-                 const connectedSources = connections.filter(c => c.toNodeId === focusedTarget.id && c.toChannel === focusedPairIndex);
+                 // In stereo mode, need to consider both L and R channels
+                 const leftCh = focusedPairIndex * 2;
+                 const rightCh = focusedPairIndex * 2 + 1;
+                 const connectedSources = isStereoMode
+                   ? connections.filter(c => c.toNodeId === focusedTarget.id && (c.toChannel === leftCh || c.toChannel === rightCh))
+                   : connections.filter(c => c.toNodeId === focusedTarget.id && c.toChannel === focusedPairIndex);
                  let masterLeftRms = 0;
                  let masterRightRms = 0;
 
+                 // Track which connections we've processed to avoid double-counting stereo pairs
+                 const processedConnIds = new Set<string>();
+
                  for (const conn of connectedSources) {
                    if (conn.muted) continue;
+                   if (processedConnIds.has(conn.id)) continue;
+                   
                    const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
                    if (!sourceNode) continue;
-                   const channelOffset = sourceNode.channelOffset ?? 0;
-                   const pairIdx = channelOffset / 2;
-                   const levelData = inputLevels[pairIdx];
+                   
+                   // Determine level data based on source type
+                   let levelData: { left_rms: number; right_rms: number; left_peak: number; right_peak: number } | undefined;
+                   const isDeviceSource = sourceNode.sourceType === 'device';
+                   
+                   if (isDeviceSource && sourceNode.deviceId !== undefined) {
+                     // Device node: use deviceLevelsMap with conn.fromChannel to get the correct pair
+                     const deviceLevels = deviceLevelsMap.get(sourceNode.deviceId);
+                     const pairIdx = Math.floor(conn.fromChannel / 2);
+                     levelData = deviceLevels?.[pairIdx];
+                   } else {
+                     // Prism channel: use inputLevels
+                     const channelOffset = sourceNode.channelOffset ?? 0;
+                     const pairIdx = channelOffset / 2;
+                     levelData = inputLevels[pairIdx];
+                   }
+                   
                    if (levelData) {
                      const sendGain = faderToDb(conn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(conn.sendLevel) / 20);
-                     // Sum power (RMS^2) for proper mixing
-                     masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
-                     masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
+                     
+                     // In stereo mode, determine if this is L or R channel
+                     if (isStereoMode) {
+                       const isLeftChannel = conn.toChannel === leftCh;
+                       const isRightChannel = conn.toChannel === rightCh;
+                       
+                       // Check for stereo pair or mono-to-stereo
+                       const pairedConn = connectedSources.find(c => 
+                         c.fromNodeId === conn.fromNodeId && 
+                         c.id !== conn.id &&
+                         !processedConnIds.has(c.id)
+                       );
+                       
+                       if (pairedConn) {
+                         // Mark paired connection as processed
+                         processedConnIds.add(conn.id);
+                         processedConnIds.add(pairedConn.id);
+                         
+                         const pairedGain = faderToDb(pairedConn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(pairedConn.sendLevel) / 20);
+                         
+                         // Check if mono-to-stereo (same fromChannel) or true stereo pair
+                         const isMonoToStereo = conn.fromChannel === pairedConn.fromChannel;
+                         
+                         if (isMonoToStereo) {
+                           // Mono source to stereo output: use same level for both
+                           const monoLevel = levelData.left_peak; // Use left (mono) level
+                           if (isLeftChannel) {
+                             masterLeftRms += Math.pow(monoLevel * sendGain, 2);
+                             masterRightRms += Math.pow(monoLevel * pairedGain, 2);
+                           } else {
+                             masterLeftRms += Math.pow(monoLevel * pairedGain, 2);
+                             masterRightRms += Math.pow(monoLevel * sendGain, 2);
+                           }
+                         } else {
+                           // True stereo pair
+                           if (isLeftChannel) {
+                             masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
+                             masterRightRms += Math.pow(levelData.right_peak * pairedGain, 2);
+                           } else {
+                             masterLeftRms += Math.pow(levelData.left_peak * pairedGain, 2);
+                             masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
+                           }
+                         }
+                       } else {
+                         // Single channel (L only or R only)
+                         processedConnIds.add(conn.id);
+                         if (isLeftChannel) {
+                           masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
+                         } else if (isRightChannel) {
+                           masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
+                         }
+                       }
+                     } else {
+                       // Mono mode: sum both L and R
+                       masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
+                       masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
+                     }
                    }
                  }
 
