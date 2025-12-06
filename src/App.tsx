@@ -1145,8 +1145,12 @@ export default function App() {
       {/* HEADER */}
       <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-6">
-          <div className="font-black text-xl tracking-tighter bg-gradient-to-r from-cyan-400 to-fuchsia-500 bg-clip-text text-transparent flex items-center gap-2">
-            <Workflow className="w-6 h-6 text-cyan-400" /> Spectrum
+          <div className="flex items-center gap-2">
+            <Workflow className="w-6 h-6 text-cyan-400" />
+            <div>
+              <div className="font-black text-lg tracking-tighter bg-gradient-to-r from-cyan-400 to-fuchsia-500 bg-clip-text text-transparent leading-none">Spectrum</div>
+              <div className="text-[8px] text-slate-500 font-mono tracking-wider uppercase">Audio Mixer & Router</div>
+            </div>
           </div>
         </div>
         <button
