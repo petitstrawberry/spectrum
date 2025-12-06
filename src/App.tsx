@@ -1798,6 +1798,7 @@ export default function App() {
                     const currentCanvasX = (drawingWire.currentX - canvasTransform.x) / canvasTransform.scale;
                     const currentCanvasY = (drawingWire.currentY - canvasTransform.y) / canvasTransform.scale;
                     return (
+                      <>
                         <path
                             d={`M ${drawingWire.startX} ${drawingWire.startY} C ${drawingWire.startX + 50} ${drawingWire.startY}, ${currentCanvasX - 50} ${currentCanvasY}, ${currentCanvasX} ${currentCanvasY}`}
                             fill="none"
@@ -1805,6 +1806,15 @@ export default function App() {
                             strokeWidth="2"
                             strokeDasharray="4,4"
                         />
+                        {/* Stereo hint tooltip near cursor */}
+                        <g transform={`translate(${currentCanvasX + 12}, ${currentCanvasY - 8})`}>
+                          <rect x="0" y="-10" width="100" height="16" rx="3" fill="rgba(15, 23, 42, 0.9)" stroke="rgba(100, 116, 139, 0.5)" strokeWidth="1" />
+                          <text x="6" y="1" fontSize="9" fill="#94a3b8" fontFamily="ui-monospace, monospace">
+                            <tspan fill="#22d3ee" fontWeight="bold">⇧ Shift</tspan>
+                            <tspan fill="#64748b"> : Stereo</tspan>
+                          </text>
+                        </g>
+                      </>
                     );
                 })()}
               </g>
