@@ -152,6 +152,7 @@ fn db_to_linear(db: f32) -> f32 {
 
 /// Update a send connection (1ch unit)
 pub fn update_send(
+    source_device: u32,
     source_channel: u32,
     target_device: String,
     target_channel: u32,
@@ -164,6 +165,7 @@ pub fn update_send(
     let linear_gain = db_to_linear(db);
     
     mixer_state.set_send(crate::mixer::Send {
+        source_device,
         source_channel,
         target_device,
         target_channel,
@@ -173,9 +175,9 @@ pub fn update_send(
 }
 
 /// Remove a send connection (1ch unit)
-pub fn remove_send(source_channel: u32, target_device: &str, target_channel: u32) {
+pub fn remove_send(source_device: u32, source_channel: u32, target_device: &str, target_channel: u32) {
     let mixer_state = get_mixer_state();
-    mixer_state.remove_send(source_channel, target_device, target_channel);
+    mixer_state.remove_send(source_device, source_channel, target_device, target_channel);
 }
 
 /// Set source fader level (0-100)

@@ -173,6 +173,16 @@ function getColorForDeviceType(device: AudioDevice): string {
   }
 }
 
+// --- Helper: Get source device ID for a node ---
+// Prism channels use device ID 0, device inputs use their actual device ID
+function getSourceDeviceId(node: NodeData): number {
+  if (node.sourceType === 'device' && node.deviceId !== undefined) {
+    return node.deviceId;
+  }
+  // Prism channels use device ID 0
+  return 0;
+}
+
 // --- Helper: Get actual channel index for a port (0-based, 1ch per port) ---
 function getChannelIndexForPort(node: NodeData, portIndex: number): number {
   const baseOffset = node.channelOffset ?? 0;
@@ -823,10 +833,12 @@ export default function App() {
       const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
       const targetNode = nodes.find(n => n.id === conn.toNodeId);
       if (sourceNode && targetNode) {
-        const channelOffset = sourceNode.channelOffset ?? 0;
+        const srcDevId = getSourceDeviceId(sourceNode);
+        const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+        const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
-          removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
+          removeMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh).catch(console.error);
         }
       }
     }
@@ -878,12 +890,13 @@ export default function App() {
       if (sourceNode && targetNode) {
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
-          // Get actual channel index for source and target ports (1ch unit)
+          // Get source device ID and channel indices
+          const srcDevId = getSourceDeviceId(sourceNode);
           const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
           const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
 
           // Remove send from backend (1ch unit)
-          removeMixerSend(srcCh, targetData.deviceId, tgtCh).catch(console.error);
+          removeMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh).catch(console.error);
         }
       }
     }
@@ -909,9 +922,10 @@ export default function App() {
       if (sourceNode && targetNode) {
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
+          const srcDevId = getSourceDeviceId(sourceNode);
           const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
           const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
-          updateMixerSend(srcCh, targetData.deviceId, tgtCh, level, conn.muted);
+          updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, level, conn.muted);
         }
       }
     }
@@ -938,9 +952,10 @@ export default function App() {
       if (sourceNode && targetNode) {
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
+          const srcDevId = getSourceDeviceId(sourceNode);
           const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
           const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
-          updateMixerSend(srcCh, targetData.deviceId, tgtCh, conn.sendLevel, newMuted);
+          updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, conn.sendLevel, newMuted);
         }
       }
     }
@@ -1328,6 +1343,7 @@ export default function App() {
         if (exists) continue;
 
         // Get actual channel index for source and target ports (1ch unit)
+        const srcDevId = getSourceDeviceId(sourceNode);
         const srcCh = getChannelIndexForPort(sourceNode, srcPort);
         const tgtCh = getChannelIndexForPort(targetNode, tgtPort);
 
@@ -1343,10 +1359,10 @@ export default function App() {
           const defaultLevel = 80; // Default send level
 
           // Update mixer send (1ch unit)
-          updateMixerSend(srcCh, targetData.deviceId, tgtCh, defaultLevel, false);
+          updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, defaultLevel, false);
         }
 
-        console.log(`Route channel ${srcCh} → device ${targetData?.deviceId} ch ${tgtCh}${isStereoPair ? ' (stereo pair)' : ''}`);
+        console.log(`Route device ${srcDevId} channel ${srcCh} → device ${targetData?.deviceId} ch ${tgtCh}${isStereoPair ? ' (stereo pair)' : ''}`);
 
         newConnections.push({
           id: `c_${Date.now()}_${srcPort}_${tgtPort}`,
@@ -1386,6 +1402,7 @@ export default function App() {
     // Stereo link support
     linkedConnectionId?: string; // ID of the R channel connection if stereo linked
     isStereoLinked?: boolean;
+    isMonoToStereo?: boolean; // True if mono source is connected to both L and R
   };
 
   const mixerSources = useMemo((): MixerSource[] => {
@@ -1400,7 +1417,9 @@ export default function App() {
       const leftConns = connections.filter(c => c.toNodeId === focusedOutputId && c.toChannel === leftCh);
       const rightConns = connections.filter(c => c.toNodeId === focusedOutputId && c.toChannel === rightCh);
 
-      // Match L and R connections from the same source node (stereo pair: srcCh and srcCh+1)
+      // Match L and R connections from the same source node
+      // Case 1: Stereo source - srcCh (L) and srcCh+1 (R)
+      // Case 2: Mono source to stereo output - same srcCh to both L and R
       const sources: MixerSource[] = [];
       const usedRightConnIds = new Set<string>();
 
@@ -1408,22 +1427,36 @@ export default function App() {
         const node = nodes.find(n => n.id === lc.fromNodeId);
         if (!node) continue;
 
-        // Look for matching R connection: same source node, source channel + 1
-        const matchingRight = rightConns.find(rc =>
+        // First, look for stereo pair: same source node, source channel + 1
+        let matchingRight = rightConns.find(rc =>
           rc.fromNodeId === lc.fromNodeId &&
           rc.fromChannel === lc.fromChannel + 1 &&
           !usedRightConnIds.has(rc.id)
         );
+        let isMonoToStereo = false;
+
+        // If not found, look for mono-to-stereo: same source node, same source channel
+        if (!matchingRight) {
+          matchingRight = rightConns.find(rc =>
+            rc.fromNodeId === lc.fromNodeId &&
+            rc.fromChannel === lc.fromChannel &&
+            !usedRightConnIds.has(rc.id)
+          );
+          if (matchingRight) {
+            isMonoToStereo = true;
+          }
+        }
 
         if (matchingRight) {
           usedRightConnIds.add(matchingRight.id);
           sources.push({
             nodeId: lc.fromNodeId,
             node,
-            fromChannel: lc.fromChannel, // L channel
+            fromChannel: lc.fromChannel, // L channel (or mono channel)
             connectionId: lc.id,
             linkedConnectionId: matchingRight.id,
             isStereoLinked: true,
+            isMonoToStereo,
           });
         } else {
           // No matching R, show as mono on L side
@@ -2040,7 +2073,7 @@ export default function App() {
 
           <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
             {mixerSources.map(ms => {
-                const { node, fromChannel, connectionId, linkedConnectionId, isStereoLinked } = ms;
+                const { node, fromChannel, connectionId, linkedConnectionId, isStereoLinked, isMonoToStereo } = ms;
                 const conn = connections.find(c => c.id === connectionId);
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
@@ -2052,22 +2085,23 @@ export default function App() {
                 const channelData = !isDeviceNode ? channelSources.find(c => c.id === node.libraryId) : null;
 
                 // Dynamic display based on node type and source channel
-                // For stereo linked, show both channels
+                // For stereo linked (true stereo pair), show both channels like "1-2"
+                // For mono-to-stereo, show single channel like "1" (mono source to stereo output)
                 const sourcePortLabel = isStereoLinked
-                  ? `${fromChannel + 1}-${fromChannel + 2}`
+                  ? (isMonoToStereo ? `${fromChannel + 1}` : `${fromChannel + 1}-${fromChannel + 2}`)
                   : getPortLabel(node, fromChannel);
                 const sourceIsMono = !isStereoLinked && isPortMono(node, fromChannel);
                 // For Prism: channelData.channelLabel is stereo pair label like "7-8"
                 // In mono mode, show individual channel based on fromChannel (0=L, 1=R of pair)
-                // In stereo linked mode, show the full pair label
+                // In stereo linked mode, show the full pair label (or single for mono-to-stereo)
                 let prismChLabel = '';
                 if (channelData) {
                   const baseChannel = channelData.channelOffset; // e.g., 6 for ch7-8
-                  if (isStereoLinked) {
+                  if (isStereoLinked && !isMonoToStereo) {
                     // Stereo: show pair like "7-8"
                     prismChLabel = `${baseChannel + 1}-${baseChannel + 2}`;
                   } else {
-                    // Mono: show individual channel like "7" or "8"
+                    // Mono or mono-to-stereo: show individual channel like "7" or "8"
                     const actualChannel = baseChannel + fromChannel + 1;
                     prismChLabel = `${actualChannel}`;
                   }
@@ -2103,15 +2137,23 @@ export default function App() {
                   const deviceId = node.deviceId;
                   const deviceLevels = deviceId !== undefined ? deviceLevelsMap.get(deviceId) : undefined;
                   if (isStereoLinked) {
-                    // Stereo linked: L from fromChannel, R from fromChannel+1
-                    const leftLevelData = deviceLevels?.[fromChannel];
-                    const rightLevelData = deviceLevels?.[fromChannel + 1];
-                    leftDb = leftLevelData ? rmsToDb(leftLevelData.left_peak) : -60;
-                    rightDb = rightLevelData ? rmsToDb(rightLevelData.left_peak) : -60; // Use left_peak of R channel
+                    if (isMonoToStereo) {
+                      // Mono source to stereo output: use same channel level for both L and R
+                      const levelData = deviceLevels?.[Math.floor(fromChannel / 2)];
+                      leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
+                      rightDb = leftDb; // Same level for both (mono source)
+                    } else {
+                      // True stereo linked: L from fromChannel, R from fromChannel+1
+                      const leftLevelData = deviceLevels?.[Math.floor(fromChannel / 2)];
+                      const rightLevelData = deviceLevels?.[Math.floor((fromChannel + 1) / 2)];
+                      leftDb = leftLevelData ? rmsToDb(leftLevelData.left_peak) : -60;
+                      rightDb = rightLevelData ? rmsToDb(rightLevelData.right_peak) : -60;
+                    }
                   } else {
-                    const levelData = deviceLevels?.[fromChannel];
-                    leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
-                    rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
+                    const levelData = deviceLevels?.[Math.floor(fromChannel / 2)];
+                    const isRightCh = fromChannel % 2 === 1;
+                    leftDb = levelData ? rmsToDb(isRightCh ? levelData.right_peak : levelData.left_peak) : -60;
+                    rightDb = leftDb; // Mono display
                   }
                 } else {
                   const channelOffset = node.channelOffset ?? 0;

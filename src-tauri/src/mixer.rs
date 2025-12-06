@@ -17,6 +17,8 @@ pub const MAX_OUTPUT_PAIRS: usize = 32;
 /// A send connection from a source channel to an output device channel (1ch unit)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Send {
+    /// Source device ID (0 = Prism, other = input device ID)
+    pub source_device: u32,
     /// Source channel index (0-63 for Prism, or device channel index)
     pub source_channel: u32,
     /// Target output device ID
@@ -81,29 +83,31 @@ impl MixerState {
     /// Add or update a send (1ch unit)
     pub fn set_send(&self, send: Send) {
         let mut sends = self.sends.write();
-        // Find existing send with same source/target channel
+        // Find existing send with same source device/channel and target device/channel
         if let Some(existing) = sends.iter_mut().find(|s| {
-            s.source_channel == send.source_channel
+            s.source_device == send.source_device
+                && s.source_channel == send.source_channel
                 && s.target_device == send.target_device
                 && s.target_channel == send.target_channel
         }) {
-            println!("[Mixer] Updated send: src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
-                send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
+            println!("[Mixer] Updated send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
             existing.level = send.level;
             existing.muted = send.muted;
         } else {
-            println!("[Mixer] New send: src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
-                send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
+            println!("[Mixer] New send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
             sends.push(send);
         }
         println!("[Mixer] Total sends: {}", sends.len());
     }
 
     /// Remove a send (1ch unit)
-    pub fn remove_send(&self, source_channel: u32, target_device: &str, target_channel: u32) {
+    pub fn remove_send(&self, source_device: u32, source_channel: u32, target_device: &str, target_channel: u32) {
         let mut sends = self.sends.write();
         sends.retain(|s| {
-            !(s.source_channel == source_channel
+            !(s.source_device == source_device
+                && s.source_channel == source_channel
                 && s.target_device == target_device
                 && s.target_channel == target_channel)
         });

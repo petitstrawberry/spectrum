@@ -80,7 +80,8 @@ struct InputDeviceState {
 
 impl InputDeviceState {
     fn new(device_id: u32, device_name: String, channel_count: usize, is_prism: bool) -> Self {
-        let stereo_pairs = channel_count / 2;
+        // Level slots: (channel_count + 1) / 2 to handle odd channel counts (e.g., 1ch mono)
+        let level_slots = (channel_count + 1) / 2;
         Self {
             device_id,
             device_name,
@@ -88,7 +89,7 @@ impl InputDeviceState {
             is_prism,
             running: Arc::new(AtomicBool::new(false)),
             buffers: Arc::new(RwLock::new(DeviceBuffers::new(channel_count))),
-            levels: Arc::new(RwLock::new(vec![ChannelLevels::default(); stereo_pairs.max(1)])),
+            levels: Arc::new(RwLock::new(vec![ChannelLevels::default(); level_slots.max(1)])),
             read_positions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -932,7 +933,8 @@ fn generic_capture_thread(state: Arc<InputDeviceState>) {
 
         let frames = num_frames as usize;
         let num_channels = channel_count;
-        let stereo_pairs = num_channels / 2;
+        // Calculate number of level slots: for stereo pairs, plus one more if odd channel count
+        let level_slots = (num_channels + 1) / 2;
 
         if buffer.len() < frames * num_channels {
             return Ok(());
@@ -950,39 +952,42 @@ fn generic_capture_thread(state: Arc<InputDeviceState>) {
             }
         }
 
-        // Calculate levels for each stereo pair
+        // Calculate levels for each channel (or stereo pair)
+        // For odd channel counts (e.g., 1ch mono), we still compute levels using left_rms/left_peak
         if let Some(mut device_levels) = levels.try_write() {
-            for pair in 0..stereo_pairs.min(device_levels.len()) {
-                let left_ch = pair * 2;
-                let right_ch = pair * 2 + 1;
+            for slot in 0..level_slots.min(device_levels.len()) {
+                let left_ch = slot * 2;
+                let right_ch = slot * 2 + 1;
 
                 let mut left_data: Vec<f32> = Vec::with_capacity(frames);
                 let mut right_data: Vec<f32> = Vec::with_capacity(frames);
 
                 for frame in 0..frames {
                     let base = frame * num_channels;
-                    if base + right_ch < buffer.len() {
+                    // Left channel (always exists for this slot)
+                    if left_ch < num_channels {
                         left_data.push(buffer[base + left_ch]);
+                    }
+                    // Right channel (may not exist for mono devices)
+                    if right_ch < num_channels {
                         right_data.push(buffer[base + right_ch]);
                     }
                 }
 
-                if !left_data.is_empty() && !right_data.is_empty() {
-                    let left_rms = VDsp::rms(&left_data);
-                    let right_rms = VDsp::rms(&right_data);
-                    let left_peak = VDsp::peak(&left_data);
-                    let right_peak = VDsp::peak(&right_data);
+                let left_rms = if !left_data.is_empty() { VDsp::rms(&left_data) } else { 0.0 };
+                let left_peak = if !left_data.is_empty() { VDsp::peak(&left_data) } else { 0.0 };
+                let right_rms = if !right_data.is_empty() { VDsp::rms(&right_data) } else { left_rms };
+                let right_peak = if !right_data.is_empty() { VDsp::peak(&right_data) } else { left_peak };
 
-                    let old = device_levels[pair];
-                    let smooth = 0.3;
+                let old = device_levels[slot];
+                let smooth = 0.3;
 
-                    device_levels[pair] = ChannelLevels {
-                        left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
-                        right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
-                        left_peak: left_peak.max(old.left_peak * 0.95),
-                        right_peak: right_peak.max(old.right_peak * 0.95),
-                    };
-                }
+                device_levels[slot] = ChannelLevels {
+                    left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
+                    right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
+                    left_peak: left_peak.max(old.left_peak * 0.95),
+                    right_peak: right_peak.max(old.right_peak * 0.95),
+                };
             }
 
             // Also update legacy Prism levels if this is the Prism device
@@ -1232,7 +1237,8 @@ pub fn read_input_audio(
         None => return 0,
     };
 
-    if left_ch >= buffers.channels.len() || right_ch >= buffers.channels.len() {
+    // Check if at least the left channel exists
+    if left_ch >= buffers.channels.len() {
         return 0;
     }
 
@@ -1260,11 +1266,16 @@ pub fn read_input_audio(
         device_positions[left_ch] = new_left_pos;
     }
 
-    // Read from right channel
-    let right_read_pos = device_positions.get(right_ch).copied().unwrap_or(0);
-    let new_right_pos = buffers.channels[right_ch].read(right_read_pos, right_out);
-    if right_ch < device_positions.len() {
-        device_positions[right_ch] = new_right_pos;
+    // Read from right channel, or copy left to right if device is mono
+    if right_ch < buffers.channels.len() {
+        let right_read_pos = device_positions.get(right_ch).copied().unwrap_or(0);
+        let new_right_pos = buffers.channels[right_ch].read(right_read_pos, right_out);
+        if right_ch < device_positions.len() {
+            device_positions[right_ch] = new_right_pos;
+        }
+    } else {
+        // Mono device: copy left channel to right
+        right_out[..num_frames].copy_from_slice(&left_out[..num_frames]);
     }
 
     num_frames

@@ -230,8 +230,8 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         
         // Cache for read audio pairs to avoid reading the same pair multiple times
         // This is important because read_channel_audio advances the read position
-        // Key: pair_idx, Value: (left_data, right_data, read_count)
-        let mut pair_cache: std::collections::HashMap<usize, ([f32; MAX_FRAMES], [f32; MAX_FRAMES], usize)> = 
+        // Key: (source_device, pair_idx), Value: (left_data, right_data, read_count)
+        let mut pair_cache: std::collections::HashMap<(u32, usize), ([f32; MAX_FRAMES], [f32; MAX_FRAMES], usize)> = 
             std::collections::HashMap::new();
 
         // Mix audio from sends targeting this device (1ch unit)
@@ -245,7 +245,8 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 continue;
             }
 
-            // Get source channel (1ch unit)
+            // Get source device and channel (1ch unit)
+            let source_dev = send.source_device;
             let source_ch = send.source_channel as usize;
 
             // Get target channel (1ch unit)
@@ -256,22 +257,44 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 continue;
             }
 
-            // Read audio data from broadcast buffer for single channel
-            // We read as L channel of a "pair" where the pair is source_ch/2
+            // For Prism (source_dev == 0): source_ch includes channelOffset (e.g., ch 6, 7 for pair 3)
+            // For real input devices: source_ch is the direct channel index (0, 1, 2, ...)
+            
+            // Calculate pair index and whether it's the right channel
             let pair_idx = source_ch / 2;
             let is_right = source_ch % 2 == 1;
             
-            // Get or read the pair data (only read once per pair)
-            let (left_temp, right_temp, read_count) = pair_cache.entry(pair_idx).or_insert_with(|| {
+            // Get or read the pair data (only read once per source device + pair)
+            let cache_key = (source_dev, pair_idx);
+            let (left_temp, right_temp, read_count) = pair_cache.entry(cache_key).or_insert_with(|| {
                 let mut left = [0.0f32; MAX_FRAMES];
                 let mut right = [0.0f32; MAX_FRAMES];
-                let count = crate::audio_capture::read_channel_audio(
-                    dev_id_for_callback,
-                    pair_idx * 2,
-                    pair_idx * 2 + 1,
-                    &mut left[..frames],
-                    &mut right[..frames],
-                );
+                
+                // Use different read function based on source device
+                // source_dev == 0 means Prism (virtual device), otherwise it's a real input device
+                let count = if source_dev == 0 {
+                    // Prism: read from broadcast buffer using pair channels
+                    crate::audio_capture::read_channel_audio(
+                        dev_id_for_callback,  // Output device ID for position tracking
+                        pair_idx * 2,
+                        pair_idx * 2 + 1,
+                        &mut left[..frames],
+                        &mut right[..frames],
+                    )
+                } else {
+                    // Real input device: read using device's local channel indices
+                    // For a stereo pair at pair_idx, channels are pair_idx*2 and pair_idx*2+1
+                    let left_ch = pair_idx * 2;
+                    let right_ch = pair_idx * 2 + 1;
+                    crate::audio_capture::read_input_audio(
+                        source_dev,           // Input device ID
+                        dev_id_for_callback,  // Output device ID for position tracking
+                        left_ch,
+                        right_ch,
+                        &mut left[..frames],
+                        &mut right[..frames],
+                    )
+                };
                 (left, right, count)
             });
 
