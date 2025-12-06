@@ -268,6 +268,10 @@ export default function App() {
   // Real-time level meters (32 stereo pairs)
   const [inputLevels, setInputLevels] = useState<LevelData[]>([]);
 
+  // dB input editing state
+  const [editingDbNodeId, setEditingDbNodeId] = useState<string | null>(null);
+  const [editingDbValue, setEditingDbValue] = useState<string>('');
+
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -1548,14 +1552,15 @@ export default function App() {
                     </div>
                     </div>
                     {/* dB readout - shows fader position in dB, click to edit */}
-                    <div 
-                      className="text-[8px] font-mono text-slate-500 mt-1 cursor-pointer hover:text-cyan-400 hover:bg-slate-800 px-1 rounded"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const currentDb = faderToDb(level);
-                        const input = prompt('Enter dB value (e.g., 0, -6, -12):', currentDb <= -60 ? '-inf' : currentDb.toFixed(1));
-                        if (input !== null) {
-                          const trimmed = input.trim().toLowerCase();
+                    {editingDbNodeId === node.id ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        className="w-12 text-[8px] font-mono text-center bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 mt-1 text-cyan-400 outline-none"
+                        value={editingDbValue}
+                        onChange={(e) => setEditingDbValue(e.target.value)}
+                        onBlur={() => {
+                          const trimmed = editingDbValue.trim().toLowerCase();
                           if (trimmed === '-inf' || trimmed === 'inf' || trimmed === '-∞' || trimmed === '∞') {
                             updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, 0);
                           } else {
@@ -1565,11 +1570,30 @@ export default function App() {
                               updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(clampedDb));
                             }
                           }
-                        }
-                      }}
-                    >
-                      {isMuted ? 'MUTE' : faderToDb(level) <= -60 ? '-∞' : `${faderToDb(level) >= 0 ? '+' : ''}${faderToDb(level).toFixed(1)}dB`}
-                    </div>
+                          setEditingDbNodeId(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === 'Escape') {
+                            setEditingDbNodeId(null);
+                          }
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <div
+                        className="text-[8px] font-mono text-slate-500 mt-1 cursor-pointer hover:text-cyan-400 hover:bg-slate-800 px-1 rounded"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const currentDb = faderToDb(level);
+                          setEditingDbValue(currentDb <= -60 ? '-∞' : currentDb.toFixed(1));
+                          setEditingDbNodeId(node.id);
+                        }}
+                      >
+                        {isMuted ? 'MUTE' : faderToDb(level) <= -60 ? '-∞' : `${faderToDb(level) >= 0 ? '+' : ''}${faderToDb(level).toFixed(1)}dB`}
+                      </div>
+                    )}
                     <div className="flex gap-1 mt-1 w-full px-1">
                     <button onClick={() => toggleConnectionMute(node.id, focusedOutputId!, focusedPairIndex)} className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'}`}>M</button>
                     </div>
