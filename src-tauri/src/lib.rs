@@ -211,6 +211,92 @@ fn is_audio_capture_running() -> bool {
     audio_capture::is_capture_running()
 }
 
+// --- Generic Input Device Capture Commands ---
+
+/// Input device info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputDeviceInfo {
+    pub device_id: u32,
+    pub name: String,
+    pub channels: u32,
+    pub is_prism: bool,
+}
+
+/// Active capture info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveCaptureInfo {
+    pub device_id: u32,
+    pub name: String,
+    pub channel_count: usize,
+    pub is_prism: bool,
+}
+
+/// Get list of available input devices
+#[tauri::command]
+fn get_input_devices() -> Vec<InputDeviceInfo> {
+    audio_capture::get_input_devices()
+        .into_iter()
+        .map(|(id, name, channels, is_prism)| InputDeviceInfo {
+            device_id: id,
+            name,
+            channels,
+            is_prism,
+        })
+        .collect()
+}
+
+/// Start capture from a specific input device
+#[tauri::command]
+fn start_input_capture(device_id: u32) -> Result<bool, String> {
+    audio_capture::start_input_capture(device_id)
+}
+
+/// Stop capture from a specific input device
+#[tauri::command]
+fn stop_input_capture(device_id: u32) {
+    audio_capture::stop_input_capture(device_id);
+}
+
+/// Stop all input captures
+#[tauri::command]
+fn stop_all_input_captures() {
+    audio_capture::stop_all_captures();
+}
+
+/// Get list of active input captures
+#[tauri::command]
+fn get_active_input_captures() -> Vec<ActiveCaptureInfo> {
+    audio_capture::get_active_captures()
+        .into_iter()
+        .map(|(device_id, name, channel_count, is_prism)| ActiveCaptureInfo {
+            device_id,
+            name,
+            channel_count,
+            is_prism,
+        })
+        .collect()
+}
+
+/// Check if a specific input device is being captured
+#[tauri::command]
+fn is_input_device_capturing(device_id: u32) -> bool {
+    audio_capture::is_device_capturing(device_id)
+}
+
+/// Get levels for a specific input device
+#[tauri::command]
+fn get_input_device_levels(device_id: u32) -> Vec<LevelData> {
+    audio_capture::get_input_device_levels(device_id)
+        .into_iter()
+        .map(|l| LevelData {
+            left_rms: l.left_rms,
+            right_rms: l.right_rms,
+            left_peak: l.left_peak,
+            right_peak: l.right_peak,
+        })
+        .collect()
+}
+
 /// Start audio output to a device
 #[tauri::command]
 fn start_audio_output(device_id: u32) -> Result<(), String> {
@@ -253,14 +339,14 @@ async fn set_buffer_size(size: usize) -> Result<(), String> {
     if !size.is_power_of_two() {
         return Err("Buffer size must be a power of 2".to_string());
     }
-    
+
     // Save to config file (will be loaded on next start)
     config::save_io_buffer_size(size)?;
-    
+
     // Set for current session (though restart is required)
     audio_capture::set_io_buffer_size(size);
-    
-    println!("[Spectrum] I/O buffer size set to {} samples ({:.1}ms) - will apply on restart", 
+
+    println!("[Spectrum] I/O buffer size set to {} samples ({:.1}ms) - will apply on restart",
              size, size as f64 / 48.0);
     Ok(())
 }
@@ -361,7 +447,7 @@ pub fn run() {
             let saved_buffer_size = config::get_saved_io_buffer_size();
             audio_capture::set_io_buffer_size(saved_buffer_size);
             println!("[Spectrum] Loaded I/O buffer size from config: {} samples", saved_buffer_size);
-            
+
             // Try to start audio capture on app launch
             match audio_capture::start_capture() {
                 Ok(true) => {
@@ -400,10 +486,18 @@ pub fn run() {
             set_source_mute,
             set_output_volume,
             is_prism_available,
-            // Audio capture commands
+            // Audio capture commands (legacy Prism)
             start_audio_capture,
             stop_audio_capture,
             is_audio_capture_running,
+            // Generic input device capture commands
+            get_input_devices,
+            start_input_capture,
+            stop_input_capture,
+            stop_all_input_captures,
+            get_active_input_captures,
+            is_input_device_capturing,
+            get_input_device_levels,
             // Audio output commands
             start_audio_output,
             stop_audio_output,

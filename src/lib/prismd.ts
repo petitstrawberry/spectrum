@@ -309,6 +309,73 @@ export async function startDefaultOutput(): Promise<void> {
   return invoke('start_default_output');
 }
 
+// --- Generic Input Device Capture Types ---
+
+export interface InputDeviceInfo {
+  device_id: number;
+  name: string;
+  channels: number;
+  is_prism: boolean;
+}
+
+export interface ActiveCaptureInfo {
+  device_id: number;
+  name: string;
+  channel_count: number;
+  is_prism: boolean;
+}
+
+// --- Generic Input Device Capture API Functions ---
+
+/**
+ * Get list of available input devices
+ */
+export async function getInputDevices(): Promise<InputDeviceInfo[]> {
+  return invoke<InputDeviceInfo[]>('get_input_devices');
+}
+
+/**
+ * Start capture from a specific input device
+ */
+export async function startInputCapture(deviceId: number): Promise<boolean> {
+  return invoke<boolean>('start_input_capture', { deviceId });
+}
+
+/**
+ * Stop capture from a specific input device
+ */
+export async function stopInputCapture(deviceId: number): Promise<void> {
+  return invoke('stop_input_capture', { deviceId });
+}
+
+/**
+ * Stop all input captures
+ */
+export async function stopAllInputCaptures(): Promise<void> {
+  return invoke('stop_all_input_captures');
+}
+
+/**
+ * Get list of active input captures
+ */
+export async function getActiveInputCaptures(): Promise<ActiveCaptureInfo[]> {
+  return invoke<ActiveCaptureInfo[]>('get_active_input_captures');
+}
+
+/**
+ * Check if a specific input device is being captured
+ */
+export async function isInputDeviceCapturing(deviceId: number): Promise<boolean> {
+  return invoke<boolean>('is_input_device_capturing', { deviceId });
+}
+
+/**
+ * Get levels for a specific input device
+ */
+export async function getInputDeviceLevels(deviceId: number): Promise<LevelData[]> {
+  return invoke<LevelData[]>('get_input_device_levels', { deviceId });
+}
+
 /**
  * Get current buffer size setting
  */
