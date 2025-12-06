@@ -57,6 +57,9 @@ type NodeType = 'source' | 'target';
 // ソースノードの種類
 type SourceType = 'prism-channel' | 'device';
 
+// チャンネルモード
+type ChannelMode = 'mono' | 'stereo';
+
 interface NodeData {
   id: string;
   libraryId: string;
@@ -75,20 +78,44 @@ interface NodeData {
   sourceType?: SourceType;    // 'prism-channel' or 'device'
   deviceId?: number;          // CoreAudio device ID
   deviceName?: string;        // Device name for display
+  // Channel mode: mono (1ch ports) or stereo (2ch ports)
+  channelMode: ChannelMode;
 }
 
 interface Connection {
   id: string;
   fromNodeId: string;
-  fromChannel: number;
+  fromChannel: number;   // 1ch-based index (0 = ch1, 1 = ch2, 2 = ch3, ...)
   toNodeId: string;
-  toChannel: number;
+  toChannel: number;     // 1ch-based index (0 = ch1, 1 = ch2, 2 = ch3, ...)
   sendLevel: number;
   muted: boolean;
+  stereoLinked?: boolean; // If true, this connection is linked with the next channel
 }
 
 // --- Output Targets - will be populated from CoreAudio ---
 // Now dynamically generated from actual audio devices
+
+// --- Helper: Get port count for a node (always 1ch per port) ---
+function getPortCount(node: NodeData): number {
+  return node.channelCount;
+}
+
+// --- Helper: Get channel label for a port (1-based) ---
+// For Prism source nodes, show actual channel number (e.g., 7, 8)
+// For device nodes and target nodes, show relative port number (1, 2, ...)
+function getPortLabel(node: NodeData, portIndex: number): string {
+  // Prism source nodes have channelOffset indicating the actual channel
+  if (node.type === 'source' && node.sourceType !== 'device' && node.channelOffset !== undefined) {
+    return `${node.channelOffset + portIndex + 1}`;
+  }
+  return `${portIndex + 1}`;
+}
+
+// --- Helper: Check if a port is mono (always true - ports are always 1ch) ---
+function isPortMono(_node: NodeData, _portIndex: number): boolean {
+  return true;
+}
 
 // --- Helper: Get icon for input device ---
 function getIconForInputDevice(device: InputDeviceInfo): React.ComponentType<{ className?: string }> {
@@ -144,6 +171,12 @@ function getColorForDeviceType(device: AudioDevice): string {
     case 'external': return 'text-amber-400';
     default: return 'text-slate-400';
   }
+}
+
+// --- Helper: Get actual channel index for a port (0-based, 1ch per port) ---
+function getChannelIndexForPort(node: NodeData, portIndex: number): number {
+  const baseOffset = node.channelOffset ?? 0;
+  return baseOffset + portIndex;
 }
 
 // --- Helper: Get type label ---
@@ -328,6 +361,13 @@ export default function App() {
   const [editingMasterDb, setEditingMasterDb] = useState<boolean>(false);
   const [editingMasterDbValue, setEditingMasterDbValue] = useState<string>('');
 
+  // Context menu state for node right-click
+  const [contextMenu, setContextMenu] = useState<{
+    nodeId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
   // Settings modal state
   const [showSettings, setShowSettings] = useState(false);
   const [bufferSize, setBufferSizeState] = useState<number>(4096);
@@ -359,7 +399,7 @@ export default function App() {
       setAudioDevices(devices.filter(d => d.is_output));
       setInputDevices(inputs);
       setActiveCaptures(captures);
-      
+
       // Auto-select first active capture if none selected
       if (!selectedInputDeviceId && captures.length > 0) {
         setSelectedInputDeviceId(captures[0].device_id);
@@ -585,7 +625,7 @@ export default function App() {
   // Generate stereo channel pairs based on Prism (always uses Prism for channel sources)
   const channelSources = useMemo((): ChannelSource[] => {
     const channels: ChannelSource[] = [];
-    
+
     // Prism always has 64 channels (32 stereo pairs)
     const numPairs = 32;
 
@@ -662,6 +702,9 @@ export default function App() {
             getActiveInputCaptures().then(setActiveCaptures);
           }).catch(console.error);
 
+          // Default: mono for 1ch devices, stereo for 2+ch devices
+          const defaultMode: ChannelMode = device.channels === 1 ? 'mono' : 'stereo';
+
           return {
             id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             libraryId,
@@ -677,6 +720,7 @@ export default function App() {
             sourceType: 'device',
             deviceId: device.device_id,
             deviceName: device.name,
+            channelMode: defaultMode,
           };
         }
       }
@@ -706,24 +750,27 @@ export default function App() {
           channelCount: 2, // Always stereo pair
           channelOffset: channelData.channelOffset,
           sourceType: 'prism-channel',
+          channelMode: 'stereo', // Prism is always stereo pairs
         };
       }
     }
 
     // Target nodes
     const targetData = outputTargets.find(t => t.id === libraryId);
+    const targetChannels = targetData?.channels || 2;
     return {
       id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       libraryId,
       type,
       label: targetData?.name || 'Unknown',
-      subLabel: `${targetData?.channels}ch / ${targetData?.type}`,
+      subLabel: `${targetChannels}ch / ${targetData?.type}`,
       icon: targetData?.icon || Grid,
       color: targetData?.color || 'text-slate-400',
       x, y,
       volume: dbToFader(0), // 0dB = unity gain
       muted: false,
-      channelCount: targetData?.channels || 2,
+      channelCount: targetChannels,
+      channelMode: (targetChannels >= 2 && targetChannels % 2 === 0) ? 'stereo' : 'mono', // Stereo for even channels >= 2
     };
   }, [channelSources, outputTargets, inputDevices]);
 
@@ -743,7 +790,7 @@ export default function App() {
     }
   }, [outputTargets, createNode]);
 
-  const getPortPosition = useCallback((node: NodeData, pairIndex: number, isInput: boolean) => {
+  const getPortPosition = useCallback((node: NodeData, portIndex: number, isInput: boolean) => {
     const headerHeight = 36;
     const portHeight = 20;
     const portSpacing = 4;
@@ -751,7 +798,7 @@ export default function App() {
     const circleTop = 4; // top-[4px]
     const circleRadius = 6; // w-3 h-3 = 12px, radius = 6px
     const startY = node.y + headerHeight + paddingTop;
-    const y = startY + (pairIndex * (portHeight + portSpacing)) + circleTop + circleRadius + 2;
+    const y = startY + (portIndex * (portHeight + portSpacing)) + circleTop + circleRadius + 2;
     const x = isInput ? node.x : node.x + 180;
 
     // Apply drag offset if this node is being dragged
@@ -812,6 +859,16 @@ export default function App() {
     if (focusedOutputId === id) setFocusedOutputId(null);
   };
 
+  // Toggle channel mode for output nodes (stereo <-> mono)
+  const toggleChannelMode = (nodeId: string) => {
+    setNodes(prev => prev.map(n => {
+      if (n.id === nodeId && n.type === 'target') {
+        return { ...n, channelMode: n.channelMode === 'stereo' ? 'mono' : 'stereo' };
+      }
+      return n;
+    }));
+  };
+
   const deleteConnection = (id: string) => {
     // Find the connection to get source and target info for backend cleanup
     const conn = connections.find(c => c.id === id);
@@ -819,52 +876,71 @@ export default function App() {
       const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
       const targetNode = nodes.find(n => n.id === conn.toNodeId);
       if (sourceNode && targetNode) {
-        const channelOffset = sourceNode.channelOffset ?? 0;
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
-          // Remove from backend
-          removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
+          // Get actual channel index for source and target ports (1ch unit)
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+
+          // Remove send from backend (1ch unit)
+          removeMixerSend(srcCh, targetData.deviceId, tgtCh).catch(console.error);
         }
       }
     }
     setConnections(prev => prev.filter(c => c.id !== id));
   };
 
-  const updateSendLevel = (sourceId: string, targetId: string, pairIndex: number, level: number) => {
+  // Update send level by connection ID (supports stereo linked pairs)
+  const updateSendLevelByConnId = (connectionId: string, linkedConnectionId: string | undefined, level: number) => {
+    const connIds = linkedConnectionId ? [connectionId, linkedConnectionId] : [connectionId];
+
     setConnections(prev => prev.map(c => {
-      if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, sendLevel: level };
+      if (connIds.includes(c.id)) return { ...c, sendLevel: level };
       return c;
     }));
 
-    // Update backend
-    const sourceNode = nodes.find(n => n.id === sourceId);
-    const targetNode = nodes.find(n => n.id === targetId);
-    if (sourceNode && targetNode) {
-      const channelOffset = sourceNode.channelOffset ?? 0;
-      const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-      if (targetData) {
-        const conn = connections.find(c => c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex);
-        updateMixerSend(channelOffset, targetData.deviceId, pairIndex, level, conn?.muted ?? false);
+    // Update backend for all connections
+    for (const connId of connIds) {
+      const conn = connections.find(c => c.id === connId);
+      if (!conn) continue;
+
+      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+      const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      if (sourceNode && targetNode) {
+        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+        if (targetData) {
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+          updateMixerSend(srcCh, targetData.deviceId, tgtCh, level, conn.muted);
+        }
       }
     }
   };
 
-  const toggleConnectionMute = (sourceId: string, targetId: string, pairIndex: number) => {
+  // Toggle mute by connection ID (supports stereo linked pairs)
+  const toggleMuteByConnId = (connectionId: string, linkedConnectionId: string | undefined) => {
+    const connIds = linkedConnectionId ? [connectionId, linkedConnectionId] : [connectionId];
+    const currentConn = connections.find(c => c.id === connectionId);
+    const newMuted = currentConn ? !currentConn.muted : false;
+
     setConnections(prev => prev.map(c => {
-      if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, muted: !c.muted };
+      if (connIds.includes(c.id)) return { ...c, muted: newMuted };
       return c;
     }));
 
-    // Update backend
-    const sourceNode = nodes.find(n => n.id === sourceId);
-    const targetNode = nodes.find(n => n.id === targetId);
-    if (sourceNode && targetNode) {
-      const channelOffset = sourceNode.channelOffset ?? 0;
-      const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-      if (targetData) {
-        const conn = connections.find(c => c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex);
-        if (conn) {
-          updateMixerSend(channelOffset, targetData.deviceId, pairIndex, conn.sendLevel, !conn.muted);
+    // Update backend for all connections
+    for (const connId of connIds) {
+      const conn = connections.find(c => c.id === connId);
+      if (!conn) continue;
+
+      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+      const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      if (sourceNode && targetNode) {
+        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+        if (targetData) {
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+          updateMixerSend(srcCh, targetData.deviceId, tgtCh, conn.sendLevel, newMuted);
         }
       }
     }
@@ -1193,72 +1269,100 @@ export default function App() {
   const endWire = useCallback((e: React.MouseEvent, nodeId: string, channelIndex: number) => {
     e.stopPropagation();
     if (drawingWire) {
-      const exists = connections.some(c =>
-        c.fromNodeId === drawingWire.fromNode &&
-        c.fromChannel === drawingWire.fromCh &&
-        c.toNodeId === nodeId &&
-        c.toChannel === channelIndex
-      );
+      // Find the source node to get channel offset
+      const sourceNode = nodes.find(n => n.id === drawingWire.fromNode);
 
-      if (!exists && drawingWire.fromNode !== nodeId) {
-        // Find the source node to get channel offset
-        const sourceNode = nodes.find(n => n.id === drawingWire.fromNode);
+      // Check if target is Prism device - prevent Prism→Prism routing (causes feedback loop)
+      const targetNode = nodes.find(n => n.id === nodeId);
+      const targetData = targetNode ? outputTargets.find(t => t.id === targetNode.libraryId) : null;
+      const targetDeviceInfo = targetData ? audioDevices.find(d => d.id === targetData.deviceId) : null;
 
-        // Check if target is Prism device - prevent Prism→Prism routing (causes feedback loop)
-        const targetNode = nodes.find(n => n.id === nodeId);
-        const targetData = targetNode ? outputTargets.find(t => t.id === targetNode.libraryId) : null;
-        const targetDeviceInfo = targetData ? audioDevices.find(d => d.id === targetData.deviceId) : null;
+      if (targetDeviceInfo?.device_type === 'prism') {
+        console.warn('Cannot route to Prism device - would cause feedback loop');
+        setDrawingWire(null);
+        return;
+      }
 
-        if (targetDeviceInfo?.device_type === 'prism') {
-          console.warn('Cannot route to Prism device - would cause feedback loop');
-          setDrawingWire(null);
-          return;
+      if (!sourceNode || !targetNode || drawingWire.fromNode === nodeId) {
+        setDrawingWire(null);
+        return;
+      }
+
+      // Check if Shift is held for stereo pair connection (connect 2 channels at once)
+      const isStereoPair = e.shiftKey;
+      const srcPortCount = getPortCount(sourceNode);
+      const tgtPortCount = getPortCount(targetNode);
+
+      // Determine channels to connect
+      const channelsToConnect: { srcPort: number; tgtPort: number }[] = [];
+
+      if (isStereoPair) {
+        // Shift+drop: connect L+R pair (current channel and next channel)
+        // Make sure we're starting from an even index for proper L/R pairing
+        const srcBase = Math.floor(drawingWire.fromCh / 2) * 2;
+        const tgtBase = Math.floor(channelIndex / 2) * 2;
+
+        // Connect L (even) and R (odd) if both exist
+        if (srcBase < srcPortCount && tgtBase < tgtPortCount) {
+          channelsToConnect.push({ srcPort: srcBase, tgtPort: tgtBase }); // L→L
         }
+        if (srcBase + 1 < srcPortCount && tgtBase + 1 < tgtPortCount) {
+          channelsToConnect.push({ srcPort: srcBase + 1, tgtPort: tgtBase + 1 }); // R→R
+        }
+      } else {
+        // Normal: connect single channel
+        channelsToConnect.push({ srcPort: drawingWire.fromCh, tgtPort: channelIndex });
+      }
 
-        // Calculate channel offset based on target channel pair
-        // Each pair is 2 channels, so pair 0 = offset 0, pair 1 = offset 2, etc.
-        const targetChannelOffset = channelIndex * 2;
+      const newConnections: Connection[] = [];
 
-        // TODO: Implement channel-to-channel routing
-        // For now, log the routing attempt
-        if (sourceNode?.channelOffset !== undefined) {
-          console.log(`Route from channel ${sourceNode.channelOffset} to channel ${targetChannelOffset}`);
+      for (const { srcPort, tgtPort } of channelsToConnect) {
+        // Check if this connection already exists
+        const exists = connections.some(c =>
+          c.fromNodeId === drawingWire.fromNode &&
+          c.fromChannel === srcPort &&
+          c.toNodeId === nodeId &&
+          c.toChannel === tgtPort
+        );
 
-          // Start output to the target device and update mixer send
-          const targetNode = nodes.find(n => n.id === nodeId);
-          if (targetNode) {
-            const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-            if (targetData) {
-              // Start audio output to this device
-              const deviceIdNum = parseInt(targetData.deviceId);
-              if (!isNaN(deviceIdNum)) {
-                import('./lib/prismd').then(({ startAudioOutput }) => {
-                  startAudioOutput(deviceIdNum).catch(console.error);
-                });
-              }
+        if (exists) continue;
 
-              // Update mixer send
-              updateMixerSend(
-                sourceNode.channelOffset,
-                targetData.deviceId,
-                channelIndex,
-                80, // Default send level
-                false // Not muted
-              );
-            }
+        // Get actual channel index for source and target ports (1ch unit)
+        const srcCh = getChannelIndexForPort(sourceNode, srcPort);
+        const tgtCh = getChannelIndexForPort(targetNode, tgtPort);
+
+        // Start audio output to this device
+        if (targetData) {
+          const deviceIdNum = parseInt(targetData.deviceId);
+          if (!isNaN(deviceIdNum)) {
+            import('./lib/prismd').then(({ startAudioOutput }) => {
+              startAudioOutput(deviceIdNum).catch(console.error);
+            });
           }
+
+          const defaultLevel = 80; // Default send level
+
+          // Update mixer send (1ch unit)
+          updateMixerSend(srcCh, targetData.deviceId, tgtCh, defaultLevel, false);
         }
 
-        setConnections(prev => [...prev, {
-          id: `c_${Date.now()}`,
+        console.log(`Route channel ${srcCh} → device ${targetData?.deviceId} ch ${tgtCh}${isStereoPair ? ' (stereo pair)' : ''}`);
+
+        newConnections.push({
+          id: `c_${Date.now()}_${srcPort}_${tgtPort}`,
           fromNodeId: drawingWire.fromNode,
-          fromChannel: drawingWire.fromCh,
+          fromChannel: srcPort,
           toNodeId: nodeId,
-          toChannel: channelIndex,
+          toChannel: tgtPort,
           sendLevel: dbToFader(0), // 0dB = unity gain
           muted: false
-        }]);
+        });
       }
+
+      if (newConnections.length > 0) {
+        setConnections(prev => [...prev, ...newConnections]);
+      }
+
       setDrawingWire(null);
     }
   }, [drawingWire, connections, nodes, audioDevices, outputTargets]);
@@ -1266,42 +1370,109 @@ export default function App() {
   const activeTargets = nodes.filter(n => n.type === 'target');
   const focusedTarget = nodes.find(n => n.id === focusedOutputId);
 
-  // Calculate stereo pairs for focused target
-  const focusedTargetPairs = focusedTarget
-    ? Math.ceil(focusedTarget.channelCount / 2)
-    : 0;
+  // Calculate port count for focused target (based on channel mode)
+  const focusedTargetPorts = focusedTarget ? getPortCount(focusedTarget) : 0;
 
-  // Build mixer sources: each connection to the focused output pair becomes a mixer channel
+  // Check if focused target is in stereo mode
+  const isStereoMode = focusedTarget?.channelMode === 'stereo';
+
+  // Build mixer sources: each connection to the focused output port becomes a mixer channel
   // For device nodes, this allows per-channel-pair control
   type MixerSource = {
     nodeId: string;
     node: NodeData;
-    fromChannel: number; // Source channel pair index
+    fromChannel: number; // Source port index
     connectionId: string;
+    // Stereo link support
+    linkedConnectionId?: string; // ID of the R channel connection if stereo linked
+    isStereoLinked?: boolean;
   };
-  
+
   const mixerSources = useMemo((): MixerSource[] => {
-    return connections
-      .filter(c => c.toNodeId === focusedOutputId && c.toChannel === focusedPairIndex)
-      .map(c => {
+    if (!focusedOutputId) return [];
+
+    if (isStereoMode && focusedTarget) {
+      // Stereo mode: get connections to both L and R of the current stereo pair
+      const leftCh = focusedPairIndex * 2;      // e.g., pair 0 → ch 0
+      const rightCh = focusedPairIndex * 2 + 1; // e.g., pair 0 → ch 1
+
+      // Get all connections to L and R
+      const leftConns = connections.filter(c => c.toNodeId === focusedOutputId && c.toChannel === leftCh);
+      const rightConns = connections.filter(c => c.toNodeId === focusedOutputId && c.toChannel === rightCh);
+
+      // Match L and R connections from the same source node (stereo pair: srcCh and srcCh+1)
+      const sources: MixerSource[] = [];
+      const usedRightConnIds = new Set<string>();
+
+      for (const lc of leftConns) {
+        const node = nodes.find(n => n.id === lc.fromNodeId);
+        if (!node) continue;
+
+        // Look for matching R connection: same source node, source channel + 1
+        const matchingRight = rightConns.find(rc =>
+          rc.fromNodeId === lc.fromNodeId &&
+          rc.fromChannel === lc.fromChannel + 1 &&
+          !usedRightConnIds.has(rc.id)
+        );
+
+        if (matchingRight) {
+          usedRightConnIds.add(matchingRight.id);
+          sources.push({
+            nodeId: lc.fromNodeId,
+            node,
+            fromChannel: lc.fromChannel, // L channel
+            connectionId: lc.id,
+            linkedConnectionId: matchingRight.id,
+            isStereoLinked: true,
+          });
+        } else {
+          // No matching R, show as mono on L side
+          sources.push({
+            nodeId: lc.fromNodeId,
+            node,
+            fromChannel: lc.fromChannel,
+            connectionId: lc.id,
+            isStereoLinked: false,
+          });
+        }
+      }
+
+      // Add any unmatched R connections as standalone mono
+      for (const rc of rightConns) {
+        if (!usedRightConnIds.has(rc.id)) {
+          const node = nodes.find(n => n.id === rc.fromNodeId);
+          if (!node) continue;
+          sources.push({
+            nodeId: rc.fromNodeId,
+            node,
+            fromChannel: rc.fromChannel,
+            connectionId: rc.id,
+            isStereoLinked: false,
+          });
+        }
+      }
+
+      return sources;
+    } else {
+      // Mono mode: single channel view (original behavior)
+      const monoSources: MixerSource[] = [];
+      for (const c of connections) {
+        if (c.toNodeId !== focusedOutputId || c.toChannel !== focusedPairIndex) continue;
         const node = nodes.find(n => n.id === c.fromNodeId);
-        if (!node) return null;
-        return {
+        if (!node) continue;
+        monoSources.push({
           nodeId: c.fromNodeId,
           node,
           fromChannel: c.fromChannel,
           connectionId: c.id,
-        };
-      })
-      .filter((m): m is MixerSource => m !== null);
-  }, [connections, focusedOutputId, focusedPairIndex, nodes]);
+          isStereoLinked: false,
+        });
+      }
+      return monoSources;
+    }
+  }, [connections, focusedOutputId, focusedPairIndex, nodes, isStereoMode, focusedTarget]);
 
-  // Helper to get stereo pair label (1-2, 3-4, etc.)
-  const getPairLabel = (pairIndex: number) => {
-    const ch1 = pairIndex * 2 + 1;
-    const ch2 = pairIndex * 2 + 2;
-    return `${ch1}-${ch2}`;
-  };
+  // getPairLabel is now inline where needed (stereo mode uses different logic)
 
   return (
     <div className="flex flex-col h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden select-none"
@@ -1353,7 +1524,7 @@ export default function App() {
                 <RefreshCw className={`w-3 h-3 text-slate-400 ${isRefreshing ? 'animate-spin' : ''}`} />
               </button>
             </div>
-            
+
             {/* Input Source Mode Tabs */}
             <div className="flex gap-1 mb-2">
               <button
@@ -1610,12 +1781,12 @@ export default function App() {
             {nodes.map(node => {
               // Determine if this is a device node (non-Prism) or channel node (Prism)
               const isDeviceNode = node.sourceType === 'device';
-              
+
               // For source nodes, get dynamic info from channelSources (Prism only)
-              const channelData = (node.type === 'source' && !isDeviceNode) 
-                ? channelSources.find(c => c.id === node.libraryId) 
+              const channelData = (node.type === 'source' && !isDeviceNode)
+                ? channelSources.find(c => c.id === node.libraryId)
                 : null;
-              
+
               // Dynamic display for Prism channel nodes
               const dynamicLabel = channelData ? `Ch ${channelData.channelLabel}` : node.label;
               const dynamicSubLabel = channelData
@@ -1628,7 +1799,7 @@ export default function App() {
                 : (channelData
                     ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
                     : node.icon);
-              const dynamicColor = isDeviceNode 
+              const dynamicColor = isDeviceNode
                 ? getDeviceNodeColor(node)
                 : (channelData
                     ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
@@ -1638,7 +1809,7 @@ export default function App() {
               // Get level data for source nodes
               let avgLevel = 0;
               let meterColorClass = 'from-green-500/20';
-              
+
               if (node.type === 'source') {
                 if (isDeviceNode && node.deviceId !== undefined) {
                   // Device node: aggregate all channel levels from deviceLevelsMap
@@ -1672,8 +1843,8 @@ export default function App() {
 
               const isSelected = selectedNodeId === node.id;
               const isFocused = focusedOutputId === node.id;
-              const pairCount = Math.ceil(node.channelCount / 2);
-              const nodeHeight = 36 + 16 + (pairCount * 24);
+              const portCount = getPortCount(node);
+              const nodeHeight = 36 + 16 + (portCount * 24);
 
               let borderClass = 'border-slate-700';
               if (node.type === 'source') {
@@ -1691,6 +1862,11 @@ export default function App() {
                   key={node.id}
                   ref={el => { if (el) nodeRefs.current.set(node.id, el); }}
                   onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContextMenu({ nodeId: node.id, x: e.clientX, y: e.clientY });
+                  }}
                   className={`canvas-node absolute w-[180px] bg-slate-800 rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass}`}
                   style={{ left: node.x, top: node.y, height: nodeHeight }}
                 >
@@ -1703,7 +1879,14 @@ export default function App() {
                       style={{ width: `${Math.min(avgLevel, 100)}%` }}
                     />
                   )}
-                  <div className={`w-2 h-2 rounded-full ${dynamicColor} shadow-[0_0_8px_currentColor] relative z-10`}></div>
+                  {/* Fixed width container for link icon or colored dot */}
+                  <div className="w-3 h-3 flex items-center justify-center relative z-10 shrink-0">
+                    {node.type === 'target' && node.channelMode === 'stereo' ? (
+                      <LinkIcon className="w-3 h-3 text-cyan-400" />
+                    ) : (
+                      <div className={`w-2 h-2 rounded-full ${dynamicColor} shadow-[0_0_8px_currentColor]`}></div>
+                    )}
+                  </div>
                   <NodeIcon className={`w-4 h-4 ${dynamicColor} relative z-10`} />
                   <div className="flex-1 min-w-0 relative z-10">
                     {isDeviceNode ? (
@@ -1726,34 +1909,32 @@ export default function App() {
                   <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity relative z-10"><Trash2 className="w-3 h-3"/></button>
                 </div>
 
-                {/* Ports Body - Stereo Pairs */}
+                {/* Ports Body - Channel Ports (based on channelMode) */}
                 <div className="p-2 space-y-1 relative">
-                    {Array.from({length: pairCount}).map((_, pairIdx) => {
-                        const ch1 = pairIdx * 2 + 1;
-                        const ch2 = pairIdx * 2 + 2;
-                        const isLastOdd = node.channelCount % 2 === 1 && pairIdx === pairCount - 1;
-                        const label = isLastOdd ? `CH ${ch1}` : `CH ${ch1}-${ch2}`;
+                    {Array.from({length: portCount}).map((_, portIdx) => {
+                        const label = `CH ${getPortLabel(node, portIdx)}`;
+                        const isMono = isPortMono(node, portIdx);
 
                         return (
-                            <div key={pairIdx} className="flex items-center justify-between h-5 relative">
+                            <div key={portIdx} className="flex items-center justify-between h-5 relative">
                                 {/* Input Port (Target Only) */}
                                 <div className="w-3 relative h-full flex items-center">
                                     {node.type === 'target' && (
                                         <div
-                                            className="absolute -left-[15px] w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20 top-[4px]"
-                                            onMouseUp={(e) => endWire(e, node.id, pairIdx)}
+                                            className={`absolute -left-[15px] w-3 h-3 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20 top-[4px] ${isMono ? 'bg-slate-500' : 'bg-slate-600'}`}
+                                            onMouseUp={(e) => endWire(e, node.id, portIdx)}
                                         ></div>
                                     )}
                                 </div>
 
-                                <div className="text-[9px] text-slate-500 font-mono flex-1 text-center">{label}</div>
+                                <div className={`text-[9px] font-mono flex-1 text-center ${isMono ? 'text-slate-400' : 'text-slate-500'}`}>{label}</div>
 
                                 {/* Output Port (Source Only) */}
                                 <div className="w-3 relative h-full flex items-center">
                                     {node.type === 'source' && (
                                         <div
-                                            className="absolute -right-[15px] w-3 h-3 bg-slate-600 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20 top-[4px]"
-                                            onMouseDown={(e) => startWire(e, node.id, pairIdx)}
+                                            className={`absolute -right-[15px] w-3 h-3 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20 top-[4px] ${isMono ? 'bg-slate-500' : 'bg-slate-600'}`}
+                                            onMouseDown={(e) => startWire(e, node.id, portIdx)}
                                         ></div>
                                     )}
                                 </div>
@@ -1839,9 +2020,16 @@ export default function App() {
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                 {focusedTarget ? (
                   <>Mixing for <span className={`text-white ${focusedTarget.color} ml-1`}>{focusedTarget.label}</span>
-                    {focusedTargetPairs > 1 && (
-                      <span className="text-slate-400 ml-1">Ch {getPairLabel(focusedPairIndex)}</span>
+                    {focusedTargetPorts > 1 && (
+                      <span className="text-slate-400 ml-1">
+                        {isStereoMode
+                          ? `Ch ${focusedPairIndex * 2 + 1}-${focusedPairIndex * 2 + 2}`
+                          : `Ch ${focusedPairIndex + 1}`}
+                      </span>
                     )}
+                    <span className={`ml-2 px-1.5 py-0.5 rounded text-[8px] ${isStereoMode ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-600/50 text-slate-400'}`}>
+                      {isStereoMode ? 'STEREO' : 'MONO'}
+                    </span>
                   </>
                 ) : (
                   'Select Output on Canvas to Mix'
@@ -1852,7 +2040,7 @@ export default function App() {
 
           <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
             {mixerSources.map(ms => {
-                const { node, fromChannel, connectionId } = ms;
+                const { node, fromChannel, connectionId, linkedConnectionId, isStereoLinked } = ms;
                 const conn = connections.find(c => c.id === connectionId);
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
@@ -1862,12 +2050,31 @@ export default function App() {
 
                 // Get dynamic info from channelSources (Prism only)
                 const channelData = !isDeviceNode ? channelSources.find(c => c.id === node.libraryId) : null;
-                
+
                 // Dynamic display based on node type and source channel
-                const sourcePairLabel = getPairLabel(fromChannel);
-                const dynamicLabel = isDeviceNode 
-                  ? `Ch ${sourcePairLabel}`  // Show specific channel pair for device
-                  : (channelData ? `Ch ${channelData.channelLabel}` : node.label);
+                // For stereo linked, show both channels
+                const sourcePortLabel = isStereoLinked
+                  ? `${fromChannel + 1}-${fromChannel + 2}`
+                  : getPortLabel(node, fromChannel);
+                const sourceIsMono = !isStereoLinked && isPortMono(node, fromChannel);
+                // For Prism: channelData.channelLabel is stereo pair label like "7-8"
+                // In mono mode, show individual channel based on fromChannel (0=L, 1=R of pair)
+                // In stereo linked mode, show the full pair label
+                let prismChLabel = '';
+                if (channelData) {
+                  const baseChannel = channelData.channelOffset; // e.g., 6 for ch7-8
+                  if (isStereoLinked) {
+                    // Stereo: show pair like "7-8"
+                    prismChLabel = `${baseChannel + 1}-${baseChannel + 2}`;
+                  } else {
+                    // Mono: show individual channel like "7" or "8"
+                    const actualChannel = baseChannel + fromChannel + 1;
+                    prismChLabel = `${actualChannel}`;
+                  }
+                }
+                const dynamicLabel = isDeviceNode
+                  ? `Ch ${sourcePortLabel}`  // Show specific channel for device
+                  : (channelData ? `Ch ${prismChLabel}` : node.label);
                 const dynamicSubLabel = isDeviceNode
                   ? node.deviceName  // Show device name as sub label
                   : (channelData
@@ -1890,21 +2097,39 @@ export default function App() {
                 // Get real input levels for this specific channel pair (dB conversion)
                 let leftDb = -60;
                 let rightDb = -60;
-                
+
                 if (isDeviceNode) {
                   // Device node: get level from deviceLevelsMap for the specific device
                   const deviceId = node.deviceId;
                   const deviceLevels = deviceId !== undefined ? deviceLevelsMap.get(deviceId) : undefined;
-                  const levelData = deviceLevels?.[fromChannel];
-                  leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
-                  rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
+                  if (isStereoLinked) {
+                    // Stereo linked: L from fromChannel, R from fromChannel+1
+                    const leftLevelData = deviceLevels?.[fromChannel];
+                    const rightLevelData = deviceLevels?.[fromChannel + 1];
+                    leftDb = leftLevelData ? rmsToDb(leftLevelData.left_peak) : -60;
+                    rightDb = rightLevelData ? rmsToDb(rightLevelData.left_peak) : -60; // Use left_peak of R channel
+                  } else {
+                    const levelData = deviceLevels?.[fromChannel];
+                    leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
+                    rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
+                  }
                 } else {
                   const channelOffset = node.channelOffset ?? 0;
-                  const pairIndex = channelOffset / 2;
+                  // For Prism, channelOffset is already the stereo pair index * 2
+                  // fromChannel 0 = L, fromChannel 1 = R of that pair
+                  const pairIndex = Math.floor((channelOffset + fromChannel) / 2);
                   const levelData = inputLevels[pairIndex];
-                  // Calculate dB using PEAK (not RMS) for meter display - like Logic/LadioCast
-                  leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
-                  rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
+                  if (isStereoLinked) {
+                    // Stereo linked: use L and R from the same pair
+                    leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
+                    rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
+                  } else {
+                    // Mono: use appropriate channel based on odd/even
+                    const isRightChannel = (channelOffset + fromChannel) % 2 === 1;
+                    const peakVal = levelData ? (isRightChannel ? levelData.right_peak : levelData.left_peak) : 0;
+                    leftDb = rmsToDb(peakVal);
+                    rightDb = leftDb; // Same for mono display
+                  }
                 }
 
                 // Calculate post-fader level (input dB + fader gain dB)
@@ -1913,10 +2138,16 @@ export default function App() {
                 const postFaderRightDb = faderDb <= -100 ? -Infinity : rightDb + faderDb;
 
                 // Unique key for mixer channel (node + source channel)
-                const mixerKey = `${node.id}_ch${fromChannel}`;
+                const mixerKey = `${node.id}_ch${fromChannel}${isStereoLinked ? '_stereo' : ''}`;
 
                 return (
-                <div key={mixerKey} className={`w-32 bg-slate-900 border rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none ${isDeviceNode ? 'border-amber-500/30' : 'border-slate-700'}`}>
+                <div key={mixerKey} className={`w-32 bg-slate-900 border rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none ${isStereoLinked ? 'border-cyan-500/50' : isDeviceNode ? 'border-amber-500/30' : 'border-slate-700'}`}>
+                    {/* Stereo link indicator */}
+                    {isStereoLinked && (
+                      <div className="absolute top-1 right-1">
+                        <LinkIcon className="w-3 h-3 text-cyan-400" />
+                      </div>
+                    )}
                     <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
                     <div className={`w-6 h-6 rounded-lg bg-slate-800 border border-slate-600 flex items-center justify-center shadow-lg ${dynamicColor}`}>
                         <NodeIcon className="w-3 h-3" />
@@ -1932,47 +2163,47 @@ export default function App() {
                       {/* Left: Fader Scale (+6dB = top) - matches Logic Pro X */}
                       <div className="absolute -left-7 top-0 bottom-0 w-7 flex flex-col text-[7px] text-slate-400 font-mono select-none">
                         {/* Scale tick marks and labels - clickable */}
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ top: '0', transform: 'translateY(-50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(6))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ top: '0', transform: 'translateY(-50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(6))}>
                           <span className="mr-0.5">+6</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(3)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(3))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(3)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(3))}>
                           <span className="mr-0.5">+3</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-cyan-400" style={{ bottom: `${dbToFader(0)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(0))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-cyan-400" style={{ bottom: `${dbToFader(0)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(0))}>
                           <span className="mr-0.5 text-white font-bold">0</span>
                           <div className="w-2.5 h-px bg-white"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-3)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-3))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-3)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-3))}>
                           <span className="mr-0.5">-3</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-6)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-6))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-6)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-6))}>
                           <span className="mr-0.5">-6</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-10)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-10))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-10)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-10))}>
                           <span className="mr-0.5 text-[6px]">-10</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-15)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-15))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-15)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-15))}>
                           <span className="mr-0.5 text-[6px]">-15</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-20)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-20))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-20)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-20))}>
                           <span className="mr-0.5 text-[6px]">-20</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-30)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-30))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-30)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-30))}>
                           <span className="mr-0.5 text-[6px]">-30</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-40)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(-40))}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-40)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(-40))}>
                           <span className="mr-0.5 text-[6px]">-40</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
-                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: '0', transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, fromChannel, 0)}>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: '0', transform: 'translateY(50%)' }} onClick={() => updateSendLevelByConnId(connectionId, linkedConnectionId, 0)}>
                           <span className="mr-0.5">-∞</span>
                           <div className="w-1.5 h-px bg-slate-500"></div>
                         </div>
@@ -1980,7 +2211,7 @@ export default function App() {
                       <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
                           <input
                               type="range" min="0" max="100" value={level} disabled={isMuted}
-                              onChange={(e) => updateSendLevel(node.id, focusedOutputId!, fromChannel, Number(e.target.value))}
+                              onChange={(e) => updateSendLevelByConnId(connectionId, linkedConnectionId, Number(e.target.value))}
                               className={`absolute inset-0 h-full w-6 -left-2 opacity-0 z-20 appearance-slider-vertical ${isMuted ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                           />
                           <div className={`absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10 ${isMuted ? 'grayscale opacity-50' : ''}`} style={{ bottom: `calc(${level}% - 5px)` }}></div>
@@ -1988,36 +2219,57 @@ export default function App() {
                     </div>
                     {/* Level Meters on right */}
                     <div className="flex gap-0.5 relative">
-                      {/* Left meter */}
-                      <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                        {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                        <div
-                          className="absolute bottom-0 w-full transition-all duration-75"
-                          style={{
-                            height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
-                            background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
-                          }}
-                        />
-                        {/* Clip indicator - shows red at top if clipping */}
-                        {postFaderLeftDb > 0 && !isMuted && (
-                          <div className="absolute top-0 w-full h-1 bg-red-500" />
-                        )}
-                      </div>
-                      {/* Right meter */}
-                      <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                        {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                        <div
-                          className="absolute bottom-0 w-full transition-all duration-75"
-                          style={{
-                            height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderRightDb)))}%`,
-                            background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderRightDb)), postFaderRightDb),
-                          }}
-                        />
-                        {/* Clip indicator - shows red at top if clipping */}
-                        {postFaderRightDb > 0 && !isMuted && (
-                          <div className="absolute top-0 w-full h-1 bg-red-500" />
-                        )}
-                      </div>
+                      {sourceIsMono ? (
+                        /* Mono meter - single wider meter */
+                        <div className="w-3 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                          {/* Meter fill - post-fader level, capped at 0dB (100%) */}
+                          <div
+                            className="absolute bottom-0 w-full transition-all duration-75"
+                            style={{
+                              height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
+                              background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
+                            }}
+                          />
+                          {/* Clip indicator - shows red at top if clipping */}
+                          {postFaderLeftDb > 0 && !isMuted && (
+                            <div className="absolute top-0 w-full h-1 bg-red-500" />
+                          )}
+                        </div>
+                      ) : (
+                        /* Stereo meters - Left and Right */
+                        <>
+                          {/* Left meter */}
+                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                            {/* Meter fill - post-fader level, capped at 0dB (100%) */}
+                            <div
+                              className="absolute bottom-0 w-full transition-all duration-75"
+                              style={{
+                                height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
+                                background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
+                              }}
+                            />
+                            {/* Clip indicator - shows red at top if clipping */}
+                            {postFaderLeftDb > 0 && !isMuted && (
+                              <div className="absolute top-0 w-full h-1 bg-red-500" />
+                            )}
+                          </div>
+                          {/* Right meter */}
+                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                            {/* Meter fill - post-fader level, capped at 0dB (100%) */}
+                            <div
+                              className="absolute bottom-0 w-full transition-all duration-75"
+                              style={{
+                                height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderRightDb)))}%`,
+                                background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderRightDb)), postFaderRightDb),
+                              }}
+                            />
+                            {/* Clip indicator - shows red at top if clipping */}
+                            {postFaderRightDb > 0 && !isMuted && (
+                              <div className="absolute top-0 w-full h-1 bg-red-500" />
+                            )}
+                          </div>
+                        </>
+                      )}
                       {/* Right: Meter Scale - independent from fader scale */}
                       {/* Uses dbToMeterPosition() for meter-specific scale positions */}
                       <div className="absolute -right-6 top-0 bottom-0 w-6 flex flex-col text-[7px] text-slate-400 font-mono pointer-events-none select-none">
@@ -2072,12 +2324,12 @@ export default function App() {
                         onBlur={() => {
                           const trimmed = editingDbValue.trim().toLowerCase();
                           if (trimmed === '-inf' || trimmed === 'inf' || trimmed === '-∞' || trimmed === '∞') {
-                            updateSendLevel(node.id, focusedOutputId!, fromChannel, 0);
+                            updateSendLevelByConnId(connectionId, linkedConnectionId, 0);
                           } else {
                             const parsed = parseFloat(trimmed);
                             if (!isNaN(parsed)) {
                               const clampedDb = Math.max(-100, Math.min(6, parsed));
-                              updateSendLevel(node.id, focusedOutputId!, fromChannel, dbToFader(clampedDb));
+                              updateSendLevelByConnId(connectionId, linkedConnectionId, dbToFader(clampedDb));
                             }
                           }
                           setEditingDbNodeId(null);
@@ -2105,7 +2357,7 @@ export default function App() {
                       </div>
                     )}
                     <div className="flex gap-1 mt-1 w-full px-1">
-                    <button onClick={() => toggleConnectionMute(node.id, focusedOutputId!, fromChannel)} className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'}`}>M</button>
+                    <button onClick={() => toggleMuteByConnId(connectionId, linkedConnectionId)} className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'}`}>M</button>
                     </div>
                 </div>
                 )
@@ -2132,24 +2384,31 @@ export default function App() {
 
           <div className="flex-1 flex gap-2 p-3 min-h-0">
 
-             {/* 1. Channel Pair Selector (Left) */}
-             {focusedTarget && focusedTargetPairs > 1 && (
+             {/* 1. Channel Port Selector (Left) */}
+             {focusedTarget && focusedTargetPorts > 1 && (
                <div className="w-14 flex flex-col gap-1 overflow-y-auto border-r border-slate-800 pr-2 min-h-0">
-                 <div className="text-[8px] font-bold text-slate-600 mb-1 text-center shrink-0">CH</div>
-                 {Array.from({ length: focusedTargetPairs }).map((_, pairIdx) => {
-                   const isPairSelected = focusedPairIndex === pairIdx;
+                 <div className="text-[8px] font-bold text-slate-600 mb-1 text-center shrink-0">
+                   {isStereoMode ? 'PAIR' : 'CH'}
+                 </div>
+                 {/* In stereo mode, show pairs (0 = ch 1-2, 1 = ch 3-4, etc.) */}
+                 {/* In mono mode, show individual channels */}
+                 {Array.from({ length: isStereoMode ? Math.ceil(focusedTargetPorts / 2) : focusedTargetPorts }).map((_, idx) => {
+                   const isPortSelected = focusedPairIndex === idx;
+                   const label = isStereoMode
+                     ? `${idx * 2 + 1}-${Math.min(idx * 2 + 2, focusedTargetPorts)}`
+                     : `${idx + 1}`;
                    return (
                      <button
-                       key={pairIdx}
-                       onClick={() => setFocusedPairIndex(pairIdx)}
+                       key={idx}
+                       onClick={() => setFocusedPairIndex(idx)}
                        className={`
                          w-full py-1.5 rounded text-[9px] font-bold border transition-all text-center shrink-0
-                         ${isPairSelected
+                         ${isPortSelected
                            ? `bg-${focusedTarget.color.split('-')[1]}-500/20 border-${focusedTarget.color.split('-')[1]}-500 text-white`
                            : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'}
                        `}
                      >
-                       {getPairLabel(pairIdx)}
+                       {label}
                      </button>
                    );
                  })}
@@ -2432,6 +2691,63 @@ export default function App() {
           </span>
         </div>
       )}
+
+      {/* Node Context Menu */}
+      {contextMenu && (() => {
+        const node = nodes.find(n => n.id === contextMenu.nodeId);
+        if (!node) return null;
+        return (
+          <>
+            {/* Backdrop to close menu on click outside */}
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setContextMenu(null)}
+              onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
+            />
+            {/* Context Menu */}
+            <div
+              className="fixed z-50 bg-slate-800 border border-slate-600 rounded-lg shadow-2xl py-1 min-w-[160px]"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+            >
+              <div className="px-3 py-1.5 text-[10px] text-slate-500 font-medium border-b border-slate-700">
+                {node.label || node.deviceName || 'Node'}
+              </div>
+
+              {/* Node info */}
+              <div className="px-3 py-1.5 text-[10px] text-slate-400">
+                {node.channelCount}ch • {node.type === 'source' ? 'Input' : 'Output'}
+                {node.type === 'target' && ` • ${node.channelMode === 'stereo' ? 'Stereo' : 'Mono'}`}
+              </div>
+
+              {/* Channel Mode Toggle (only for output nodes with 2+ channels) */}
+              {node.type === 'target' && node.channelCount >= 2 && (
+                <>
+                  <div className="border-t border-slate-700 my-1" />
+                  <button
+                    onClick={() => { toggleChannelMode(contextMenu.nodeId); setContextMenu(null); }}
+                    className="w-full px-3 py-2 text-left text-sm text-slate-300 hover:bg-slate-700 flex items-center gap-2"
+                  >
+                    <LinkIcon className="w-4 h-4" />
+                    <span>{node.channelMode === 'stereo' ? 'Switch to Mono' : 'Switch to Stereo'}</span>
+                  </button>
+                </>
+              )}
+
+              {/* Separator */}
+              <div className="border-t border-slate-700 my-1" />
+
+              {/* Delete Node */}
+              <button
+                onClick={() => { deleteNode(contextMenu.nodeId); setContextMenu(null); }}
+                className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/20 flex items-center gap-2"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Delete Node</span>
+              </button>
+            </div>
+          </>
+        );
+      })()}
 
       {/* Settings Modal */}
       {showSettings && (

@@ -225,11 +225,16 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         // Get master fader gain for this device
         let master_gain = output_faders.get(&dev_id_str.to_string()).copied().unwrap_or(1.0);
 
-        // Stack-allocated temp buffers
-        let mut left_buf = [0.0f32; MAX_FRAMES];
-        let mut right_buf = [0.0f32; MAX_FRAMES];
+        // Stack-allocated temp buffers (for single channel read)
+        let mut mono_buf = [0.0f32; MAX_FRAMES];
+        
+        // Cache for read audio pairs to avoid reading the same pair multiple times
+        // This is important because read_channel_audio advances the read position
+        // Key: pair_idx, Value: (left_data, right_data, read_count)
+        let mut pair_cache: std::collections::HashMap<usize, ([f32; MAX_FRAMES], [f32; MAX_FRAMES], usize)> = 
+            std::collections::HashMap::new();
 
-        // Mix audio from sends targeting this device
+        // Mix audio from sends targeting this device (1ch unit)
         for send in sends.iter() {
             if send.muted || send.level <= 0.0 {
                 continue;
@@ -240,58 +245,56 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 continue;
             }
 
-            // Get source channel pair
-            let source_pair = (send.source_offset / 2) as usize;
-            let left_ch = source_pair * 2;
-            let right_ch = source_pair * 2 + 1;
+            // Get source channel (1ch unit)
+            let source_ch = send.source_channel as usize;
 
-            // Get target channel pair (this is where the audio should go!)
-            let target_pair = send.target_pair as usize;
-            let target_left_ch = target_pair * 2;
-            let target_right_ch = target_pair * 2 + 1;
+            // Get target channel (1ch unit)
+            let target_ch = send.target_channel as usize;
 
-            // Check if target channels are within device's output range
-            if target_right_ch >= out_ch {
-                // Fallback: if target pair is out of range, use pair 0
+            // Check if target channel is within device's output range
+            if target_ch >= out_ch {
                 continue;
             }
 
-            // Read audio data from broadcast buffer (non-consuming!)
-            let read_count = crate::audio_capture::read_channel_audio(
-                dev_id_for_callback,
-                left_ch,
-                right_ch,
-                &mut left_buf[..frames],
-                &mut right_buf[..frames],
-            );
+            // Read audio data from broadcast buffer for single channel
+            // We read as L channel of a "pair" where the pair is source_ch/2
+            let pair_idx = source_ch / 2;
+            let is_right = source_ch % 2 == 1;
+            
+            // Get or read the pair data (only read once per pair)
+            let (left_temp, right_temp, read_count) = pair_cache.entry(pair_idx).or_insert_with(|| {
+                let mut left = [0.0f32; MAX_FRAMES];
+                let mut right = [0.0f32; MAX_FRAMES];
+                let count = crate::audio_capture::read_channel_audio(
+                    dev_id_for_callback,
+                    pair_idx * 2,
+                    pair_idx * 2 + 1,
+                    &mut left[..frames],
+                    &mut right[..frames],
+                );
+                (left, right, count)
+            });
 
-            if read_count == 0 {
+            if *read_count == 0 {
                 continue;
             }
+
+            // Copy the correct channel to mono_buf
+            let source_data = if is_right { right_temp } else { left_temp };
+            mono_buf[..*read_count].copy_from_slice(&source_data[..*read_count]);
 
             // Apply send level AND master fader
             let gain = send.level * master_gain;
 
             // DAW-style mixing: use vDSP with stride for interleaved output
-            // This is fully hardware-accelerated - no Rust loops needed
-            // Mix left channel to interleaved buffer at offset target_left_ch, stride out_ch
+            // Mix single channel to interleaved buffer at offset target_ch, stride out_ch
             VDsp::mix_to_interleaved(
-                &left_buf[..read_count],
+                &mono_buf[..*read_count],
                 gain,
                 buffer,
-                target_left_ch,
+                target_ch,
                 out_ch,
-                read_count,
-            );
-
-            // Mix right channel to interleaved buffer at offset target_right_ch, stride out_ch
-            VDsp::mix_to_interleaved(
-                &right_buf[..read_count],
-                gain,
-                buffer,
-                target_right_ch,
-                out_ch,
-                read_count,
+                *read_count,
             );
         }
 

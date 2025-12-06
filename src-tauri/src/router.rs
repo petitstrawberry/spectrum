@@ -150,11 +150,11 @@ fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
 
-/// Update a send connection
+/// Update a send connection (1ch unit)
 pub fn update_send(
-    source_offset: u32,
+    source_channel: u32,
     target_device: String,
-    target_pair: u32,
+    target_channel: u32,
     level: f32,
     muted: bool,
 ) {
@@ -164,18 +164,18 @@ pub fn update_send(
     let linear_gain = db_to_linear(db);
     
     mixer_state.set_send(crate::mixer::Send {
-        source_offset,
+        source_channel,
         target_device,
-        target_pair,
+        target_channel,
         level: linear_gain,
         muted,
     });
 }
 
-/// Remove a send connection
-pub fn remove_send(source_offset: u32, target_device: &str, target_pair: u32) {
+/// Remove a send connection (1ch unit)
+pub fn remove_send(source_channel: u32, target_device: &str, target_channel: u32) {
     let mixer_state = get_mixer_state();
-    mixer_state.remove_send(source_offset, target_device, target_pair);
+    mixer_state.remove_send(source_channel, target_device, target_channel);
 }
 
 /// Set source fader level (0-100)

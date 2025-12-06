@@ -152,21 +152,22 @@ fn get_output_device_levels(device_id: String) -> Vec<LevelData> {
 }
 
 /// Update a send connection
+/// Update a send connection (1ch unit)
 #[tauri::command]
 fn update_mixer_send(
-    source_offset: u32,
+    source_channel: u32,
     target_device: String,
-    target_pair: u32,
+    target_channel: u32,
     level: f32,
     muted: bool,
 ) {
-    router::update_send(source_offset, target_device, target_pair, level, muted);
+    router::update_send(source_channel, target_device, target_channel, level, muted);
 }
 
-/// Remove a send connection
+/// Remove a send connection (1ch unit)
 #[tauri::command]
-fn remove_mixer_send(source_offset: u32, target_device: String, target_pair: u32) {
-    router::remove_send(source_offset, &target_device, target_pair);
+fn remove_mixer_send(source_channel: u32, target_device: String, target_channel: u32) {
+    router::remove_send(source_channel, &target_device, target_channel);
 }
 
 /// Set source channel fader (0-100)

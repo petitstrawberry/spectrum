@@ -14,15 +14,15 @@ pub const MAX_OUTPUTS: usize = 16;
 /// Maximum stereo pairs per output (e.g., 32 for a 64ch device)
 pub const MAX_OUTPUT_PAIRS: usize = 32;
 
-/// A send connection from a source channel pair to an output device channel pair
+/// A send connection from a source channel to an output device channel (1ch unit)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Send {
-    /// Source channel offset in Prism (0, 2, 4, ... 62)
-    pub source_offset: u32,
+    /// Source channel index (0-63 for Prism, or device channel index)
+    pub source_channel: u32,
     /// Target output device ID
     pub target_device: String,
-    /// Target channel pair index (0 = ch 1-2, 1 = ch 3-4, etc.)
-    pub target_pair: u32,
+    /// Target channel index (0, 1, 2, ... for mono channels)
+    pub target_channel: u32,
     /// Send level (0.0 to 1.0)
     pub level: f32,
     /// Muted
@@ -78,29 +78,34 @@ impl MixerState {
         }
     }
 
-    /// Add or update a send
+    /// Add or update a send (1ch unit)
     pub fn set_send(&self, send: Send) {
         let mut sends = self.sends.write();
-        // Find existing send with same source/target
+        // Find existing send with same source/target channel
         if let Some(existing) = sends.iter_mut().find(|s| {
-            s.source_offset == send.source_offset
+            s.source_channel == send.source_channel
                 && s.target_device == send.target_device
-                && s.target_pair == send.target_pair
+                && s.target_channel == send.target_channel
         }) {
+            println!("[Mixer] Updated send: src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
             existing.level = send.level;
             existing.muted = send.muted;
         } else {
+            println!("[Mixer] New send: src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
             sends.push(send);
         }
+        println!("[Mixer] Total sends: {}", sends.len());
     }
 
-    /// Remove a send
-    pub fn remove_send(&self, source_offset: u32, target_device: &str, target_pair: u32) {
+    /// Remove a send (1ch unit)
+    pub fn remove_send(&self, source_channel: u32, target_device: &str, target_channel: u32) {
         let mut sends = self.sends.write();
         sends.retain(|s| {
-            !(s.source_offset == source_offset
+            !(s.source_channel == source_channel
                 && s.target_device == target_device
-                && s.target_pair == target_pair)
+                && s.target_channel == target_channel)
         });
     }
 
@@ -188,7 +193,7 @@ impl MixBuffer {
     }
 }
 
-/// Process audio mixing for one buffer
+/// Process audio mixing for one buffer (1ch unit)
 ///
 /// This is called from the audio callback and performs the actual mixing
 /// using Accelerate vDSP for hardware acceleration.
@@ -208,32 +213,24 @@ pub fn process_mix(
         VDsp::clear(buf);
     }
 
-    // Process each send
+    // Process each send (1ch unit)
     for send in sends.iter() {
         if send.muted {
             continue;
         }
 
-        let pair_index = (send.source_offset / 2) as usize;
-        if pair_index >= PRISM_CHANNELS / 2 {
+        let source_ch = send.source_channel as usize;
+        if source_ch >= PRISM_CHANNELS {
             continue;
         }
 
-        // Check if source is muted
+        // Check if source pair is muted (still use pair-based mute for compatibility)
+        let pair_index = source_ch / 2;
         if mutes[pair_index] {
             continue;
         }
 
-        // Get source channels (stereo pair)
-        let left_ch = send.source_offset as usize;
-        let right_ch = left_ch + 1;
-
-        if left_ch >= PRISM_CHANNELS || right_ch >= PRISM_CHANNELS {
-            continue;
-        }
-
-        let left_input = input_channels[left_ch];
-        let right_input = input_channels[right_ch];
+        let input = input_channels[source_ch];
 
         // Calculate combined gain
         let source_gain = faders[pair_index];
@@ -245,22 +242,15 @@ pub fn process_mix(
             continue;
         }
 
-        // Get output buffer
+        // Get output buffer and mix to target channel
         if let Some(output_buf) = output_buffers.get_mut(&send.target_device) {
-            let target_left = (send.target_pair as usize) * 2;
-            let target_right = target_left + 1;
+            let target_ch = send.target_channel as usize;
             let output_channels = output_buf.len() / frames;
 
-            if target_right < output_channels {
-                // Mix left channel
-                let left_offset = target_left * frames;
-                let left_out = &mut output_buf[left_offset..left_offset + frames];
-                VDsp::mix_add(left_input, total_gain, left_out);
-
-                // Mix right channel
-                let right_offset = target_right * frames;
-                let right_out = &mut output_buf[right_offset..right_offset + frames];
-                VDsp::mix_add(right_input, total_gain, right_out);
+            if target_ch < output_channels {
+                let offset = target_ch * frames;
+                let out = &mut output_buf[offset..offset + frames];
+                VDsp::mix_add(input, total_gain, out);
             }
         }
     }

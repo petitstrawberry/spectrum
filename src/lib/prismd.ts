@@ -220,36 +220,36 @@ export async function getOutputDeviceLevels(deviceId: string): Promise<LevelData
 }
 
 /**
- * Update a send connection
+ * Update a send connection (1ch unit)
  */
 export async function updateMixerSend(
-  sourceOffset: number,
+  sourceChannel: number,
   targetDevice: string,
-  targetPair: number,
+  targetChannel: number,
   level: number,
   muted: boolean
 ): Promise<void> {
   return invoke('update_mixer_send', {
-    sourceOffset,
+    sourceChannel,
     targetDevice,
-    targetPair,
+    targetChannel,
     level,
     muted,
   });
 }
 
 /**
- * Remove a send connection
+ * Remove a send connection (1ch unit)
  */
 export async function removeMixerSend(
-  sourceOffset: number,
+  sourceChannel: number,
   targetDevice: string,
-  targetPair: number
+  targetChannel: number
 ): Promise<void> {
   return invoke('remove_mixer_send', {
-    sourceOffset,
+    sourceChannel,
     targetDevice,
-    targetPair,
+    targetChannel,
   });
 }
 
