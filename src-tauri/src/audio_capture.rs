@@ -12,10 +12,11 @@ use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_device_name, set_device_sample_rate,
 };
 use coreaudio::sys::{
-    kAudioDevicePropertyScopeInput, kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyScopeInput,
+    kAudioDevicePropertyScopeOutput, kAudioDevicePropertyStreamConfiguration,
     kAudioObjectPropertyElementMaster, AudioBuffer, AudioBufferList,
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
-    AudioObjectPropertyAddress,
+    AudioObjectPropertyAddress, AudioObjectSetPropertyData,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -30,12 +31,16 @@ const SAMPLE_RATE: f64 = 48000.0;
 /// Number of stereo pairs
 const STEREO_PAIRS: usize = PRISM_CHANNELS / 2;
 
-/// Default ring buffer size per channel (in frames)
-/// 4096 frames at 48kHz = ~85ms buffer
-const DEFAULT_BUFFER_SIZE: usize = 4096;
+/// Ring buffer size per channel (fixed, large enough to prevent underrun)
+/// 16384 frames at 48kHz = ~341ms buffer - enough for any I/O buffer size
+const RING_BUFFER_SIZE: usize = 16384;
 
-/// Current buffer size (can be changed at runtime before starting)
-static BUFFER_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_BUFFER_SIZE);
+/// Default CoreAudio I/O buffer size (frames per callback)
+/// 256 frames at 48kHz = ~5.3ms latency (good balance)
+const DEFAULT_IO_BUFFER_SIZE: usize = 256;
+
+/// Current CoreAudio I/O buffer size (can be changed at runtime)
+static IO_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_SIZE);
 
 /// Shared level data - updated from audio thread
 static LEVEL_DATA: RwLock<[ChannelLevels; STEREO_PAIRS]> = 
@@ -154,12 +159,69 @@ static DEVICE_READ_POSITIONS: LazyLock<RwLock<HashMap<u32, Vec<usize>>>> =
 static WRITE_FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize audio buffers
-fn init_audio_buffers(buffer_size: usize) {
+fn init_audio_buffers() {
     let mut buffers = AUDIO_BUFFERS.write();
     if buffers.is_none() {
-        *buffers = Some(AudioBuffers::new(PRISM_CHANNELS, buffer_size));
-        println!("[AudioCapture] Broadcast buffers initialized: {} channels x {} samples ({:.1}ms at 48kHz)",
-                 PRISM_CHANNELS, buffer_size, buffer_size as f64 / 48.0);
+        *buffers = Some(AudioBuffers::new(PRISM_CHANNELS, RING_BUFFER_SIZE));
+        println!("[AudioCapture] Ring buffers initialized: {} channels x {} samples ({:.1}ms at 48kHz)",
+                 PRISM_CHANNELS, RING_BUFFER_SIZE, RING_BUFFER_SIZE as f64 / 48.0);
+    }
+}
+
+/// Set device I/O buffer size (CoreAudio property)
+fn set_device_buffer_size(device_id: u32, buffer_size: u32) -> Result<(), String> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyBufferFrameSize,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+    
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            std::mem::size_of::<u32>() as u32,
+            &buffer_size as *const u32 as *const _,
+        )
+    };
+    
+    if status != 0 {
+        return Err(format!("Failed to set buffer size: OSStatus {}", status));
+    }
+    
+    println!("[AudioCapture] Device {} I/O buffer size set to {} samples ({:.1}ms)", 
+             device_id, buffer_size, buffer_size as f64 / 48.0);
+    Ok(())
+}
+
+/// Get device I/O buffer size (CoreAudio property)
+fn get_device_buffer_size(device_id: u32) -> Option<u32> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyBufferFrameSize,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+    
+    let mut buffer_size: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut buffer_size as *mut u32 as *mut _,
+        )
+    };
+    
+    if status == 0 {
+        Some(buffer_size)
+    } else {
+        None
     }
 }
 
@@ -244,6 +306,18 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
     // Set sample rate
     if let Err(e) = set_device_sample_rate(device_id, SAMPLE_RATE) {
         println!("[AudioCapture] Warning: Could not set sample rate: {:?}", e);
+    }
+
+    // Set I/O buffer size (affects latency)
+    let io_buffer_size = IO_BUFFER_SIZE.load(Ordering::SeqCst) as u32;
+    if let Err(e) = set_device_buffer_size(device_id, io_buffer_size) {
+        println!("[AudioCapture] Warning: Could not set I/O buffer size: {}", e);
+    }
+    
+    // Report actual buffer size
+    if let Some(actual_size) = get_device_buffer_size(device_id) {
+        println!("[AudioCapture] Actual device buffer size: {} samples ({:.1}ms)", 
+                 actual_size, actual_size as f64 / 48.0);
     }
 
     // Create HAL audio unit for input
@@ -427,20 +501,19 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
 
 // --- Public API ---
 
-/// Set buffer size (in samples per channel)
-/// This should be called before starting capture
-#[allow(dead_code)]
-pub fn set_buffer_size(size: usize) {
-    let size = size.max(512).min(65536);
-    BUFFER_SIZE.store(size, Ordering::SeqCst);
-    println!("[AudioCapture] Buffer size set to {} samples ({:.1}ms at 48kHz)", 
+/// Set CoreAudio I/O buffer size (frames per callback)
+/// This directly affects latency: lower = less latency but more CPU
+/// Valid values: 32, 64, 128, 256, 512, 1024
+pub fn set_io_buffer_size(size: usize) {
+    let size = size.max(32).min(2048);
+    IO_BUFFER_SIZE.store(size, Ordering::SeqCst);
+    println!("[AudioCapture] I/O buffer size set to {} samples ({:.1}ms at 48kHz)", 
              size, size as f64 / 48.0);
 }
 
-/// Get current buffer size setting
-#[allow(dead_code)]
-pub fn get_buffer_size_setting() -> usize {
-    BUFFER_SIZE.load(Ordering::SeqCst)
+/// Get current I/O buffer size setting
+pub fn get_io_buffer_size() -> usize {
+    IO_BUFFER_SIZE.load(Ordering::SeqCst)
 }
 
 /// Initialize and start audio capture
@@ -459,9 +532,8 @@ pub fn start_capture() -> Result<bool, String> {
 
     PRISM_DEVICE_ID.store(device_id, Ordering::SeqCst);
     
-    // Initialize broadcast buffers
-    let buffer_size = BUFFER_SIZE.load(Ordering::SeqCst);
-    init_audio_buffers(buffer_size);
+    // Initialize ring buffers (fixed size)
+    init_audio_buffers();
     
     let running = Arc::new(AtomicBool::new(true));
     CAPTURE_RUNNING.store(true, Ordering::SeqCst);

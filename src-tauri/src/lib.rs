@@ -5,12 +5,14 @@
 mod audio;
 mod audio_capture;
 mod audio_output;
+mod config;
 mod mixer;
 mod prismd;
 mod router;
 mod vdsp;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // Re-export prismd types
 pub use prismd::{ClientInfo, RoutingUpdate, ClientRoutingUpdate};
@@ -233,31 +235,119 @@ fn start_default_output() -> Result<(), String> {
     audio_output::start_default_output()
 }
 
-/// Get current buffer size setting
+/// Get current I/O buffer size setting
 #[tauri::command]
 fn get_buffer_size() -> usize {
-    audio_capture::get_buffer_size_setting()
+    audio_capture::get_io_buffer_size()
 }
 
-/// Set buffer size and restart audio engine
+/// Set CoreAudio I/O buffer size (saved for next app start)
+/// This directly affects latency - lower values = less latency but more CPU
+/// Note: Changes take effect after application restart
 #[tauri::command]
 async fn set_buffer_size(size: usize) -> Result<(), String> {
-    // Validate buffer size (must be power of 2, between 64 and 8192)
-    if size < 64 || size > 8192 {
-        return Err("Buffer size must be between 64 and 8192".to_string());
+    // Validate buffer size (must be power of 2, between 32 and 2048)
+    if size < 32 || size > 2048 {
+        return Err("Buffer size must be between 32 and 2048".to_string());
     }
     if !size.is_power_of_two() {
         return Err("Buffer size must be a power of 2".to_string());
     }
     
-    // Set new buffer size
-    audio_capture::set_buffer_size(size);
+    // Save to config file (will be loaded on next start)
+    config::save_io_buffer_size(size)?;
     
-    // Restart audio engine with new buffer size
-    audio_capture::restart_capture()?;
+    // Set for current session (though restart is required)
+    audio_capture::set_io_buffer_size(size);
     
-    println!("[Spectrum] Audio engine restarted with buffer size: {} samples", size);
+    println!("[Spectrum] I/O buffer size set to {} samples ({:.1}ms) - will apply on restart", 
+             size, size as f64 / 48.0);
     Ok(())
+}
+
+// --- Config Commands ---
+
+/// Output routing info for saving
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputRoutingInfo {
+    pub device_name: String,
+    pub sources: Vec<(usize, usize)>,
+    pub fader_gains: Vec<f32>,
+    pub send_gains: Vec<HashMap<usize, f32>>,
+}
+
+/// App state for save/restore
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppState {
+    pub io_buffer_size: usize,
+    pub output_routings: HashMap<String, OutputRoutingInfo>,
+    pub active_outputs: Vec<String>,
+    pub master_gain: f32,
+    pub master_muted: bool,
+    pub patch_scroll_x: f64,
+    pub patch_scroll_y: f64,
+    pub patch_zoom: f64,
+}
+
+/// Get saved app state
+#[tauri::command]
+fn get_app_state() -> AppState {
+    let cfg = config::get_config();
+    AppState {
+        io_buffer_size: cfg.io_buffer_size,
+        output_routings: cfg.output_routings.into_iter().map(|(k, v)| {
+            (k, OutputRoutingInfo {
+                device_name: v.device_name,
+                sources: v.sources,
+                fader_gains: v.fader_gains,
+                send_gains: v.send_gains,
+            })
+        }).collect(),
+        active_outputs: cfg.active_outputs,
+        master_gain: cfg.master.gain,
+        master_muted: cfg.master.muted,
+        patch_scroll_x: cfg.patch_view.scroll_x,
+        patch_scroll_y: cfg.patch_view.scroll_y,
+        patch_zoom: cfg.patch_view.zoom,
+    }
+}
+
+/// Save app state
+#[tauri::command]
+async fn save_app_state(state: AppState) -> Result<(), String> {
+    let cfg = config::AppConfig {
+        version: 1,
+        io_buffer_size: state.io_buffer_size,
+        output_routings: state.output_routings.into_iter().map(|(k, v)| {
+            (k, config::OutputRouting {
+                device_name: v.device_name,
+                sources: v.sources,
+                fader_gains: v.fader_gains,
+                send_gains: v.send_gains,
+            })
+        }).collect(),
+        sends: vec![],
+        master: config::MasterState {
+            gain: state.master_gain,
+            muted: state.master_muted,
+        },
+        patch_view: config::PatchViewState {
+            scroll_x: state.patch_scroll_x,
+            scroll_y: state.patch_scroll_y,
+            zoom: state.patch_zoom,
+        },
+        active_outputs: state.active_outputs,
+    };
+    config::update_config(cfg)?;
+    println!("[Spectrum] App state saved");
+    Ok(())
+}
+
+/// Restart the application
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    println!("[Spectrum] Restarting application...");
+    app.restart();
 }
 
 // --- Plugin Entry ---
@@ -267,6 +357,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|_app| {
+            // Load saved I/O buffer size from config
+            let saved_buffer_size = config::get_saved_io_buffer_size();
+            audio_capture::set_io_buffer_size(saved_buffer_size);
+            println!("[Spectrum] Loaded I/O buffer size from config: {} samples", saved_buffer_size);
+            
             // Try to start audio capture on app launch
             match audio_capture::start_capture() {
                 Ok(true) => {
@@ -316,6 +411,10 @@ pub fn run() {
             start_default_output,
             get_buffer_size,
             set_buffer_size,
+            // Config commands
+            get_app_state,
+            save_app_state,
+            restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

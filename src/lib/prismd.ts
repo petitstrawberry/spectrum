@@ -322,3 +322,44 @@ export async function getBufferSize(): Promise<number> {
 export async function setBufferSize(size: number): Promise<void> {
   return invoke('set_buffer_size', { size });
 }
+
+// --- App State Types ---
+
+export interface OutputRoutingInfo {
+  device_name: string;
+  sources: [number, number][];  // [left_ch, right_ch]
+  fader_gains: number[];
+  send_gains: Record<number, number>[];
+}
+
+export interface AppState {
+  io_buffer_size: number;
+  output_routings: Record<string, OutputRoutingInfo>;
+  active_outputs: string[];
+  master_gain: number;
+  master_muted: boolean;
+  patch_scroll_x: number;
+  patch_scroll_y: number;
+  patch_zoom: number;
+}
+
+/**
+ * Get saved app state (routing, settings, etc.)
+ */
+export async function getAppState(): Promise<AppState> {
+  return invoke<AppState>('get_app_state');
+}
+
+/**
+ * Save app state (routing, settings, etc.)
+ */
+export async function saveAppState(state: AppState): Promise<void> {
+  return invoke('save_app_state', { state });
+}
+
+/**
+ * Restart the application
+ */
+export async function restartApp(): Promise<void> {
+  return invoke('restart_app');
+}

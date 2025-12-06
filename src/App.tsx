@@ -31,11 +31,15 @@ import {
   setOutputVolume,
   getBufferSize,
   setBufferSize,
+  getAppState,
+  saveAppState,
+  restartApp,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
   type AudioDevice,
   type LevelData,
+  type AppState,
 } from './lib/prismd';
 
 // --- Types ---
@@ -195,16 +199,8 @@ function dbToMeterPosition(meterValue: number): number {
   return dbToMeterPercent(-meterValue);
 }
 
-// Get meter color based on dB level
-function getMeterColor(db: number): string {
-  if (db > 0) return '#ef4444'; // red-500 - over 0dB (clipping)
-  if (db > -6) return '#f59e0b'; // amber-500 - hot (-6dB to 0dB)
-  if (db > -12) return '#eab308'; // yellow-500 - warm (-12dB to -6dB)
-  return '#22c55e'; // green-500 - normal (below -12dB)
-}
-
 // Get gradient stops for level meter
-function getMeterGradient(level: number, db: number): string {
+function getMeterGradient(_level: number, db: number): string {
   // Create a multi-stop gradient based on the level
   if (db > 0) {
     return 'linear-gradient(to top, #22c55e 0%, #22c55e 60%, #eab308 70%, #f59e0b 85%, #ef4444 95%, #ef4444 100%)';
@@ -315,6 +311,28 @@ export default function App() {
     setTimeout(() => setIsRefreshing(false), 500);
   };
 
+  // Restore saved app state on mount
+  useEffect(() => {
+    const restoreState = async () => {
+      try {
+        const savedState = await getAppState();
+        console.log('[Spectrum] Restoring saved state:', savedState);
+
+        // Restore buffer size
+        if (savedState.io_buffer_size) {
+          setBufferSizeState(savedState.io_buffer_size);
+        }
+
+        // Note: Master fader and output routing restoration
+        // happens after nodes are created from devices
+      } catch (error) {
+        console.error('[Spectrum] Failed to restore state:', error);
+      }
+    };
+
+    restoreState();
+  }, []);
+
   // Fetch on mount and poll every 2 seconds
   useEffect(() => {
     fetchPrismData();
@@ -324,13 +342,94 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Handle buffer size change
+  // Build current app state for saving
+  const buildAppState = useCallback((): AppState => {
+    // Build output routings from current nodes and connections
+    const outputRoutings: Record<string, {
+      device_name: string;
+      sources: [number, number][];
+      fader_gains: number[];
+      send_gains: Record<number, number>[];
+    }> = {};
+
+    // Get focused target for master fader state
+    const targetNodes = nodes.filter(n => n.type === 'target');
+    const focusedTarget = targetNodes.find(n => n.id === focusedOutputId) || targetNodes[0];
+
+    for (const target of targetNodes) {
+      const deviceConnections = connections.filter(c => c.toNodeId === target.id);
+      const sources: [number, number][] = [];
+      const faderGains: number[] = [];
+
+      for (const conn of deviceConnections) {
+        const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+        if (sourceNode) {
+          // Extract channel pair from libraryId (e.g., "prism-pair-0")
+          const match = sourceNode.libraryId.match(/prism-pair-(\d+)/);
+          if (match) {
+            const pairIndex = parseInt(match[1], 10);
+            sources.push([pairIndex * 2, pairIndex * 2 + 1]);
+            faderGains.push(sourceNode.volume / 100); // Convert 0-100 to 0-1
+          }
+        }
+      }
+
+      if (sources.length > 0) {
+        outputRoutings[target.label] = {
+          device_name: target.label,
+          sources,
+          fader_gains: faderGains,
+          send_gains: sources.map(() => ({})),
+        };
+      }
+    }
+
+    return {
+      io_buffer_size: bufferSize,
+      output_routings: outputRoutings,
+      active_outputs: targetNodes.map(n => n.label),
+      master_gain: focusedTarget ? focusedTarget.volume / 100 : 1.0,
+      master_muted: focusedTarget ? focusedTarget.muted : false,
+      patch_scroll_x: canvasTransform.x,
+      patch_scroll_y: canvasTransform.y,
+      patch_zoom: canvasTransform.scale,
+    };
+  }, [nodes, connections, bufferSize, focusedOutputId, canvasTransform]);
+
+  // Pending restart flag
+  const [pendingRestart, setPendingRestart] = useState(false);
+
+  // Handle buffer size change - save state and prompt for restart
   const handleBufferSizeChange = async (size: number) => {
+    if (size === bufferSize) return; // No change
+
     try {
+      // First, save current app state with new buffer size
+      const state = buildAppState();
+      state.io_buffer_size = size;
+      await saveAppState(state);
+
+      // Set the buffer size (will be saved to config)
       await setBufferSize(size);
       setBufferSizeState(size);
+
+      // Show restart required message
+      setPendingRestart(true);
+
+      console.log('[Spectrum] Buffer size saved, restart required:', size);
     } catch (error) {
-      console.error('Failed to set buffer size:', error);
+      console.error('Failed to change buffer size:', error);
+    }
+  };
+
+  // Handle app restart
+  const handleRestartApp = async () => {
+    try {
+      await restartApp();
+    } catch (error) {
+      console.error('Failed to restart app:', error);
+      // Fallback: try window reload (for dev mode)
+      window.location.reload();
     }
   };
 
@@ -1055,7 +1154,7 @@ export default function App() {
             PRISM ENGINE ACTIVE
           </div>
         </div>
-        <button 
+        <button
           onClick={() => setShowSettings(true)}
           className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
         >
@@ -1950,11 +2049,11 @@ export default function App() {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div 
+        <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
           onClick={() => setShowSettings(false)}
         >
-          <div 
+          <div
             className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-6 w-96"
             onClick={e => e.stopPropagation()}
           >
@@ -1963,7 +2062,7 @@ export default function App() {
                 <Settings className="w-5 h-5 text-cyan-400" />
                 Settings
               </h2>
-              <button 
+              <button
                 onClick={() => setShowSettings(false)}
                 className="text-slate-400 hover:text-white transition-colors p-1 hover:bg-slate-800 rounded"
               >
@@ -1975,24 +2074,37 @@ export default function App() {
               {/* Buffer Size Setting */}
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Buffer Size
+                  I/O Buffer Size (Latency)
                 </label>
                 <select
                   value={bufferSize}
                   onChange={e => handleBufferSizeChange(Number(e.target.value))}
                   className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-cyan-500 focus:outline-none"
                 >
-                  <option value={64}>64 samples (~1.3ms @ 48kHz)</option>
-                  <option value={128}>128 samples (~2.7ms @ 48kHz)</option>
-                  <option value={256}>256 samples (~5.3ms @ 48kHz)</option>
-                  <option value={512}>512 samples (~10.7ms @ 48kHz)</option>
-                  <option value={1024}>1024 samples (~21.3ms @ 48kHz)</option>
-                  <option value={2048}>2048 samples (~42.7ms @ 48kHz)</option>
-                  <option value={4096}>4096 samples (~85.3ms @ 48kHz)</option>
+                  <option value={64}>64 samples (~1.3ms) - Ultra Low</option>
+                  <option value={128}>128 samples (~2.7ms) - Low</option>
+                  <option value={256}>256 samples (~5.3ms) - Default</option>
+                  <option value={512}>512 samples (~10.7ms) - Safe</option>
+                  <option value={1024}>1024 samples (~21.3ms) - Very Safe</option>
                 </select>
                 <p className="mt-2 text-xs text-slate-500">
-                  Lower values reduce latency but require more CPU. Audio engine will restart automatically.
+                  CoreAudio I/O buffer size. Lower = less latency but may cause audio glitches on slower systems.
+                  <br />
+                  <span className="text-amber-400">⚠️ Changing this will restart the app.</span>
                 </p>
+                {pendingRestart && (
+                  <div className="mt-3 p-3 bg-amber-900/50 border border-amber-600 rounded-lg">
+                    <p className="text-amber-300 text-sm mb-2">
+                      Buffer size changed. Please restart the app to apply changes.
+                    </p>
+                    <button
+                      onClick={handleRestartApp}
+                      className="w-full px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium rounded-lg transition-colors"
+                    >
+                      Restart App
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Driver Status Info */}
