@@ -56,6 +56,9 @@ export interface AudioDevice {
   channels: number;
   is_input: boolean;
   is_output: boolean;
+  device_type: string;  // "prism", "virtual", "builtin", "external"
+  input_channels: number;
+  output_channels: number;
 }
 
 // --- Helpers ---
@@ -189,4 +192,119 @@ export async function getAudioDevices(): Promise<AudioDevice[]> {
  */
 export async function getAudioLevels(deviceId: string): Promise<number[]> {
   return invoke<number[]>('get_audio_levels', { deviceId });
+}
+
+// --- Mixer/Router Types ---
+
+export interface LevelData {
+  left_rms: number;
+  right_rms: number;
+  left_peak: number;
+  right_peak: number;
+}
+
+// --- Mixer/Router API Functions ---
+
+/**
+ * Get all input levels (32 stereo pairs from Prism)
+ */
+export async function getInputLevels(): Promise<LevelData[]> {
+  return invoke<LevelData[]>('get_input_levels');
+}
+
+/**
+ * Get output levels for a specific device
+ */
+export async function getOutputDeviceLevels(deviceId: string): Promise<LevelData[]> {
+  return invoke<LevelData[]>('get_output_device_levels', { deviceId });
+}
+
+/**
+ * Update a send connection
+ */
+export async function updateMixerSend(
+  sourceOffset: number,
+  targetDevice: string,
+  targetPair: number,
+  level: number,
+  muted: boolean
+): Promise<void> {
+  return invoke('update_mixer_send', {
+    sourceOffset,
+    targetDevice,
+    targetPair,
+    level,
+    muted,
+  });
+}
+
+/**
+ * Remove a send connection
+ */
+export async function removeMixerSend(
+  sourceOffset: number,
+  targetDevice: string,
+  targetPair: number
+): Promise<void> {
+  return invoke('remove_mixer_send', {
+    sourceOffset,
+    targetDevice,
+    targetPair,
+  });
+}
+
+/**
+ * Set source channel fader (0-100)
+ */
+export async function setSourceVolume(pairIndex: number, level: number): Promise<void> {
+  return invoke('set_source_volume', { pairIndex, level });
+}
+
+/**
+ * Set source channel mute
+ */
+export async function setSourceMute(pairIndex: number, muted: boolean): Promise<void> {
+  return invoke('set_source_mute', { pairIndex, muted });
+}
+
+/**
+ * Set output device master fader (0-100)
+ */
+export async function setOutputVolume(deviceId: string, level: number): Promise<void> {
+  return invoke('set_output_volume', { deviceId, level });
+}
+
+/**
+ * Check if Prism device is available
+ */
+export async function isPrismAvailable(): Promise<boolean> {
+  return invoke<boolean>('is_prism_available');
+}
+
+/**
+ * Start audio output to a specific device
+ */
+export async function startAudioOutput(deviceId: number): Promise<void> {
+  return invoke('start_audio_output', { deviceId });
+}
+
+/**
+ * Stop audio output to a specific device
+ */
+export async function stopAudioOutput(deviceId: number): Promise<void> {
+  return invoke('stop_audio_output', { deviceId });
+}
+
+/**
+ * Find output device by name
+ */
+export async function findOutputDevice(name: string): Promise<number | null> {
+  return invoke<number | null>('find_output_device', { name });
+}
+
+/**
+ * Start output to default audio device
+ */
+export async function startDefaultOutput(): Promise<void> {
+  return invoke('start_default_output');
 }

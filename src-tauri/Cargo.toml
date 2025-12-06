@@ -21,6 +21,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 coreaudio-rs = "0.12"
 tokio = { version = "1", features = ["full", "rt-multi-thread"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+ringbuf = "0.4"
+lazy_static = "1.5"
 
 [profile.dev]
 incremental = true

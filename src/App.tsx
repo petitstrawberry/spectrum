@@ -21,12 +21,19 @@ import {
   RefreshCw,
   Volume2,
 } from 'lucide-react';
-import { 
-  getPrismApps, 
-  getDriverStatus, 
+import {
+  getPrismApps,
+  getDriverStatus,
+  getAudioDevices,
+  getInputLevels,
+  updateMixerSend,
+  removeMixerSend,
+  setOutputVolume,
   // setRouting, // TODO: Re-enable when channel routing is implemented
-  type AppSource, 
-  type DriverStatus 
+  type AppSource,
+  type DriverStatus,
+  type AudioDevice,
+  type LevelData,
 } from './lib/prismd';
 
 // --- Types ---
@@ -59,15 +66,42 @@ interface Connection {
   muted: boolean;
 }
 
-// --- Output Targets (Hardware/Virtual outputs) ---
+// --- Output Targets - will be populated from CoreAudio ---
+// Now dynamically generated from actual audio devices
 
-const LIBRARY_TARGETS = [
-  { id: 'out_main', name: 'Main Speakers', type: 'Hardware', icon: Speaker, color: 'text-cyan-400', channels: 2 },
-  { id: 'out_phones', name: 'Headphones', type: 'Hardware', icon: Headphones, color: 'text-cyan-400', channels: 2 },
-  { id: 'out_obs', name: 'OBS Stream', type: 'Virtual', icon: Radio, color: 'text-pink-400', channels: 2 },
-  { id: 'out_zoom', name: 'Zoom Mic', type: 'Virtual', icon: Video, color: 'text-purple-400', channels: 1 },
-  { id: 'out_blackhole', name: 'BlackHole 16ch', type: 'System', icon: Monitor, color: 'text-slate-400', channels: 16 },
-];
+// --- Helper: Get icon for device type ---
+function getIconForDeviceType(device: AudioDevice): React.ComponentType<{ className?: string }> {
+  const name = device.name.toLowerCase();
+  if (name.includes('headphone')) return Headphones;
+  if (name.includes('speaker') || name.includes('built-in output')) return Speaker;
+  if (name.includes('blackhole') || name.includes('loopback')) return Radio;
+  if (name.includes('obs') || name.includes('stream')) return Video;
+  if (device.device_type === 'virtual') return Radio;
+  if (device.device_type === 'builtin') return Speaker;
+  return Monitor;
+}
+
+// --- Helper: Get color for device type ---
+function getColorForDeviceType(device: AudioDevice): string {
+  switch (device.device_type) {
+    case 'prism': return 'text-cyan-400';
+    case 'virtual': return 'text-pink-400';
+    case 'builtin': return 'text-green-400';
+    case 'external': return 'text-amber-400';
+    default: return 'text-slate-400';
+  }
+}
+
+// --- Helper: Get type label ---
+function getTypeLabelForDevice(device: AudioDevice): string {
+  switch (device.device_type) {
+    case 'prism': return 'Prism';
+    case 'virtual': return 'Virtual';
+    case 'builtin': return 'Built-in';
+    case 'external': return 'External';
+    default: return 'System';
+  }
+}
 
 // --- Icon helpers ---
 
@@ -116,8 +150,12 @@ export default function App() {
 
   // Prism daemon state
   const [prismApps, setPrismApps] = useState<AppSource[]>([]);
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [driverStatus, setDriverStatus] = useState<DriverStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  // Real-time level meters (32 stereo pairs)
+  const [inputLevels, setInputLevels] = useState<LevelData[]>([]);
 
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -130,15 +168,18 @@ export default function App() {
   } | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // --- Prism Daemon Communication ---
+  // --- Prism Daemon & Audio Device Communication ---
   const fetchPrismData = async () => {
     try {
-      const [apps, status] = await Promise.all([
+      const [apps, status, devices] = await Promise.all([
         getPrismApps(),
         getDriverStatus(),
+        getAudioDevices(),
       ]);
       setPrismApps(apps);
       setDriverStatus(status);
+      // Filter to output devices only
+      setAudioDevices(devices.filter(d => d.is_output));
     } catch (error) {
       console.error('Failed to fetch prism data:', error);
       setDriverStatus({ connected: false, sample_rate: 0, buffer_size: 0 });
@@ -156,6 +197,35 @@ export default function App() {
     fetchPrismData();
     const interval = setInterval(fetchPrismData, 2000);
     return () => clearInterval(interval);
+  }, []);
+  
+  // High-frequency level meter polling (~30fps)
+  useEffect(() => {
+    let animationFrame: number;
+    let lastTime = 0;
+    let errorCount = 0;
+    
+    const updateLevels = async (currentTime: number) => {
+      // Throttle to ~30fps (33ms interval)
+      if (currentTime - lastTime >= 33) {
+        try {
+          const levels = await getInputLevels();
+          if (levels && levels.length > 0) {
+            setInputLevels(levels);
+          }
+        } catch (error) {
+          errorCount++;
+          if (errorCount <= 3) {
+            console.error('Level fetch error:', error);
+          }
+        }
+        lastTime = currentTime;
+      }
+      animationFrame = requestAnimationFrame(updateLevels);
+    };
+    
+    animationFrame = requestAnimationFrame(updateLevels);
+    return () => cancelAnimationFrame(animationFrame);
   }, []);
 
   // Channel-based source type for UI (32 stereo pairs = 64 channels)
@@ -177,15 +247,15 @@ export default function App() {
   // Generate 32 stereo channel pairs with app assignments
   const channelSources = useMemo((): ChannelSource[] => {
     const channels: ChannelSource[] = [];
-    
+
     for (let i = 0; i < 32; i++) {
       const offset = i * 2;
       const ch1 = offset + 1;
       const ch2 = offset + 2;
-      
+
       // Ch 1-2 is the MAIN (full mix) channel
       const isMain = offset === 0;
-      
+
       // Find apps assigned to this channel
       const assignedApps = prismApps
         .filter(app => app.clients.some(c => c.offset === offset))
@@ -196,7 +266,7 @@ export default function App() {
           pid: app.pid,
           clientCount: app.clients.filter(c => c.offset === offset).length,
         }));
-      
+
       channels.push({
         id: `ch_${offset}`,
         channelOffset: offset,
@@ -206,20 +276,35 @@ export default function App() {
         isMain,
       });
     }
-    
+
     return channels;
   }, [prismApps]);
 
-  // --- Initial Setup ---
-  useEffect(() => {
-    // Create initial target nodes only (sources will be added from prism apps)
-    const t1 = createNode('out_main', 'target', 600, 100);
-    const t2 = createNode('out_obs', 'target', 600, 250);
+  // Generate output targets from actual audio devices
+  type OutputTarget = {
+    id: string;
+    name: string;
+    type: string;
+    icon: React.ComponentType<{ className?: string }>;
+    color: string;
+    channels: number;
+    deviceId: string;
+  };
 
-    setNodes([t1, t2]);
-    setConnections([]);
-    setFocusedOutputId(t1.id);
-  }, []);
+  const outputTargets = useMemo((): OutputTarget[] => {
+    // Filter out Prism devices to prevent feedback loops (Prism→Prism routing)
+    return audioDevices
+      .filter(device => device.device_type !== 'prism')
+      .map(device => ({
+        id: `out_${device.id}`,
+        name: device.name,
+        type: getTypeLabelForDevice(device),
+        icon: getIconForDeviceType(device),
+        color: getColorForDeviceType(device),
+        channels: device.output_channels,
+        deviceId: device.id,
+      }));
+  }, [audioDevices]);
 
   // --- Helpers ---
 
@@ -230,12 +315,12 @@ export default function App() {
       if (channelData) {
         // Get app names for label
         const isMain = channelData.isMain;
-        const appNames = isMain 
+        const appNames = isMain
           ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
           : (channelData.apps.map(a => a.name).join(', ') || 'Empty');
         const icon = isMain ? Volume2 : (channelData.apps[0]?.icon || Music);
         const color = isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500');
-        
+
         return {
           id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           libraryId,
@@ -252,9 +337,9 @@ export default function App() {
         };
       }
     }
-    
+
     // Target nodes
-    const targetData = LIBRARY_TARGETS.find(t => t.id === libraryId);
+    const targetData = outputTargets.find(t => t.id === libraryId);
     return {
       id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       libraryId,
@@ -268,7 +353,21 @@ export default function App() {
       muted: false,
       channelCount: targetData?.channels || 2,
     };
-  }, [channelSources]);
+  }, [channelSources, outputTargets]);
+
+  // --- Initial Setup - add first output when devices are loaded ---
+  const initializedRef = useRef(false);
+  useEffect(() => {
+    if (outputTargets.length > 0 && !initializedRef.current) {
+      initializedRef.current = true;
+      // Create initial nodes with first available output device
+      const firstTarget = outputTargets[0];
+      const t1 = createNode(firstTarget.id, 'target', 600, 100);
+      setNodes([t1]);
+      setConnections([]);
+      setFocusedOutputId(t1.id);
+    }
+  }, [outputTargets, createNode]);
 
   const getPortPosition = useCallback((node: NodeData, pairIndex: number, isInput: boolean) => {
     const headerHeight = 36;
@@ -301,6 +400,20 @@ export default function App() {
   };
 
   const deleteConnection = (id: string) => {
+    // Find the connection to get source and target info for backend cleanup
+    const conn = connections.find(c => c.id === id);
+    if (conn) {
+      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+      const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      if (sourceNode && targetNode) {
+        const channelOffset = sourceNode.channelOffset ?? 0;
+        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+        if (targetData) {
+          // Remove from backend
+          removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
+        }
+      }
+    }
     setConnections(prev => prev.filter(c => c.id !== id));
   };
 
@@ -309,6 +422,18 @@ export default function App() {
       if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, sendLevel: level };
       return c;
     }));
+    
+    // Update backend
+    const sourceNode = nodes.find(n => n.id === sourceId);
+    const targetNode = nodes.find(n => n.id === targetId);
+    if (sourceNode && targetNode) {
+      const channelOffset = sourceNode.channelOffset ?? 0;
+      const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+      if (targetData) {
+        const conn = connections.find(c => c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex);
+        updateMixerSend(channelOffset, targetData.deviceId, pairIndex, level, conn?.muted ?? false);
+      }
+    }
   };
 
   const toggleConnectionMute = (sourceId: string, targetId: string, pairIndex: number) => {
@@ -316,6 +441,20 @@ export default function App() {
       if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, muted: !c.muted };
       return c;
     }));
+    
+    // Update backend
+    const sourceNode = nodes.find(n => n.id === sourceId);
+    const targetNode = nodes.find(n => n.id === targetId);
+    if (sourceNode && targetNode) {
+      const channelOffset = sourceNode.channelOffset ?? 0;
+      const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+      if (targetData) {
+        const conn = connections.find(c => c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex);
+        if (conn) {
+          updateMixerSend(channelOffset, targetData.deviceId, pairIndex, conn.sendLevel, !conn.muted);
+        }
+      }
+    }
   };
 
   const updateMasterVolume = (nodeId: string, val: number) => {
@@ -544,7 +683,7 @@ export default function App() {
     const handleMove = (ev: MouseEvent) => {
       const currentPos = direction === 'top' ? ev.clientY : ev.clientX;
       let delta = currentPos - startPos;
-      
+
       // Invert delta for right sidebar, master, and top (mixer)
       if (direction === 'right' || direction === 'top' || direction === 'master') {
         delta = -delta;
@@ -573,14 +712,14 @@ export default function App() {
   const screenToCanvas = useCallback((clientX: number, clientY: number) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
-    
+
     const screenX = clientX - rect.left;
     const screenY = clientY - rect.top;
-    
+
     // Reverse the transform: subtract pan, then divide by scale
     const canvasX = (screenX - canvasTransform.x) / canvasTransform.scale;
     const canvasY = (screenY - canvasTransform.y) / canvasTransform.scale;
-    
+
     return { x: canvasX, y: canvasY };
   }, [canvasTransform]);
 
@@ -606,7 +745,7 @@ export default function App() {
     const handleWireMove = (ev: MouseEvent) => {
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
-      
+
       // Need to get current transform state
       setDrawingWire(prev => {
         if (!prev) return null;
@@ -645,6 +784,17 @@ export default function App() {
         // Find the source node to get channel offset
         const sourceNode = nodes.find(n => n.id === drawingWire.fromNode);
         
+        // Check if target is Prism device - prevent Prism→Prism routing (causes feedback loop)
+        const targetNode = nodes.find(n => n.id === nodeId);
+        const targetData = targetNode ? outputTargets.find(t => t.id === targetNode.libraryId) : null;
+        const targetDeviceInfo = targetData ? audioDevices.find(d => d.id === targetData.deviceId) : null;
+        
+        if (targetDeviceInfo?.device_type === 'prism') {
+          console.warn('Cannot route to Prism device - would cause feedback loop');
+          setDrawingWire(null);
+          return;
+        }
+
         // Calculate channel offset based on target channel pair
         // Each pair is 2 channels, so pair 0 = offset 0, pair 1 = offset 2, etc.
         const targetChannelOffset = channelIndex * 2;
@@ -653,6 +803,30 @@ export default function App() {
         // For now, log the routing attempt
         if (sourceNode?.channelOffset !== undefined) {
           console.log(`Route from channel ${sourceNode.channelOffset} to channel ${targetChannelOffset}`);
+          
+          // Start output to the target device and update mixer send
+          const targetNode = nodes.find(n => n.id === nodeId);
+          if (targetNode) {
+            const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+            if (targetData) {
+              // Start audio output to this device
+              const deviceIdNum = parseInt(targetData.deviceId);
+              if (!isNaN(deviceIdNum)) {
+                import('./lib/prismd').then(({ startAudioOutput }) => {
+                  startAudioOutput(deviceIdNum).catch(console.error);
+                });
+              }
+              
+              // Update mixer send
+              updateMixerSend(
+                sourceNode.channelOffset,
+                targetData.deviceId,
+                channelIndex,
+                80, // Default send level
+                false // Not muted
+              );
+            }
+          }
         }
 
         setConnections(prev => [...prev, {
@@ -667,7 +841,7 @@ export default function App() {
       }
       setDrawingWire(null);
     }
-  }, [drawingWire, connections, nodes]);
+  }, [drawingWire, connections, nodes, audioDevices, outputTargets]);
 
   const activeTargets = nodes.filter(n => n.type === 'target');
   const focusedTarget = nodes.find(n => n.id === focusedOutputId);
@@ -715,8 +889,8 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden">
 
         {/* LEFT SIDEBAR: SOURCES LIBRARY */}
-        <div 
-          className="bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" 
+        <div
+          className="bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative"
           style={{ width: leftSidebarWidth }}
           onClick={e => e.stopPropagation()}
         >
@@ -749,12 +923,22 @@ export default function App() {
               const hasApps = channel.hasApps;
               const FirstIcon = channel.apps[0]?.icon || Music;
               
+              // Get real level data for this channel
+              const pairIndex = channel.channelOffset / 2;
+              const levelData = inputLevels[pairIndex];
+              // Convert RMS to dB and scale for meter display
+              // RMS of 1.0 = 0dB, typical audio ranges from -60dB to 0dB
+              const rms = levelData ? (levelData.left_rms + levelData.right_rms) / 2 : 0;
+              // Convert to dB: 20 * log10(rms), clamp to -60dB to 0dB, then scale to 0-100%
+              const db = rms > 0.00001 ? 20 * Math.log10(rms) : -60;
+              const avgLevel = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+
               return (
                 <div
                   key={channel.id}
                   onMouseDown={!isUsed ? (e) => handleLibraryMouseDown(e, 'lib_source', channel.id) : undefined}
                   className={`
-                    group flex items-center gap-2 px-2 py-1.5 rounded-lg border transition-all
+                    group flex items-center gap-2 px-2 py-1.5 rounded-lg border transition-all relative overflow-hidden
                     ${isUsed
                       ? 'border-transparent bg-slate-900/30 opacity-40 cursor-default'
                       : hasApps
@@ -762,15 +946,21 @@ export default function App() {
                         : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 cursor-grab active:cursor-grabbing'}
                   `}
                 >
+                  {/* Level meter bar (background) */}
+                  <div 
+                    className="absolute left-0 top-0 bottom-0 bg-gradient-to-r from-cyan-500/20 to-transparent rounded-lg transition-all duration-75 pointer-events-none"
+                    style={{ width: `${Math.min(avgLevel, 100)}%` }}
+                  />
+                  
                   {/* Channel number */}
-                  <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'}`}>
+                  <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'} relative z-10`}>
                     {channel.channelLabel}
                   </div>
-                  
+
                   {/* App info */}
                   {channel.isMain ? (
                     // MAIN channel - show icon and app count
-                    <div className="flex-1 flex items-center gap-2 min-w-0">
+                    <div className="flex-1 flex items-center gap-2 min-w-0 relative z-10">
                       <div className="w-5 h-5 rounded flex items-center justify-center bg-cyan-900/50 text-cyan-400">
                         <Volume2 className="w-3 h-3" />
                       </div>
@@ -782,7 +972,7 @@ export default function App() {
                       </div>
                     </div>
                   ) : hasApps ? (
-                    <div className="flex-1 flex items-center gap-2 min-w-0">
+                    <div className="flex-1 flex items-center gap-2 min-w-0 relative z-10">
                       <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${channel.apps[0].color}`}>
                         <FirstIcon className="w-3 h-3" />
                       </div>
@@ -796,10 +986,10 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="flex-1 text-[10px] text-slate-600 italic">Empty</div>
+                    <div className="flex-1 text-[10px] text-slate-600 italic relative z-10">Empty</div>
                   )}
-                  
-                  {!isUsed && <Plus className="w-3 h-3 text-slate-700 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100" />}
+
+                  {!isUsed && <Plus className="w-3 h-3 text-slate-700 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />}
                 </div>
               );
             })}
@@ -910,7 +1100,14 @@ export default function App() {
                 <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing">
                   <div className={`w-2 h-2 rounded-full ${node.color} shadow-[0_0_8px_currentColor]`}></div>
                   <NodeIcon className={`w-4 h-4 ${node.color}`} />
-                  <span className="text-xs font-bold text-slate-200 flex-1 truncate">{node.label}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs font-bold text-slate-200 truncate block">
+                      {node.type === 'source' ? node.subLabel : node.label}
+                    </span>
+                    {node.type === 'source' && (
+                      <span className="text-[9px] text-slate-500 truncate block">{node.label}</span>
+                    )}
+                  </div>
                   <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
                 </div>
 
@@ -962,8 +1159,8 @@ export default function App() {
         />
 
         {/* RIGHT SIDEBAR: OUTPUTS LIBRARY */}
-        <div 
-          className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" 
+        <div
+          className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative"
           style={{ width: rightSidebarWidth }}
           onClick={e => e.stopPropagation()}
         >
@@ -973,7 +1170,11 @@ export default function App() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2">
-            {LIBRARY_TARGETS.map(item => {
+            {outputTargets.length === 0 ? (
+              <div className="text-center py-8 text-slate-600 text-xs">
+                No output devices found
+              </div>
+            ) : outputTargets.map(item => {
               const isUsed = nodes.some(n => n.libraryId === item.id);
               const ItemIcon = item.icon;
               return (
@@ -992,7 +1193,7 @@ export default function App() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-xs font-bold text-slate-200 truncate">{item.name}</div>
-                    <div className="text-[9px] text-slate-500 uppercase">{item.type}</div>
+                    <div className="text-[9px] text-slate-500 uppercase">{item.channels}ch • {item.type}</div>
                   </div>
                   {!isUsed && <Plus className="w-4 h-4 text-slate-600 group-hover:text-pink-400 transition-colors" />}
                 </div>
@@ -1010,7 +1211,7 @@ export default function App() {
       />
 
       {/* BOTTOM: INTEGRATED MIXER & MASTER CONTROL */}
-      <div 
+      <div
         className="bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30"
         style={{ height: mixerHeight }}
       >
@@ -1040,6 +1241,21 @@ export default function App() {
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
                 const NodeIcon = node.icon;
+                
+                // Get real input levels for this channel (dB conversion)
+                const channelOffset = node.channelOffset ?? 0;
+                const pairIndex = channelOffset / 2;
+                const levelData = inputLevels[pairIndex];
+                
+                const rmsToMeterLevel = (rms: number): number => {
+                  if (rms <= 0) return 0;
+                  const db = 20 * Math.log10(rms);
+                  const clampedDb = Math.max(-60, Math.min(0, db));
+                  return ((clampedDb + 60) / 60) * 100;
+                };
+                
+                const leftLevel = levelData ? rmsToMeterLevel(levelData.left_rms) : 0;
+                const rightLevel = levelData ? rmsToMeterLevel(levelData.right_rms) : 0;
 
                 return (
                 <div key={node.id} className="w-16 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
@@ -1052,8 +1268,18 @@ export default function App() {
                     <div className="text-[9px] font-bold truncate text-slate-300">{node.label}</div>
                     </div>
                     <div className="flex-1 w-full px-4 flex gap-1.5 justify-center relative">
+                    {/* Real Level Meters */}
                     <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                        <div className="absolute bottom-0 w-full bg-gradient-to-t from-green-500 to-cyan-400 opacity-60 animate-meter" style={{ '--meter-height': isMuted ? '0%' : '70%' } as React.CSSProperties}></div>
+                        <div 
+                          className="absolute bottom-0 w-full bg-gradient-to-t from-green-500 to-cyan-400 transition-all duration-75"
+                          style={{ height: isMuted ? '0%' : `${leftLevel}%`, opacity: 0.9 }}
+                        ></div>
+                    </div>
+                    <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
+                        <div 
+                          className="absolute bottom-0 w-full bg-gradient-to-t from-green-500 to-cyan-400 transition-all duration-75"
+                          style={{ height: isMuted ? '0%' : `${rightLevel}%`, opacity: 0.9 }}
+                        ></div>
                     </div>
                     <div className="w-1.5 h-full bg-slate-950 rounded-full relative group/fader">
                         <input
@@ -1080,7 +1306,7 @@ export default function App() {
         />
 
         {/* MASTER SECTION (RIGHT) */}
-        <div 
+        <div
           className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl min-h-0"
           style={{ width: masterWidth }}
         >
@@ -1149,22 +1375,72 @@ export default function App() {
              </div>
 
              {/* 3. Master Fader (Right) */}
-             {focusedTarget && (
+             {focusedTarget && (() => {
+                 // Calculate master levels from connected sources
+                 const connectedSources = connections.filter(c => c.toNodeId === focusedTarget.id && c.toChannel === focusedPairIndex);
+                 let masterLeftRms = 0;
+                 let masterRightRms = 0;
+                 
+                 for (const conn of connectedSources) {
+                   if (conn.muted) continue;
+                   const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+                   if (!sourceNode) continue;
+                   const channelOffset = sourceNode.channelOffset ?? 0;
+                   const pairIdx = channelOffset / 2;
+                   const levelData = inputLevels[pairIdx];
+                   if (levelData) {
+                     const sendGain = conn.sendLevel / 100;
+                     // Sum power (RMS^2) for proper mixing
+                     masterLeftRms += Math.pow(levelData.left_rms * sendGain, 2);
+                     masterRightRms += Math.pow(levelData.right_rms * sendGain, 2);
+                   }
+                 }
+                 
+                 // Apply master volume and convert to dB for meter display
+                 const masterGain = focusedTarget.volume / 100;
+                 masterLeftRms = Math.sqrt(masterLeftRms) * masterGain;
+                 masterRightRms = Math.sqrt(masterRightRms) * masterGain;
+                 
+                 const rmsToMeterLevel = (rms: number): number => {
+                   if (rms <= 0) return 0;
+                   const db = 20 * Math.log10(rms);
+                   const clampedDb = Math.max(-60, Math.min(0, db));
+                   return ((clampedDb + 60) / 60) * 100;
+                 };
+                 
+                 const masterLeftLevel = rmsToMeterLevel(masterLeftRms);
+                 const masterRightLevel = rmsToMeterLevel(masterRightRms);
+                 
+                 return (
                  <div className="w-16 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
                     <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
                     <div className="flex-1 w-full px-4 flex gap-1.5 justify-center relative">
-                        {/* Multi-channel Meter */}
+                        {/* Real Multi-channel Meter */}
                         <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                            <div className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 opacity-80 animate-meter-l"></div>
+                            <div 
+                              className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 transition-all duration-75"
+                              style={{ height: `${masterLeftLevel}%`, opacity: 0.9 }}
+                            ></div>
                         </div>
                         <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                            <div className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 opacity-80 animate-meter-r"></div>
+                            <div 
+                              className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 transition-all duration-75"
+                              style={{ height: `${masterRightLevel}%`, opacity: 0.9 }}
+                            ></div>
                         </div>
                         {/* Fader */}
                         <div className="absolute inset-0 w-full group/master">
                             <input
                                 type="range" min="0" max="100" value={focusedTarget.volume}
-                                onChange={(e) => updateMasterVolume(focusedTarget.id, Number(e.target.value))}
+                                onChange={(e) => {
+                                  const vol = Number(e.target.value);
+                                  updateMasterVolume(focusedTarget.id, vol);
+                                  // Also update backend
+                                  const targetData = outputTargets.find(t => t.id === focusedTarget.libraryId);
+                                  if (targetData) {
+                                    setOutputVolume(targetData.deviceId, vol);
+                                  }
+                                }}
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20 appearance-slider-vertical"
                             />
                             <div
@@ -1175,9 +1451,12 @@ export default function App() {
                             </div>
                         </div>
                     </div>
-                    <div className="text-[9px] font-mono font-bold text-slate-300 mt-2">-0.0</div>
+                    <div className="text-[9px] font-mono font-bold text-slate-300 mt-2">
+                      {focusedTarget.volume === 100 ? '-0.0' : `-${((100 - focusedTarget.volume) / 10).toFixed(1)}`}
+                    </div>
                  </div>
-             )}
+                 );
+             })()}
           </div>
         </div>
 
@@ -1195,7 +1474,7 @@ export default function App() {
                   const ch = channelSources.find(c => c.id === libraryDrag.id);
                   return ch?.isMain ? 'Ch 1-2 (MAIN)' : `Ch ${ch?.channelLabel || '?'}`;
                 })()
-              : LIBRARY_TARGETS.find(t => t.id === libraryDrag.id)?.name
+              : outputTargets.find(t => t.id === libraryDrag.id)?.name
             }
           </span>
         </div>
