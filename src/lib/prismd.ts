@@ -434,3 +434,10 @@ export async function saveAppState(state: AppState): Promise<void> {
 export async function restartApp(): Promise<void> {
   return invoke('restart_app');
 }
+
+/**
+ * Open Prism.app (companion app for channel assignment)
+ */
+export async function openPrismApp(): Promise<boolean> {
+  return invoke<boolean>('open_prism_app');
+}

@@ -21,6 +21,7 @@ import {
   RefreshCw,
   Volume2,
   Mic,
+  ExternalLink,
 } from 'lucide-react';
 import {
   getPrismApps,
@@ -40,6 +41,7 @@ import {
   stopInputCapture,
   getActiveInputCaptures,
   getInputDeviceLevels,
+  openPrismApp,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -1602,8 +1604,17 @@ export default function App() {
           <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
             {/* Prism mode: Show channel list */}
             {inputSourceMode === 'prism' && prismDevice ? (
-              // Prism: Show per-channel nodes with app assignment
-              channelSources.map(channel => {
+              <>
+                {/* Open Prism App button */}
+                <button
+                  onClick={() => openPrismApp().catch(console.error)}
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 mb-2 rounded-md bg-slate-800/50 border border-slate-700/50 hover:border-slate-600 hover:bg-slate-800 text-slate-400 hover:text-slate-300 text-[10px] transition-all"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Configure routing in Prism</span>
+                </button>
+                {/* Per-channel nodes with app assignment */}
+                {channelSources.map(channel => {
                 const isUsed = isLibraryItemUsed(channel.id);
                 const hasApps = channel.hasApps;
                 const FirstIcon = channel.apps[0]?.icon || Music;
@@ -1682,7 +1693,8 @@ export default function App() {
                     {!isUsed && <Plus className="w-3 h-3 text-slate-700 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />}
                   </div>
                 );
-              })
+              })}
+              </>
             ) : inputSourceMode === 'prism' && !prismDevice ? (
               // Prism mode but no Prism device available
               <div className="text-center py-8 text-slate-600 text-xs">

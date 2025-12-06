@@ -438,6 +438,69 @@ fn restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Open Prism.app (companion app for channel assignment)
+#[tauri::command]
+fn open_prism_app() -> Result<bool, String> {
+    use std::process::Command;
+    
+    // Try common locations for Prism.app
+    let possible_paths = [
+        "/Applications/Prism.app",
+        "~/Applications/Prism.app",
+        // Development build location
+        "../prism-app/src-tauri/target/release/bundle/macos/Prism.app",
+        "../prism-app/src-tauri/target/debug/bundle/macos/Prism.app",
+    ];
+    
+    // First check if Prism.app is already running
+    let output = Command::new("pgrep")
+        .args(["-f", "Prism.app"])
+        .output();
+    
+    if let Ok(out) = output {
+        if !out.stdout.is_empty() {
+            // Already running, bring to front using AppleScript
+            let _ = Command::new("osascript")
+                .args(["-e", "tell application \"Prism\" to activate"])
+                .spawn();
+            println!("[Spectrum] Prism.app already running, activated");
+            return Ok(true);
+        }
+    }
+    
+    // Try to open Prism.app
+    for path in &possible_paths {
+        let expanded_path = shellexpand::tilde(path);
+        if std::path::Path::new(expanded_path.as_ref()).exists() {
+            match Command::new("open")
+                .args(["-a", expanded_path.as_ref()])
+                .spawn()
+            {
+                Ok(_) => {
+                    println!("[Spectrum] Opened Prism.app from {}", expanded_path);
+                    return Ok(true);
+                }
+                Err(e) => {
+                    eprintln!("[Spectrum] Failed to open Prism.app: {}", e);
+                }
+            }
+        }
+    }
+    
+    // Fallback: try opening by name (if in PATH or registered)
+    match Command::new("open")
+        .args(["-a", "Prism"])
+        .spawn()
+    {
+        Ok(_) => {
+            println!("[Spectrum] Opened Prism.app by name");
+            Ok(true)
+        }
+        Err(e) => {
+            Err(format!("Could not find or open Prism.app: {}", e))
+        }
+    }
+}
 // --- Plugin Entry ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -511,6 +574,7 @@ pub fn run() {
             get_app_state,
             save_app_state,
             restart_app,
+            open_prism_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
