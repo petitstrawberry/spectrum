@@ -103,6 +103,117 @@ function getTypeLabelForDevice(device: AudioDevice): string {
   }
 }
 
+// --- Level Meter Helpers ---
+
+// Convert RMS to dB, returns value in range [-60, 6] (allowing for slight over 0dB)
+function rmsToDb(rms: number): number {
+  if (rms <= 0.00001) return -60;
+  return Math.max(-60, Math.min(6, 20 * Math.log10(rms)));
+}
+
+// Logic Pro X style fader scale (measured via pixel analysis)
+// Fader labels and positions (% from bottom):
+// +6=100%, +3=94%, 0=87%, -3=80%, -6=73%, -10=63%, -15=53%, -20=43%, -30=28%, -40=13%, ∞=0%
+
+// Convert fader position (0-100) to dB (-∞ to +6)
+function faderToDb(faderValue: number): number {
+  // Logic Pro X fader scale (normalized: +6=100%, -∞=0%)
+  // +6=100%, +3=86.9%, 0=74.3%, -3=61.2%, -6=48.5%
+  // -10=39.9%, -15=29.1%, -20=20.9%, -30=12.3%, -40=8.2%, -∞=0%
+  if (faderValue <= 0) return -Infinity;
+  if (faderValue >= 100) return 6;
+  
+  if (faderValue >= 86.9) return 3 + ((faderValue - 86.9) / 13.1) * 3;   // 86.9-100: +3 to +6
+  if (faderValue >= 74.3) return 0 + ((faderValue - 74.3) / 12.6) * 3;   // 74.3-86.9: 0 to +3
+  if (faderValue >= 61.2) return -3 + ((faderValue - 61.2) / 13.1) * 3;  // 61.2-74.3: -3 to 0
+  if (faderValue >= 48.5) return -6 + ((faderValue - 48.5) / 12.7) * 3;  // 48.5-61.2: -6 to -3
+  if (faderValue >= 39.9) return -10 + ((faderValue - 39.9) / 8.6) * 4;  // 39.9-48.5: -10 to -6
+  if (faderValue >= 29.1) return -15 + ((faderValue - 29.1) / 10.8) * 5; // 29.1-39.9: -15 to -10
+  if (faderValue >= 20.9) return -20 + ((faderValue - 20.9) / 8.2) * 5;  // 20.9-29.1: -20 to -15
+  if (faderValue >= 12.3) return -30 + ((faderValue - 12.3) / 8.6) * 10; // 12.3-20.9: -30 to -20
+  if (faderValue >= 8.2) return -40 + ((faderValue - 8.2) / 4.1) * 10;   // 8.2-12.3: -40 to -30
+  // 0-8.2: -∞ to -40
+  return -40 - (60 * (1 - faderValue / 8.2));
+}
+
+// Convert dB to fader position (0-100) - inverse of faderToDb
+function dbToFader(db: number): number {
+  // Logic Pro X fader scale (normalized: +6=100%, -∞=0%)
+  // +6=100%, +3=86.9%, 0=74.3%, -3=61.2%, -6=48.5%
+  // -10=39.9%, -15=29.1%, -20=20.9%, -30=12.3%, -40=8.2%, -∞=0%
+  if (!isFinite(db) || db <= -100) return 0;
+  if (db >= 6) return 100;
+  
+  if (db >= 3) return 86.9 + ((db - 3) / 3) * 13.1;      // +3 to +6: 86.9-100
+  if (db >= 0) return 74.3 + (db / 3) * 12.6;            // 0 to +3: 74.3-86.9
+  if (db >= -3) return 61.2 + ((db + 3) / 3) * 13.1;     // -3 to 0: 61.2-74.3
+  if (db >= -6) return 48.5 + ((db + 6) / 3) * 12.7;     // -6 to -3: 48.5-61.2
+  if (db >= -10) return 39.9 + ((db + 10) / 4) * 8.6;    // -10 to -6: 39.9-48.5
+  if (db >= -15) return 29.1 + ((db + 15) / 5) * 10.8;   // -15 to -10: 29.1-39.9
+  if (db >= -20) return 20.9 + ((db + 20) / 5) * 8.2;    // -20 to -15: 20.9-29.1
+  if (db >= -30) return 12.3 + ((db + 30) / 10) * 8.6;   // -30 to -20: 12.3-20.9
+  if (db >= -40) return 8.2 + ((db + 40) / 10) * 4.1;    // -40 to -30: 8.2-12.3
+  // Below -40: 0-8.2
+  return Math.max(0, 8.2 * (1 + (db + 40) / 60));
+}
+
+// Convert dB to percentage (0-100%) for meter display
+// Logic Pro X meter scale (normalized: 0dB=100%, -60dB=0%)
+// Measured from meter.png via x=0 scan
+// 0=100%, -3=93.3%, -6=86.6%, -9=79.9%, -12=73.5%, -15=66.8%, -18=60.1%, -21=53.4%, -24=46.6%
+// -30=37.7%, -35=30.2%, -40=23.1%, -45=15.7%, -50=8.2%, -60=0%
+function dbToMeterPercent(db: number): number {
+  if (!isFinite(db) || db <= -60) return 0;
+  if (db >= 0) return 100;
+  
+  const m = -db; // m is positive (0 to 60)
+  
+  // 0-24dB range: ~6.7% per 3dB
+  if (m <= 3) return 93.3 + ((3 - m) / 3) * 6.7;    // 0-3: 93.3-100
+  if (m <= 6) return 86.6 + ((6 - m) / 3) * 6.7;    // 3-6: 86.6-93.3
+  if (m <= 9) return 79.9 + ((9 - m) / 3) * 6.7;    // 6-9: 79.9-86.6
+  if (m <= 12) return 73.5 + ((12 - m) / 3) * 6.4;  // 9-12: 73.5-79.9
+  if (m <= 15) return 66.8 + ((15 - m) / 3) * 6.7;  // 12-15: 66.8-73.5
+  if (m <= 18) return 60.1 + ((18 - m) / 3) * 6.7;  // 15-18: 60.1-66.8
+  if (m <= 21) return 53.4 + ((21 - m) / 3) * 6.7;  // 18-21: 53.4-60.1
+  if (m <= 24) return 46.6 + ((24 - m) / 3) * 6.8;  // 21-24: 46.6-53.4
+  // 24-60dB range
+  if (m <= 30) return 37.7 + ((30 - m) / 6) * 8.9;  // 24-30: 37.7-46.6
+  if (m <= 35) return 30.2 + ((35 - m) / 5) * 7.5;  // 30-35: 30.2-37.7
+  if (m <= 40) return 23.1 + ((40 - m) / 5) * 7.1;  // 35-40: 23.1-30.2
+  if (m <= 45) return 15.7 + ((45 - m) / 5) * 7.4;  // 40-45: 15.7-23.1
+  if (m <= 50) return 8.2 + ((50 - m) / 5) * 7.5;   // 45-50: 8.2-15.7
+  // 50-60dB: bottom 8.2%
+  return ((60 - m) / 10) * 8.2;                     // 50-60: 0-8.2
+}
+
+// Convert meter display value (0, 3, 6, ..., 60) to percentage position (100% to 0%)
+// Simply use dbToMeterPercent with negated value
+function dbToMeterPosition(meterValue: number): number {
+  return dbToMeterPercent(-meterValue);
+}
+
+// Get meter color based on dB level
+function getMeterColor(db: number): string {
+  if (db > 0) return '#ef4444'; // red-500 - over 0dB (clipping)
+  if (db > -6) return '#f59e0b'; // amber-500 - hot (-6dB to 0dB)
+  if (db > -12) return '#eab308'; // yellow-500 - warm (-12dB to -6dB)
+  return '#22c55e'; // green-500 - normal (below -12dB)
+}
+
+// Get gradient stops for level meter
+function getMeterGradient(level: number, db: number): string {
+  // Create a multi-stop gradient based on the level
+  if (db > 0) {
+    return 'linear-gradient(to top, #22c55e 0%, #22c55e 60%, #eab308 70%, #f59e0b 85%, #ef4444 95%, #ef4444 100%)';
+  } else if (db > -6) {
+    return 'linear-gradient(to top, #22c55e 0%, #22c55e 65%, #eab308 80%, #f59e0b 100%)';
+  } else if (db > -12) {
+    return 'linear-gradient(to top, #22c55e 0%, #22c55e 70%, #eab308 100%)';
+  }
+  return 'linear-gradient(to top, #22c55e 0%, #22c55e 100%)';
+}
+
 // --- Icon helpers ---
 
 function getIconForCategory(category: AppSource['category']): React.ComponentType<{ className?: string }> {
@@ -405,7 +516,6 @@ export default function App() {
         const channelOffset = sourceNode.channelOffset ?? 0;
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
-          console.log('[deleteNode] Removing send:', channelOffset, targetData.deviceId, conn.toChannel);
           removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
         }
       }
@@ -433,18 +543,14 @@ export default function App() {
   const deleteConnection = (id: string) => {
     // Find the connection to get source and target info for backend cleanup
     const conn = connections.find(c => c.id === id);
-    console.log('[deleteConnection] Deleting connection:', id, conn);
     if (conn) {
       const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
       const targetNode = nodes.find(n => n.id === conn.toNodeId);
-      console.log('[deleteConnection] sourceNode:', sourceNode, 'targetNode:', targetNode);
       if (sourceNode && targetNode) {
         const channelOffset = sourceNode.channelOffset ?? 0;
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-        console.log('[deleteConnection] channelOffset:', channelOffset, 'targetData:', targetData, 'toChannel:', conn.toChannel);
         if (targetData) {
           // Remove from backend
-          console.log('[deleteConnection] Calling removeMixerSend:', channelOffset, targetData.deviceId, conn.toChannel);
           removeMixerSend(channelOffset, targetData.deviceId, conn.toChannel).catch(console.error);
         }
       }
@@ -870,7 +976,7 @@ export default function App() {
           fromChannel: drawingWire.fromCh,
           toNodeId: nodeId,
           toChannel: channelIndex,
-          sendLevel: 80,
+          sendLevel: 83,
           muted: false
         }]);
       }
@@ -961,12 +1067,17 @@ export default function App() {
               // Get real level data for this channel
               const pairIndex = channel.channelOffset / 2;
               const levelData = inputLevels[pairIndex];
-              // Convert RMS to dB and scale for meter display
-              // RMS of 1.0 = 0dB, typical audio ranges from -60dB to 0dB
-              const rms = levelData ? (levelData.left_rms + levelData.right_rms) / 2 : 0;
-              // Convert to dB: 20 * log10(rms), clamp to -60dB to 0dB, then scale to 0-100%
-              const db = rms > 0.00001 ? 20 * Math.log10(rms) : -60;
-              const avgLevel = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+              // Convert RMS to dB using helper functions
+              const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
+              const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
+              const maxDb = Math.max(leftDb, rightDb);
+              const avgLevel = dbToMeterPercent(maxDb);
+              
+              // Get color based on level
+              const meterColorClass = maxDb > 0 ? 'from-red-500/30' : 
+                                      maxDb > -6 ? 'from-amber-500/25' : 
+                                      maxDb > -12 ? 'from-yellow-500/20' : 
+                                      'from-green-500/20';
 
               return (
                 <div
@@ -981,9 +1092,9 @@ export default function App() {
                         : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 cursor-grab active:cursor-grabbing'}
                   `}
                 >
-                  {/* Level meter bar (background) */}
+                  {/* Level meter bar (background) with color based on level */}
                   <div 
-                    className="absolute left-0 top-0 bottom-0 bg-gradient-to-r from-cyan-500/20 to-transparent rounded-lg transition-all duration-75 pointer-events-none"
+                    className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${meterColorClass} to-transparent rounded-lg transition-all duration-75 pointer-events-none`}
                     style={{ width: `${Math.min(avgLevel, 100)}%` }}
                   />
                   
@@ -1282,18 +1393,17 @@ export default function App() {
                 const pairIndex = channelOffset / 2;
                 const levelData = inputLevels[pairIndex];
                 
-                const rmsToMeterLevel = (rms: number): number => {
-                  if (rms <= 0) return 0;
-                  const db = 20 * Math.log10(rms);
-                  const clampedDb = Math.max(-60, Math.min(0, db));
-                  return ((clampedDb + 60) / 60) * 100;
-                };
+                // Calculate dB using PEAK (not RMS) for meter display - like Logic/LadioCast
+                const leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
+                const rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
                 
-                const leftLevel = levelData ? rmsToMeterLevel(levelData.left_rms) : 0;
-                const rightLevel = levelData ? rmsToMeterLevel(levelData.right_rms) : 0;
+                // Calculate post-fader level (input dB + fader gain dB)
+                const faderDb = faderToDb(level);
+                const postFaderLeftDb = faderDb <= -100 ? -Infinity : leftDb + faderDb;
+                const postFaderRightDb = faderDb <= -100 ? -Infinity : rightDb + faderDb;
 
                 return (
-                <div key={node.id} className="w-16 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
+                <div key={node.id} className="w-28 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
                     <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
                     <div className={`w-6 h-6 rounded-lg bg-slate-800 border border-slate-600 flex items-center justify-center shadow-lg ${node.color}`}>
                         <NodeIcon className="w-3 h-3" />
@@ -1302,30 +1412,90 @@ export default function App() {
                     <div className="w-full px-1 text-center mb-2">
                     <div className="text-[9px] font-bold truncate text-slate-300">{node.label}</div>
                     </div>
-                    <div className="flex-1 w-full px-4 flex gap-1.5 justify-center relative">
-                    {/* Real Level Meters */}
-                    <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                        <div 
-                          className="absolute bottom-0 w-full bg-gradient-to-t from-green-500 to-cyan-400 transition-all duration-75"
-                          style={{ height: isMuted ? '0%' : `${leftLevel}%`, opacity: 0.9 }}
-                        ></div>
+                    <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
+                    {/* Fader with scale on left */}
+                    <div className="relative mr-1">
+                      {/* Left: Fader Scale (+6dB = top) - matches Logic Pro X */}
+                      <div className="absolute -left-5 top-0 bottom-0 w-5 flex flex-col text-[5px] text-slate-400 font-mono pointer-events-none select-none text-right pr-0.5">
+                        <span className="absolute" style={{ top: '0', transform: 'translateY(-50%)' }}>6</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(3)}%`, transform: 'translateY(50%)' }}>3</span>
+                        <span className="absolute text-white font-bold" style={{ bottom: `${dbToFader(0)}%`, transform: 'translateY(50%)' }}>0</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-3)}%`, transform: 'translateY(50%)' }}>-3</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-6)}%`, transform: 'translateY(50%)' }}>-6</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-10)}%`, transform: 'translateY(50%)' }}>-10</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-15)}%`, transform: 'translateY(50%)' }}>-15</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-20)}%`, transform: 'translateY(50%)' }}>-20</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-30)}%`, transform: 'translateY(50%)' }}>-30</span>
+                        <span className="absolute" style={{ bottom: `${dbToFader(-40)}%`, transform: 'translateY(50%)' }}>-40</span>
+                        <span className="absolute" style={{ bottom: '0', transform: 'translateY(50%)' }}>∞</span>
+                      </div>
+                      <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
+                          <input
+                              type="range" min="0" max="100" value={level} disabled={isMuted}
+                              onChange={(e) => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, Number(e.target.value))}
+                              className={`absolute inset-0 h-full w-6 -left-2 opacity-0 z-20 appearance-slider-vertical ${isMuted ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                          />
+                          <div className={`absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10 ${isMuted ? 'grayscale opacity-50' : ''}`} style={{ bottom: `calc(${level}% - 5px)` }}></div>
+                      </div>
                     </div>
-                    <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
+                    {/* Level Meters on right */}
+                    <div className="flex gap-0.5 relative">
+                      {/* Left meter */}
+                      <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                        {/* Meter fill - post-fader level, capped at 0dB (100%) */}
                         <div 
-                          className="absolute bottom-0 w-full bg-gradient-to-t from-green-500 to-cyan-400 transition-all duration-75"
-                          style={{ height: isMuted ? '0%' : `${rightLevel}%`, opacity: 0.9 }}
-                        ></div>
-                    </div>
-                    <div className="w-1.5 h-full bg-slate-950 rounded-full relative group/fader">
-                        <input
-                            type="range" min="0" max="100" value={level} disabled={isMuted}
-                            onChange={(e) => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, Number(e.target.value))}
-                            className={`absolute inset-0 h-full w-6 -left-2 opacity-0 z-20 appearance-slider-vertical ${isMuted ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                          className="absolute bottom-0 w-full transition-all duration-75"
+                          style={{ 
+                            height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
+                            background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
+                          }}
                         />
-                        <div className={`absolute left-1/2 -translate-x-1/2 w-6 h-3 bg-slate-700 border-t border-b border-slate-500 rounded shadow pointer-events-none z-10 ${isMuted ? 'grayscale opacity-50' : ''}`} style={{ bottom: `calc(${level}% - 6px)` }}></div>
+                        {/* Clip indicator - shows red at top if clipping */}
+                        {postFaderLeftDb > 0 && !isMuted && (
+                          <div className="absolute top-0 w-full h-1 bg-red-500" />
+                        )}
+                      </div>
+                      {/* Right meter */}
+                      <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
+                        {/* Meter fill - post-fader level, capped at 0dB (100%) */}
+                        <div 
+                          className="absolute bottom-0 w-full transition-all duration-75"
+                          style={{ 
+                            height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderRightDb)))}%`,
+                            background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderRightDb)), postFaderRightDb),
+                          }}
+                        />
+                        {/* Clip indicator - shows red at top if clipping */}
+                        {postFaderRightDb > 0 && !isMuted && (
+                          <div className="absolute top-0 w-full h-1 bg-red-500" />
+                        )}
+                      </div>
+                      {/* Right: Meter Scale - independent from fader scale */}
+                      {/* Uses dbToMeterPosition() for meter-specific scale positions */}
+                      <div className="absolute -right-4 top-0 bottom-0 w-4 flex flex-col text-[5px] text-slate-400 font-mono pointer-events-none select-none">
+                        <span className="absolute text-red-400" style={{ top: '0', transform: 'translateY(-50%)' }}>0</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(3)}%`, transform: 'translateY(50%)' }}>3</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(6)}%`, transform: 'translateY(50%)' }}>6</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(9)}%`, transform: 'translateY(50%)' }}>9</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(12)}%`, transform: 'translateY(50%)' }}>12</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(15)}%`, transform: 'translateY(50%)' }}>15</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(18)}%`, transform: 'translateY(50%)' }}>18</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(21)}%`, transform: 'translateY(50%)' }}>21</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(24)}%`, transform: 'translateY(50%)' }}>24</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(30)}%`, transform: 'translateY(50%)' }}>30</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(35)}%`, transform: 'translateY(50%)' }}>35</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(40)}%`, transform: 'translateY(50%)' }}>40</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(45)}%`, transform: 'translateY(50%)' }}>45</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(50)}%`, transform: 'translateY(50%)' }}>50</span>
+                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(60)}%`, transform: 'translateY(50%)' }}>60</span>
+                      </div>
                     </div>
                     </div>
-                    <div className="flex gap-1 mt-2 w-full px-1">
+                    {/* dB readout - shows fader position in dB */}
+                    <div className="text-[8px] font-mono text-slate-500 mt-1">
+                      {isMuted ? 'MUTE' : faderToDb(level) <= -60 ? '-∞' : `${faderToDb(level) >= 0 ? '+' : ''}${faderToDb(level).toFixed(1)}dB`}
+                    </div>
+                    <div className="flex gap-1 mt-1 w-full px-1">
                     <button onClick={() => toggleConnectionMute(node.id, focusedOutputId!, focusedPairIndex)} className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'}`}>M</button>
                     </div>
                 </div>

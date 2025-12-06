@@ -110,6 +110,46 @@ pub fn get_output_levels(device_id: &str) -> Vec<(f32, f32, f32, f32)> {
         .collect()
 }
 
+/// Convert fader position (0-100) to dB (-∞ to +6)
+/// Logic Pro X style scale:
+/// 100 = +6dB, 83 = 0dB, 70 = -6dB, 60 = -10dB, 40 = -20dB, 15 = -40dB, 0 = -∞
+fn fader_to_db(fader_value: f32) -> f32 {
+    if fader_value <= 0.0 {
+        return f32::NEG_INFINITY;
+    }
+    if fader_value >= 100.0 {
+        return 6.0;
+    }
+    
+    if fader_value >= 83.0 {
+        // 83-100 maps to 0dB to +6dB
+        ((fader_value - 83.0) / 17.0) * 6.0
+    } else if fader_value >= 70.0 {
+        // 70-83 maps to -6dB to 0dB
+        -6.0 + ((fader_value - 70.0) / 13.0) * 6.0
+    } else if fader_value >= 60.0 {
+        // 60-70 maps to -10dB to -6dB
+        -10.0 + ((fader_value - 60.0) / 10.0) * 4.0
+    } else if fader_value >= 40.0 {
+        // 40-60 maps to -20dB to -10dB
+        -20.0 + ((fader_value - 40.0) / 20.0) * 10.0
+    } else if fader_value >= 15.0 {
+        // 15-40 maps to -40dB to -20dB
+        -40.0 + ((fader_value - 15.0) / 25.0) * 20.0
+    } else {
+        // 0-15 maps to -∞ to -40dB (exponential for smooth fade out)
+        -40.0 - (60.0 * (1.0 - fader_value / 15.0).powi(2))
+    }
+}
+
+/// Convert dB to linear gain
+fn db_to_linear(db: f32) -> f32 {
+    if db <= -60.0 {
+        return 0.0;
+    }
+    10.0_f32.powf(db / 20.0)
+}
+
 /// Update a send connection
 pub fn update_send(
     source_offset: u32,
@@ -119,35 +159,23 @@ pub fn update_send(
     muted: bool,
 ) {
     let mixer_state = get_mixer_state();
+    // Convert fader position (0-100) to linear gain via dB
+    let db = fader_to_db(level);
+    let linear_gain = db_to_linear(db);
+    
     mixer_state.set_send(crate::mixer::Send {
         source_offset,
         target_device,
         target_pair,
-        level: level / 100.0, // Convert from 0-100 to 0.0-1.0
+        level: linear_gain,
         muted,
     });
 }
 
 /// Remove a send connection
 pub fn remove_send(source_offset: u32, target_device: &str, target_pair: u32) {
-    println!("[Router] remove_send called: source_offset={}, target_device={}, target_pair={}", 
-             source_offset, target_device, target_pair);
     let mixer_state = get_mixer_state();
-    
-    // Debug: print all current sends
-    let sends = mixer_state.sends.read();
-    println!("[Router] Current sends ({}):", sends.len());
-    for send in sends.iter() {
-        println!("  - source_offset={}, target_device={}, target_pair={}", 
-                 send.source_offset, send.target_device, send.target_pair);
-    }
-    drop(sends);
-    
     mixer_state.remove_send(source_offset, target_device, target_pair);
-    
-    // Debug: print sends after removal
-    let sends_after = mixer_state.sends.read();
-    println!("[Router] Sends after removal ({}):", sends_after.len());
 }
 
 /// Set source fader level (0-100)
@@ -181,24 +209,12 @@ pub fn simulate_levels() {
     
     let stereo_pairs = PRISM_CHANNELS / 2;
     
-    // Generate smooth animated levels for testing
+    // DEBUG: Always max level (RMS = 1.0 = 0dBFS) for testing meter display
     for i in 0..stereo_pairs {
-        // Simulate different activity levels for different channels
-        let activity = if i == 0 {
-            0.7 // MAIN is always active
-        } else if i < 8 {
-            0.3 + 0.4 * ((now / 500.0 + i as f32).sin() * 0.5 + 0.5)
-        } else {
-            0.1 * ((now / 1000.0 + i as f32 * 0.5).sin() * 0.5 + 0.5)
-        };
-        
-        let variation = (now / 50.0 + i as f32 * 10.0).sin() * 0.1;
-        let base_level = (activity + variation).clamp(0.0, 1.0);
-        
-        input_levels[i].left_rms = base_level * 0.8;
-        input_levels[i].right_rms = base_level * 0.85;
-        input_levels[i].left_peak = (base_level * 1.2).min(1.0);
-        input_levels[i].right_peak = (base_level * 1.15).min(1.0);
+        input_levels[i].left_rms = 1.0;
+        input_levels[i].right_rms = 1.0;
+        input_levels[i].left_peak = 1.0;
+        input_levels[i].right_peak = 1.0;
     }
 }
 

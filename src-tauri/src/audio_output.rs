@@ -168,8 +168,8 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         return;
     }
     
-    // Set stream format - stereo output (most common)
-    let channels = output_channels.min(2);
+    // Set stream format - support multi-channel output
+    let channels = output_channels;
     let stream_format = StreamFormat {
         sample_rate: SAMPLE_RATE,
         sample_format: SampleFormat::F32,
@@ -242,6 +242,17 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             let left_ch = source_pair * 2;
             let right_ch = source_pair * 2 + 1;
             
+            // Get target channel pair (this is where the audio should go!)
+            let target_pair = send.target_pair as usize;
+            let target_left_ch = target_pair * 2;
+            let target_right_ch = target_pair * 2 + 1;
+            
+            // Check if target channels are within device's output range
+            if target_right_ch >= out_ch {
+                // Fallback: if target pair is out of range, use pair 0
+                continue;
+            }
+            
             // Read audio data from broadcast buffer (non-consuming!)
             let read_count = crate::audio_capture::read_channel_audio(
                 dev_id_for_callback,
@@ -253,14 +264,14 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             
             let gain = send.level;
             
-            // Mix whatever samples we got
+            // Mix to the specified output channel pair
             for frame in 0..read_count {
                 let left_sample = left_buf[frame] * gain;
                 let right_sample = right_buf[frame] * gain;
                 
-                // Mix to output (stereo)
-                let out_idx_l = frame * out_ch;
-                let out_idx_r = frame * out_ch + 1.min(out_ch - 1);
+                // Mix to target output channels
+                let out_idx_l = frame * out_ch + target_left_ch;
+                let out_idx_r = frame * out_ch + target_right_ch;
                 
                 if out_idx_l < buffer.len() {
                     buffer[out_idx_l] += left_sample;
