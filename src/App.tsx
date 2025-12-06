@@ -122,7 +122,7 @@ function faderToDb(faderValue: number): number {
   // -10=39.9%, -15=29.1%, -20=20.9%, -30=12.3%, -40=8.2%, -∞=0%
   if (faderValue <= 0) return -Infinity;
   if (faderValue >= 100) return 6;
-  
+
   if (faderValue >= 86.9) return 3 + ((faderValue - 86.9) / 13.1) * 3;   // 86.9-100: +3 to +6
   if (faderValue >= 74.3) return 0 + ((faderValue - 74.3) / 12.6) * 3;   // 74.3-86.9: 0 to +3
   if (faderValue >= 61.2) return -3 + ((faderValue - 61.2) / 13.1) * 3;  // 61.2-74.3: -3 to 0
@@ -143,7 +143,7 @@ function dbToFader(db: number): number {
   // -10=39.9%, -15=29.1%, -20=20.9%, -30=12.3%, -40=8.2%, -∞=0%
   if (!isFinite(db) || db <= -100) return 0;
   if (db >= 6) return 100;
-  
+
   if (db >= 3) return 86.9 + ((db - 3) / 3) * 13.1;      // +3 to +6: 86.9-100
   if (db >= 0) return 74.3 + (db / 3) * 12.6;            // 0 to +3: 74.3-86.9
   if (db >= -3) return 61.2 + ((db + 3) / 3) * 13.1;     // -3 to 0: 61.2-74.3
@@ -165,9 +165,9 @@ function dbToFader(db: number): number {
 function dbToMeterPercent(db: number): number {
   if (!isFinite(db) || db <= -60) return 0;
   if (db >= 0) return 100;
-  
+
   const m = -db; // m is positive (0 to 60)
-  
+
   // 0-24dB range: ~6.7% per 3dB
   if (m <= 3) return 93.3 + ((3 - m) / 3) * 6.7;    // 0-3: 93.3-100
   if (m <= 6) return 86.6 + ((6 - m) / 3) * 6.7;    // 3-6: 86.6-93.3
@@ -264,7 +264,7 @@ export default function App() {
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [driverStatus, setDriverStatus] = useState<DriverStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  
+
   // Real-time level meters (32 stereo pairs)
   const [inputLevels, setInputLevels] = useState<LevelData[]>([]);
 
@@ -309,13 +309,13 @@ export default function App() {
     const interval = setInterval(fetchPrismData, 2000);
     return () => clearInterval(interval);
   }, []);
-  
+
   // High-frequency level meter polling (~30fps)
   useEffect(() => {
     let animationFrame: number;
     let lastTime = 0;
     let errorCount = 0;
-    
+
     const updateLevels = async (currentTime: number) => {
       // Throttle to ~30fps (33ms interval)
       if (currentTime - lastTime >= 33) {
@@ -334,7 +334,7 @@ export default function App() {
       }
       animationFrame = requestAnimationFrame(updateLevels);
     };
-    
+
     animationFrame = requestAnimationFrame(updateLevels);
     return () => cancelAnimationFrame(animationFrame);
   }, []);
@@ -506,7 +506,7 @@ export default function App() {
   const deleteNode = (id: string) => {
     // Find the node being deleted to determine its type
     const nodeToDelete = nodes.find(n => n.id === id);
-    
+
     // Remove all backend sends for connections involving this node
     const connectionsToRemove = connections.filter(c => c.fromNodeId === id || c.toNodeId === id);
     for (const conn of connectionsToRemove) {
@@ -520,7 +520,7 @@ export default function App() {
         }
       }
     }
-    
+
     // Also stop audio output if deleting a target node
     if (nodeToDelete?.type === 'target') {
       const targetData = outputTargets.find(t => t.id === nodeToDelete.libraryId);
@@ -533,7 +533,7 @@ export default function App() {
         }
       }
     }
-    
+
     setNodes(prev => prev.filter(n => n.id !== id));
     setConnections(prev => prev.filter(c => c.fromNodeId !== id && c.toNodeId !== id));
     if (selectedNodeId === id) setSelectedNodeId(null);
@@ -563,7 +563,7 @@ export default function App() {
       if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, sendLevel: level };
       return c;
     }));
-    
+
     // Update backend
     const sourceNode = nodes.find(n => n.id === sourceId);
     const targetNode = nodes.find(n => n.id === targetId);
@@ -582,7 +582,7 @@ export default function App() {
       if (c.fromNodeId === sourceId && c.toNodeId === targetId && c.toChannel === pairIndex) return { ...c, muted: !c.muted };
       return c;
     }));
-    
+
     // Update backend
     const sourceNode = nodes.find(n => n.id === sourceId);
     const targetNode = nodes.find(n => n.id === targetId);
@@ -924,12 +924,12 @@ export default function App() {
       if (!exists && drawingWire.fromNode !== nodeId) {
         // Find the source node to get channel offset
         const sourceNode = nodes.find(n => n.id === drawingWire.fromNode);
-        
+
         // Check if target is Prism device - prevent Prism→Prism routing (causes feedback loop)
         const targetNode = nodes.find(n => n.id === nodeId);
         const targetData = targetNode ? outputTargets.find(t => t.id === targetNode.libraryId) : null;
         const targetDeviceInfo = targetData ? audioDevices.find(d => d.id === targetData.deviceId) : null;
-        
+
         if (targetDeviceInfo?.device_type === 'prism') {
           console.warn('Cannot route to Prism device - would cause feedback loop');
           setDrawingWire(null);
@@ -944,7 +944,7 @@ export default function App() {
         // For now, log the routing attempt
         if (sourceNode?.channelOffset !== undefined) {
           console.log(`Route from channel ${sourceNode.channelOffset} to channel ${targetChannelOffset}`);
-          
+
           // Start output to the target device and update mixer send
           const targetNode = nodes.find(n => n.id === nodeId);
           if (targetNode) {
@@ -957,7 +957,7 @@ export default function App() {
                   startAudioOutput(deviceIdNum).catch(console.error);
                 });
               }
-              
+
               // Update mixer send
               updateMixerSend(
                 sourceNode.channelOffset,
@@ -976,7 +976,7 @@ export default function App() {
           fromChannel: drawingWire.fromCh,
           toNodeId: nodeId,
           toChannel: channelIndex,
-          sendLevel: 83,
+          sendLevel: dbToFader(0), // 0dB = unity gain
           muted: false
         }]);
       }
@@ -1063,7 +1063,7 @@ export default function App() {
               const isUsed = isLibraryItemUsed(channel.id);
               const hasApps = channel.hasApps;
               const FirstIcon = channel.apps[0]?.icon || Music;
-              
+
               // Get real level data for this channel
               const pairIndex = channel.channelOffset / 2;
               const levelData = inputLevels[pairIndex];
@@ -1072,11 +1072,11 @@ export default function App() {
               const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
               const maxDb = Math.max(leftDb, rightDb);
               const avgLevel = dbToMeterPercent(maxDb);
-              
+
               // Get color based on level
-              const meterColorClass = maxDb > 0 ? 'from-red-500/30' : 
-                                      maxDb > -6 ? 'from-amber-500/25' : 
-                                      maxDb > -12 ? 'from-yellow-500/20' : 
+              const meterColorClass = maxDb > 0 ? 'from-red-500/30' :
+                                      maxDb > -6 ? 'from-amber-500/25' :
+                                      maxDb > -12 ? 'from-yellow-500/20' :
                                       'from-green-500/20';
 
               return (
@@ -1093,11 +1093,11 @@ export default function App() {
                   `}
                 >
                   {/* Level meter bar (background) with color based on level */}
-                  <div 
+                  <div
                     className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${meterColorClass} to-transparent rounded-lg transition-all duration-75 pointer-events-none`}
                     style={{ width: `${Math.min(avgLevel, 100)}%` }}
                   />
-                  
+
                   {/* Channel number */}
                   <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'} relative z-10`}>
                     {channel.channelLabel}
@@ -1387,23 +1387,23 @@ export default function App() {
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
                 const NodeIcon = node.icon;
-                
+
                 // Get real input levels for this channel (dB conversion)
                 const channelOffset = node.channelOffset ?? 0;
                 const pairIndex = channelOffset / 2;
                 const levelData = inputLevels[pairIndex];
-                
+
                 // Calculate dB using PEAK (not RMS) for meter display - like Logic/LadioCast
                 const leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
                 const rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
-                
+
                 // Calculate post-fader level (input dB + fader gain dB)
                 const faderDb = faderToDb(level);
                 const postFaderLeftDb = faderDb <= -100 ? -Infinity : leftDb + faderDb;
                 const postFaderRightDb = faderDb <= -100 ? -Infinity : rightDb + faderDb;
 
                 return (
-                <div key={node.id} className="w-28 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
+                <div key={node.id} className="w-32 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
                     <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
                     <div className={`w-6 h-6 rounded-lg bg-slate-800 border border-slate-600 flex items-center justify-center shadow-lg ${node.color}`}>
                         <NodeIcon className="w-3 h-3" />
@@ -1414,20 +1414,54 @@ export default function App() {
                     </div>
                     <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
                     {/* Fader with scale on left */}
-                    <div className="relative mr-1">
+                    <div className="relative mr-2">
                       {/* Left: Fader Scale (+6dB = top) - matches Logic Pro X */}
-                      <div className="absolute -left-5 top-0 bottom-0 w-5 flex flex-col text-[5px] text-slate-400 font-mono pointer-events-none select-none text-right pr-0.5">
-                        <span className="absolute" style={{ top: '0', transform: 'translateY(-50%)' }}>6</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(3)}%`, transform: 'translateY(50%)' }}>3</span>
-                        <span className="absolute text-white font-bold" style={{ bottom: `${dbToFader(0)}%`, transform: 'translateY(50%)' }}>0</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-3)}%`, transform: 'translateY(50%)' }}>-3</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-6)}%`, transform: 'translateY(50%)' }}>-6</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-10)}%`, transform: 'translateY(50%)' }}>-10</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-15)}%`, transform: 'translateY(50%)' }}>-15</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-20)}%`, transform: 'translateY(50%)' }}>-20</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-30)}%`, transform: 'translateY(50%)' }}>-30</span>
-                        <span className="absolute" style={{ bottom: `${dbToFader(-40)}%`, transform: 'translateY(50%)' }}>-40</span>
-                        <span className="absolute" style={{ bottom: '0', transform: 'translateY(50%)' }}>∞</span>
+                      <div className="absolute -left-7 top-0 bottom-0 w-7 flex flex-col text-[7px] text-slate-400 font-mono select-none">
+                        {/* Scale tick marks and labels - clickable */}
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ top: '0', transform: 'translateY(-50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(6))}>
+                          <span className="mr-0.5">+6</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(3)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(3))}>
+                          <span className="mr-0.5">+3</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-cyan-400" style={{ bottom: `${dbToFader(0)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(0))}>
+                          <span className="mr-0.5 text-white font-bold">0</span>
+                          <div className="w-2.5 h-px bg-white"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-3)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-3))}>
+                          <span className="mr-0.5">-3</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-6)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-6))}>
+                          <span className="mr-0.5">-6</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-10)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-10))}>
+                          <span className="mr-0.5 text-[6px]">-10</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-15)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-15))}>
+                          <span className="mr-0.5 text-[6px]">-15</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-20)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-20))}>
+                          <span className="mr-0.5 text-[6px]">-20</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-30)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-30))}>
+                          <span className="mr-0.5 text-[6px]">-30</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: `${dbToFader(-40)}%`, transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(-40))}>
+                          <span className="mr-0.5 text-[6px]">-40</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
+                        <div className="absolute right-0 flex items-center cursor-pointer hover:text-white" style={{ bottom: '0', transform: 'translateY(50%)' }} onClick={() => updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, 0)}>
+                          <span className="mr-0.5">-∞</span>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                        </div>
                       </div>
                       <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
                           <input
@@ -1443,9 +1477,9 @@ export default function App() {
                       {/* Left meter */}
                       <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
                         {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                        <div 
+                        <div
                           className="absolute bottom-0 w-full transition-all duration-75"
-                          style={{ 
+                          style={{
                             height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
                             background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
                           }}
@@ -1458,9 +1492,9 @@ export default function App() {
                       {/* Right meter */}
                       <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
                         {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                        <div 
+                        <div
                           className="absolute bottom-0 w-full transition-all duration-75"
-                          style={{ 
+                          style={{
                             height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderRightDb)))}%`,
                             background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderRightDb)), postFaderRightDb),
                           }}
@@ -1472,27 +1506,68 @@ export default function App() {
                       </div>
                       {/* Right: Meter Scale - independent from fader scale */}
                       {/* Uses dbToMeterPosition() for meter-specific scale positions */}
-                      <div className="absolute -right-4 top-0 bottom-0 w-4 flex flex-col text-[5px] text-slate-400 font-mono pointer-events-none select-none">
-                        <span className="absolute text-red-400" style={{ top: '0', transform: 'translateY(-50%)' }}>0</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(3)}%`, transform: 'translateY(50%)' }}>3</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(6)}%`, transform: 'translateY(50%)' }}>6</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(9)}%`, transform: 'translateY(50%)' }}>9</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(12)}%`, transform: 'translateY(50%)' }}>12</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(15)}%`, transform: 'translateY(50%)' }}>15</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(18)}%`, transform: 'translateY(50%)' }}>18</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(21)}%`, transform: 'translateY(50%)' }}>21</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(24)}%`, transform: 'translateY(50%)' }}>24</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(30)}%`, transform: 'translateY(50%)' }}>30</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(35)}%`, transform: 'translateY(50%)' }}>35</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(40)}%`, transform: 'translateY(50%)' }}>40</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(45)}%`, transform: 'translateY(50%)' }}>45</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(50)}%`, transform: 'translateY(50%)' }}>50</span>
-                        <span className="absolute" style={{ bottom: `${dbToMeterPosition(60)}%`, transform: 'translateY(50%)' }}>60</span>
+                      <div className="absolute -right-6 top-0 bottom-0 w-6 flex flex-col text-[7px] text-slate-400 font-mono pointer-events-none select-none">
+                        {/* Scale tick marks and labels */}
+                        <div className="absolute left-0 flex items-center" style={{ top: '0', transform: 'translateY(-50%)' }}>
+                          <div className="w-2 h-px bg-red-400"></div>
+                          <span className="ml-0.5 text-red-400 font-bold">0</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(6)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5">6</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(12)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">12</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(18)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">18</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(24)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">24</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(30)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">30</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(40)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">40</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(50)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">50</span>
+                        </div>
+                        <div className="absolute left-0 flex items-center" style={{ bottom: `${dbToMeterPosition(60)}%`, transform: 'translateY(50%)' }}>
+                          <div className="w-1.5 h-px bg-slate-500"></div>
+                          <span className="ml-0.5 text-[6px]">60</span>
+                        </div>
                       </div>
                     </div>
                     </div>
-                    {/* dB readout - shows fader position in dB */}
-                    <div className="text-[8px] font-mono text-slate-500 mt-1">
+                    {/* dB readout - shows fader position in dB, click to edit */}
+                    <div 
+                      className="text-[8px] font-mono text-slate-500 mt-1 cursor-pointer hover:text-cyan-400 hover:bg-slate-800 px-1 rounded"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const currentDb = faderToDb(level);
+                        const input = prompt('Enter dB value (e.g., 0, -6, -12):', currentDb <= -60 ? '-inf' : currentDb.toFixed(1));
+                        if (input !== null) {
+                          const trimmed = input.trim().toLowerCase();
+                          if (trimmed === '-inf' || trimmed === 'inf' || trimmed === '-∞' || trimmed === '∞') {
+                            updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, 0);
+                          } else {
+                            const parsed = parseFloat(trimmed);
+                            if (!isNaN(parsed)) {
+                              const clampedDb = Math.max(-100, Math.min(6, parsed));
+                              updateSendLevel(node.id, focusedOutputId!, focusedPairIndex, dbToFader(clampedDb));
+                            }
+                          }
+                        }
+                      }}
+                    >
                       {isMuted ? 'MUTE' : faderToDb(level) <= -60 ? '-∞' : `${faderToDb(level) >= 0 ? '+' : ''}${faderToDb(level).toFixed(1)}dB`}
                     </div>
                     <div className="flex gap-1 mt-1 w-full px-1">
@@ -1585,7 +1660,7 @@ export default function App() {
                  const connectedSources = connections.filter(c => c.toNodeId === focusedTarget.id && c.toChannel === focusedPairIndex);
                  let masterLeftRms = 0;
                  let masterRightRms = 0;
-                 
+
                  for (const conn of connectedSources) {
                    if (conn.muted) continue;
                    const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
@@ -1600,35 +1675,35 @@ export default function App() {
                      masterRightRms += Math.pow(levelData.right_rms * sendGain, 2);
                    }
                  }
-                 
+
                  // Apply master volume and convert to dB for meter display
                  const masterGain = focusedTarget.volume / 100;
                  masterLeftRms = Math.sqrt(masterLeftRms) * masterGain;
                  masterRightRms = Math.sqrt(masterRightRms) * masterGain;
-                 
+
                  const rmsToMeterLevel = (rms: number): number => {
                    if (rms <= 0) return 0;
                    const db = 20 * Math.log10(rms);
                    const clampedDb = Math.max(-60, Math.min(0, db));
                    return ((clampedDb + 60) / 60) * 100;
                  };
-                 
+
                  const masterLeftLevel = rmsToMeterLevel(masterLeftRms);
                  const masterRightLevel = rmsToMeterLevel(masterRightRms);
-                 
+
                  return (
                  <div className="w-16 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
                     <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
                     <div className="flex-1 w-full px-4 flex gap-1.5 justify-center relative">
                         {/* Real Multi-channel Meter */}
                         <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                            <div 
+                            <div
                               className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 transition-all duration-75"
                               style={{ height: `${masterLeftLevel}%`, opacity: 0.9 }}
                             ></div>
                         </div>
                         <div className="w-1 h-full bg-slate-800 rounded-full overflow-hidden relative">
-                            <div 
+                            <div
                               className="absolute bottom-0 w-full bg-gradient-to-t from-cyan-600 to-blue-500 transition-all duration-75"
                               style={{ height: `${masterRightLevel}%`, opacity: 0.9 }}
                             ></div>
