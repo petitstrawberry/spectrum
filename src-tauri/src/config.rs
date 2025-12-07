@@ -55,7 +55,7 @@ pub struct PatchViewState {
 pub struct SavedNode {
     pub id: String,
     pub library_id: String,
-    pub node_type: String,  // "source" or "target"
+    pub node_type: String,  // "source", "target", or "bus"
     pub label: String,
     pub sub_label: Option<String>,
     pub icon_name: String,  // Icon name as string
@@ -70,6 +70,21 @@ pub struct SavedNode {
     pub device_id: Option<u32>,
     pub device_name: Option<String>,
     pub channel_mode: String,  // "mono" or "stereo"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bus_id: Option<String>,  // Unique bus identifier (for bus nodes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<SavedPlugin>>,  // AudioUnit plugin chain (for bus nodes)
+}
+
+/// Saved AudioUnit plugin data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPlugin {
+    pub id: String,
+    pub name: String,
+    pub manufacturer: String,
+    #[serde(rename = "type")]
+    pub plugin_type: String,  // "effect" or "instrument"
+    pub enabled: bool,
 }
 
 /// Saved connection data

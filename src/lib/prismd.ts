@@ -404,11 +404,20 @@ export interface OutputRoutingInfo {
   send_gains: Record<number, number>[];
 }
 
+/** Saved AudioUnit plugin data */
+export interface SavedPlugin {
+  id: string;
+  name: string;
+  manufacturer: string;
+  type: string;  // "effect" or "instrument"
+  enabled: boolean;
+}
+
 /** Saved node data (serializable version of frontend NodeData) */
 export interface SavedNode {
   id: string;
   library_id: string;
-  node_type: string;  // "source" or "target"
+  node_type: string;  // "source", "target", or "bus"
   label: string;
   sub_label?: string;
   icon_name: string;  // Icon name as string
@@ -423,6 +432,8 @@ export interface SavedNode {
   device_id?: number;
   device_name?: string;
   channel_mode: string;  // "mono" or "stereo"
+  bus_id?: string;  // Unique bus identifier (for bus nodes)
+  plugins?: SavedPlugin[];  // AudioUnit plugin chain (for bus nodes)
 }
 
 /** Saved connection data */

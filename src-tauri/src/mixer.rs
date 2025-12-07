@@ -427,8 +427,6 @@ impl BusSendsArray {
         let id_map = self.bus_id_to_idx.read();
         let buses = self.buses.read();
         
-        println!("[Mixer] set_bus_send: id_map has {} buses: {:?}", id_map.len(), id_map.keys().collect::<Vec<_>>());
-        
         // Resolve indices
         let source_bus_idx = match send.source_type {
             BusSendSourceType::Bus => id_map.get(&send.source_id).copied(),
@@ -438,8 +436,6 @@ impl BusSendsArray {
             BusSendTargetType::Bus => id_map.get(&send.target_id).copied(),
             _ => Some(0),
         };
-        
-        println!("[Mixer] set_bus_send: source_bus_idx={:?}, target_bus_idx={:?}", source_bus_idx, target_bus_idx);
         
         if source_bus_idx.is_none() || target_bus_idx.is_none() {
             println!("[Mixer] Bus send references unknown bus: source_id={}, target_id={}", send.source_id, send.target_id);

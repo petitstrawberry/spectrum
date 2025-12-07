@@ -368,16 +368,7 @@ fn set_bus_mute(bus_id: String, muted: bool) {
 #[tauri::command]
 fn get_buses() -> Vec<BusInfo> {
     let mixer_state = mixer::get_mixer_state();
-    let buses = mixer_state.get_buses();
-    let sends = mixer_state.get_bus_sends();
-    println!("[DEBUG] get_buses: {} buses, {} bus_sends", buses.len(), sends.len());
-    for send in &sends {
-        println!("[DEBUG] BusSend: src_type={} src_dev={} src_ch={} src_bus={} -> tgt_type={} tgt_bus={} tgt_hash={} tgt_ch={} level={} active={}",
-            send.source_type, send.source_device, send.source_channel, send.source_bus_idx,
-            send.target_type, send.target_bus_idx, send.target_device_hash, send.target_channel,
-            send.level, send.active);
-    }
-    buses
+    mixer_state.get_buses()
         .into_iter()
         .map(|b| BusInfo {
             id: b.id,
@@ -512,6 +503,17 @@ pub struct OutputRoutingInfo {
     pub send_gains: Vec<HashMap<usize, f32>>,
 }
 
+/// Saved plugin data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPlugin {
+    pub id: String,
+    pub name: String,
+    pub manufacturer: String,
+    #[serde(rename = "type")]
+    pub plugin_type: String,
+    pub enabled: bool,
+}
+
 /// Saved node data (serializable version of frontend NodeData)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedNode {
@@ -532,6 +534,10 @@ pub struct SavedNode {
     pub device_id: Option<u32>,
     pub device_name: Option<String>,
     pub channel_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bus_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<SavedPlugin>>,
 }
 
 /// Saved connection data
@@ -602,6 +608,14 @@ fn get_app_state() -> AppState {
             device_id: n.device_id,
             device_name: n.device_name,
             channel_mode: n.channel_mode,
+            bus_id: n.bus_id,
+            plugins: n.plugins.map(|ps| ps.into_iter().map(|p| SavedPlugin {
+                id: p.id,
+                name: p.name,
+                manufacturer: p.manufacturer,
+                plugin_type: p.plugin_type,
+                enabled: p.enabled,
+            }).collect()),
         }).collect(),
         saved_connections: cfg.saved_connections.into_iter().map(|c| SavedConnection {
             id: c.id,
@@ -659,6 +673,14 @@ async fn save_app_state(state: AppState) -> Result<(), String> {
             device_id: n.device_id,
             device_name: n.device_name,
             channel_mode: n.channel_mode,
+            bus_id: n.bus_id,
+            plugins: n.plugins.map(|ps| ps.into_iter().map(|p| config::SavedPlugin {
+                id: p.id,
+                name: p.name,
+                manufacturer: p.manufacturer,
+                plugin_type: p.plugin_type,
+                enabled: p.enabled,
+            }).collect()),
         }).collect(),
         saved_connections: state.saved_connections.into_iter().map(|c| config::SavedConnection {
             id: c.id,

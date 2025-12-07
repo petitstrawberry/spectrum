@@ -604,8 +604,9 @@ export default function App() {
               deviceName: sn.device_name,
               channelMode: sn.channel_mode as ChannelMode,
               available,
-              // Restore busId from libraryId for bus nodes (format: "bus_xxx")
-              busId: sn.node_type === 'bus' ? sn.library_id.replace('bus_', '') : undefined,
+              // Restore busId from saved value or extract from libraryId for bus nodes
+              busId: sn.bus_id ?? (sn.node_type === 'bus' ? sn.library_id.replace('bus_', '') : undefined),
+              plugins: sn.plugins,
             };
           });
 
@@ -623,6 +624,18 @@ export default function App() {
 
           setNodes(restoredNodes);
           setConnections(restoredConnections);
+
+          // Restore busCounter to max bus number found
+          const maxBusNumber = restoredNodes
+            .filter(n => n.type === 'bus' && n.busId)
+            .map(n => {
+              const match = n.busId?.match(/^(\d+)$/);
+              return match ? parseInt(match[1]) : 0;
+            })
+            .reduce((max, num) => Math.max(max, num), 0);
+          if (maxBusNumber > 0) {
+            setBusCounter(maxBusNumber);
+          }
 
           // Set focused output to first available target, or first target
           const firstAvailableTarget = restoredNodes.find(n => n.type === 'target' && n.available);
@@ -875,6 +888,8 @@ export default function App() {
         device_id: n.deviceId,
         device_name: n.deviceName,
         channel_mode: n.channelMode,
+        bus_id: n.busId,
+        plugins: n.plugins,
       })),
       saved_connections: connections.map(c => ({
         id: c.id,
@@ -2920,7 +2935,7 @@ export default function App() {
                 const centerY = 250;
                 const busNode = createNode('new_bus', 'bus', centerX, centerY);
                 setNodes(prev => [...prev, busNode]);
-                
+
                 // Register bus in backend
                 if (busNode.busId) {
                   addBus(busNode.busId, busNode.label, busNode.channelCount)
@@ -3006,136 +3021,158 @@ export default function App() {
         style={{ height: mixerHeight }}
       >
 
-        {/* BUS DETAIL VIEW (Shows when a bus is selected) */}
-        {selectedBusId && (() => {
-          const selectedBus = nodes.find(n => n.id === selectedBusId);
-          if (!selectedBus || selectedBus.type !== 'bus') return null;
+        {/* BUS DETAIL VIEW (Always shows, content changes based on selection) */}
+        <div className="w-64 bg-[#1a1f2e] border-r border-slate-700 flex flex-col shrink-0">
+          {selectedBusId && (() => {
+            const selectedBus = nodes.find(n => n.id === selectedBusId);
+            if (!selectedBus || selectedBus.type !== 'bus') return null;
 
-          return (
-            <div className="w-64 bg-[#1a1f2e] border-r border-slate-700 flex flex-col shrink-0">
-              {/* Bus Header */}
-              <div className="h-8 bg-purple-900/30 border-b border-purple-500/30 flex items-center px-4 justify-between shrink-0">
-                <div className="flex items-center gap-2">
-                  <Workflow className="w-3 h-3 text-purple-400" />
-                  <span className="text-[10px] font-bold text-purple-300 uppercase tracking-widest">
-                    {selectedBus.label}
-                  </span>
-                  <span className="text-[9px] text-slate-500 uppercase ml-1">
-                    {selectedBus.channelMode}
-                  </span>
-                </div>
-                <button
-                  onClick={() => setSelectedBusId(null)}
-                  className="text-slate-500 hover:text-white transition-colors"
-                >
-                  ×
-                </button>
-              </div>
-
-              {/* Effect Chain (Logic-style) */}
-              <div className="flex-1 overflow-y-auto p-3">
-                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-2">
-                  Effect Chain
+            return (
+              <>
+                {/* Bus Header */}
+                <div className="h-8 bg-purple-900/30 border-b border-purple-500/30 flex items-center px-4 justify-between shrink-0">
+                  <div className="flex items-center gap-2">
+                    <Workflow className="w-3 h-3 text-purple-400" />
+                    <span className="text-[10px] font-bold text-purple-300 uppercase tracking-widest">
+                      {selectedBus.label}
+                    </span>
+                    <span className="text-[9px] text-slate-500 uppercase ml-1">
+                      {selectedBus.channelMode}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setSelectedBusId(null)}
+                    className="text-slate-500 hover:text-white transition-colors"
+                  >
+                    ×
+                  </button>
                 </div>
 
-                {/* Plugin Slots */}
-                <div className="space-y-1">
-                  {(selectedBus.plugins || []).length === 0 ? (
-                    <div className="text-[10px] text-slate-600 text-center py-4">
-                      No effects loaded
-                    </div>
-                  ) : (
-                    selectedBus.plugins?.map((plugin, idx) => (
-                      <div
-                        key={plugin.id}
-                        className={`flex items-center gap-2 p-2 rounded-lg border transition-all ${
-                          plugin.enabled
-                            ? 'bg-purple-500/10 border-purple-500/30'
-                            : 'bg-slate-800/50 border-slate-700 opacity-50'
-                        }`}
-                      >
-                        <div className="w-4 text-[9px] text-slate-500 text-center">{idx + 1}</div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-[10px] font-medium text-slate-200 truncate">{plugin.name}</div>
-                          <div className="text-[8px] text-slate-500 truncate">{plugin.manufacturer}</div>
-                        </div>
-                        <button
-                          onClick={() => {
-                            // Toggle plugin enabled state
-                            setNodes(prev => prev.map(n => {
-                              if (n.id === selectedBusId && n.plugins) {
-                                return {
-                                  ...n,
-                                  plugins: n.plugins.map(p =>
-                                    p.id === plugin.id ? { ...p, enabled: !p.enabled } : p
-                                  ),
-                                };
-                              }
-                              return n;
-                            }));
-                          }}
-                          className={`w-6 h-6 rounded flex items-center justify-center text-[9px] font-bold transition-colors ${
+                {/* Effect Chain (Logic-style) */}
+                <div className="flex-1 overflow-y-auto p-3">
+                  <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+                    Effect Chain
+                  </div>
+
+                  {/* Plugin Slots */}
+                  <div className="space-y-1">
+                    {(selectedBus.plugins || []).length === 0 ? (
+                      <div className="text-[10px] text-slate-600 text-center py-4">
+                        No effects loaded
+                      </div>
+                    ) : (
+                      selectedBus.plugins?.map((plugin, idx) => (
+                        <div
+                          key={plugin.id}
+                          className={`flex items-center gap-2 p-2 rounded-lg border transition-all ${
                             plugin.enabled
-                              ? 'bg-purple-500 text-white'
-                              : 'bg-slate-700 text-slate-400'
+                              ? 'bg-purple-500/10 border-purple-500/30'
+                              : 'bg-slate-800/50 border-slate-700 opacity-50'
                           }`}
                         >
-                          {plugin.enabled ? 'ON' : 'OFF'}
-                        </button>
-                      </div>
-                    ))
-                  )}
+                          <div className="w-4 text-[9px] text-slate-500 text-center">{idx + 1}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[10px] font-medium text-slate-200 truncate">{plugin.name}</div>
+                            <div className="text-[8px] text-slate-500 truncate">{plugin.manufacturer}</div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              // Toggle plugin enabled state
+                              setNodes(prev => prev.map(n => {
+                                if (n.id === selectedBusId && n.plugins) {
+                                  return {
+                                    ...n,
+                                    plugins: n.plugins.map(p =>
+                                      p.id === plugin.id ? { ...p, enabled: !p.enabled } : p
+                                    ),
+                                  };
+                                }
+                                return n;
+                              }));
+                            }}
+                            className={`w-6 h-6 rounded flex items-center justify-center text-[9px] font-bold transition-colors ${
+                              plugin.enabled
+                                ? 'bg-purple-500 text-white'
+                                : 'bg-slate-700 text-slate-400'
+                            }`}
+                          >
+                            {plugin.enabled ? 'ON' : 'OFF'}
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Add Plugin Button */}
+                  <button
+                    onClick={() => {
+                      // TODO: Open AudioUnit plugin browser
+                      // For now, add a placeholder plugin
+                      const newPlugin: AudioUnitPlugin = {
+                        id: `plugin_${Date.now()}`,
+                        name: 'Placeholder Effect',
+                        manufacturer: 'System',
+                        type: 'effect',
+                        enabled: true,
+                      };
+                      setNodes(prev => prev.map(n => {
+                        if (n.id === selectedBusId) {
+                          return {
+                            ...n,
+                            plugins: [...(n.plugins || []), newPlugin],
+                          };
+                        }
+                        return n;
+                      }));
+                    }}
+                    className="w-full mt-3 py-2 px-3 rounded-lg border border-dashed border-purple-500/30 bg-purple-500/5 hover:bg-purple-500/10 text-purple-400 hover:text-purple-300 transition-all text-[10px] font-medium flex items-center justify-center gap-2"
+                  >
+                    <Plus className="w-3 h-3" />
+                    Add AudioUnit
+                  </button>
                 </div>
 
-                {/* Add Plugin Button */}
-                <button
-                  onClick={() => {
-                    // TODO: Open AudioUnit plugin browser
-                    // For now, add a placeholder plugin
-                    const newPlugin: AudioUnitPlugin = {
-                      id: `plugin_${Date.now()}`,
-                      name: 'Placeholder Effect',
-                      manufacturer: 'System',
-                      type: 'effect',
-                      enabled: true,
-                    };
-                    setNodes(prev => prev.map(n => {
-                      if (n.id === selectedBusId) {
-                        return {
-                          ...n,
-                          plugins: [...(n.plugins || []), newPlugin],
-                        };
-                      }
-                      return n;
-                    }));
-                  }}
-                  className="w-full mt-3 py-2 px-3 rounded-lg border border-dashed border-purple-500/30 bg-purple-500/5 hover:bg-purple-500/10 text-purple-400 hover:text-purple-300 transition-all text-[10px] font-medium flex items-center justify-center gap-2"
-                >
-                  <Plus className="w-3 h-3" />
-                  Add AudioUnit
-                </button>
-              </div>
+                {/* Bus Controls */}
+                <div className="p-3 border-t border-slate-700 bg-slate-900/50">
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => toggleChannelMode(selectedBusId)}
+                      className="px-3 py-1.5 rounded text-[10px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                    >
+                      {selectedBus.channelMode === 'stereo' ? 'Switch to Mono' : 'Switch to Stereo'}
+                    </button>
+                    <button
+                      onClick={() => deleteNode(selectedBusId)}
+                      className="p-1.5 rounded text-red-400 hover:bg-red-500/20 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </>
+            );
+          })()}
 
-              {/* Bus Controls */}
-              <div className="p-3 border-t border-slate-700 bg-slate-900/50">
-                <div className="flex items-center justify-between">
-                  <button
-                    onClick={() => toggleChannelMode(selectedBusId)}
-                    className="px-3 py-1.5 rounded text-[10px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
-                  >
-                    {selectedBus.channelMode === 'stereo' ? 'Switch to Mono' : 'Switch to Stereo'}
-                  </button>
-                  <button
-                    onClick={() => deleteNode(selectedBusId)}
-                    className="p-1.5 rounded text-red-400 hover:bg-red-500/20 transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+          {/* Empty state when no bus is selected */}
+          {!selectedBusId && (
+            <>
+              <div className="h-8 bg-slate-900/50 border-b border-slate-700 flex items-center px-4 shrink-0">
+                <div className="flex items-center gap-2">
+                  <Workflow className="w-3 h-3 text-slate-600" />
+                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">
+                    Bus Detail
+                  </span>
                 </div>
               </div>
-            </div>
-          );
-        })()}
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-center text-slate-600">
+                  <Workflow className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                  <div className="text-[10px]">Select a bus to view details</div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
 
         {/* MIXER AREA (LEFT) */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#162032]">
