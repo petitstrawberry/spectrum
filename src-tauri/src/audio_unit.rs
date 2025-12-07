@@ -505,11 +505,6 @@ unsafe impl Sync for SendSyncPtr {}
 /// Maximum buffer size for AU processing
 const AU_MAX_BUFFER_SIZE: usize = 8192;
 
-/// Global pointer for pull input buffer (used by callback)
-/// This is safe because audio processing is single-threaded
-static PULL_INPUT_BUFFER: std::sync::atomic::AtomicPtr<AudioBufferList> = 
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-
 /// Stereo AudioBufferList structure (fixed 2 channels)
 /// This is heap-allocated and its address never changes
 #[repr(C)]
@@ -625,7 +620,7 @@ unsafe extern "C" fn input_render_callback(
 }
 
 /// AudioUnit instance wrapper - Lock-free design for audio thread safety
-/// 
+///
 /// Key design:
 /// - Mutable processing state wrapped in UnsafeCell for lock-free audio processing
 /// - Atomic flags for enabled/configured state
@@ -913,7 +908,7 @@ impl AudioUnitInstance {
                 if !input_bus.is_null() {
                     // Enable the input bus first - this is REQUIRED for effect plugins
                     let _: () = msg_send![input_bus, setEnabled: true];
-                    
+
                     let mut error: *mut AnyObject = std::ptr::null_mut();
                     let success: bool = msg_send![input_bus, setFormat: format error: &mut error as *mut _];
                     if !success {
@@ -1013,7 +1008,7 @@ impl AudioUnitInstance {
         unsafe {
             // SAFETY: processing_state is only accessed from audio thread during process()
             let state = &mut *self.processing_state.get();
-            
+
             // Copy input to internal buffer (required: input and output may be same buffer)
             let frames_usize = frames as usize;
             state.input_copy.left[..frames_usize].copy_from_slice(&left[..frames_usize]);
@@ -1042,54 +1037,70 @@ impl AudioUnitInstance {
 
             let mut action_flags: u32 = 0;
 
-            // Store input buffer pointer for the pull callback (atomic for safety)
-            PULL_INPUT_BUFFER.store(
-                state.input_buffer_list.as_audio_buffer_list(),
-                std::sync::atomic::Ordering::Release
-            );
+            // Get pointer to input buffer list (stable address - Box on heap)
+            let input_buffer_ptr = state.input_buffer_list.as_audio_buffer_list();
 
-            // Inline block structures
+            // Block with captured variable - input buffer pointer embedded in block
             #[repr(C)]
-            struct BlockDescriptor { reserved: u64, size: u64 }
+            struct BlockDescriptor {
+                reserved: u64,
+                size: u64,
+            }
 
             type PullInputBlockFn = unsafe extern "C" fn(
-                block: *const PullInputBlock, action_flags: *mut u32,
+                block: *const PullInputBlockWithCapture, action_flags: *mut u32,
                 timestamp: *const AudioTimeStamp, frame_count: u32,
                 input_bus: i64, input_data: *mut AudioBufferList,
             ) -> i32;
 
+            // Block WITH captured variable (input buffer pointer)
             #[repr(C)]
-            struct PullInputBlock {
-                isa: *const c_void, flags: i32, reserved: i32,
-                invoke: PullInputBlockFn, descriptor: *const BlockDescriptor,
+            struct PullInputBlockWithCapture {
+                isa: *const c_void,
+                flags: i32,
+                reserved: i32,
+                invoke: PullInputBlockFn,
+                descriptor: *const BlockDescriptor,
+                // Captured variable - pointer to our input buffer list
+                input_buffer: *mut AudioBufferList,
             }
 
-            // Ultra-fast pull callback - just copies buffer pointers' data
+            // Pull callback that reads captured pointer from block
             unsafe extern "C" fn pull_input_callback(
-                _block: *const PullInputBlock, action_flags: *mut u32,
+                block: *const PullInputBlockWithCapture, action_flags: *mut u32,
                 _timestamp: *const AudioTimeStamp, frame_count: u32,
                 _input_bus: i64, input_data: *mut AudioBufferList,
             ) -> i32 {
-                let src = PULL_INPUT_BUFFER.load(std::sync::atomic::Ordering::Acquire);
+                // Read input buffer pointer from captured variable in block
+                let src = (*block).input_buffer;
                 if input_data.is_null() || src.is_null() { return 0; }
 
-                let src_list = &*src;
-                let dst_list = &mut *input_data;
-                let bytes = (frame_count * 4) as usize;
-                let n = dst_list.mNumberBuffers.min(src_list.mNumberBuffers) as usize;
-
-                // Unrolled for stereo (most common case)
-                if n >= 1 {
-                    let s = &src_list.mBuffers[0];
-                    let d = &mut dst_list.mBuffers[0];
-                    if !s.mData.is_null() && !d.mData.is_null() {
-                        std::ptr::copy_nonoverlapping(s.mData as *const u8, d.mData as *mut u8, bytes);
-                    }
+                // DEBUG: Log what format AU is requesting
+                static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count < 5 {
+                    let dst_count = (*input_data).mNumberBuffers;
+                    let dst_buf0 = &(*input_data).mBuffers[0];
+                    println!("[AU pullInput] dst buffers={}, ch0.channels={}, ch0.bytes={}, frames={}",
+                        dst_count, dst_buf0.mNumberChannels, dst_buf0.mDataByteSize, frame_count);
                 }
-                if n >= 2 {
-                    let s = &*src_list.mBuffers.as_ptr().add(1);
-                    let d = &mut *dst_list.mBuffers.as_mut_ptr().add(1);
-                    if !s.mData.is_null() && !d.mData.is_null() {
+
+                let bytes = (frame_count * 4) as usize;
+
+                // Get buffer counts
+                let src_count = (*src).mNumberBuffers as usize;
+                let dst_count = (*input_data).mNumberBuffers as usize;
+                let n = src_count.min(dst_count);
+
+                // Get base pointers to buffer arrays
+                let src_buffers = (*src).mBuffers.as_ptr();
+                let dst_buffers = (*input_data).mBuffers.as_mut_ptr();
+
+                // Copy each channel
+                for i in 0..n {
+                    let s = &*src_buffers.add(i);
+                    let d = &mut *dst_buffers.add(i);
+                    if !s.mData.is_null() && !d.mData.is_null() && d.mDataByteSize >= bytes as u32 {
                         std::ptr::copy_nonoverlapping(s.mData as *const u8, d.mData as *mut u8, bytes);
                     }
                 }
@@ -1099,17 +1110,20 @@ impl AudioUnitInstance {
             }
 
             static BLOCK_DESC: BlockDescriptor = BlockDescriptor {
-                reserved: 0, size: std::mem::size_of::<PullInputBlock>() as u64,
+                reserved: 0, size: std::mem::size_of::<PullInputBlockWithCapture>() as u64,
             };
 
             extern "C" { static _NSConcreteStackBlock: *const c_void; }
 
-            let pull_block = PullInputBlock {
+            // Create block with captured input buffer pointer
+            // Stack block is valid for duration of this function call
+            let pull_block = PullInputBlockWithCapture {
                 isa: _NSConcreteStackBlock,
-                flags: 1 << 25,
+                flags: 0, // Stack block, no copy/dispose needed as it won't outlive this scope
                 reserved: 0,
                 invoke: pull_input_callback,
                 descriptor: &BLOCK_DESC,
+                input_buffer: input_buffer_ptr,
             };
 
             // RenderBlock structure
@@ -1120,18 +1134,25 @@ impl AudioUnitInstance {
                     block: *const RenderBlock, action_flags: *mut u32,
                     timestamp: *const AudioTimeStamp, frame_count: u32,
                     output_bus: i64, output_data: *mut AudioBufferList,
-                    pull_input_block: *const PullInputBlock,
+                    pull_input_block: *const PullInputBlockWithCapture,
                 ) -> i32,
             }
 
             let render_block_ptr = render_block as *const RenderBlock;
+            
+            // Save original output pointers - AU might replace them with its own buffers
+            let orig_left_ptr = left.as_mut_ptr();
+            let orig_right_ptr = right.as_mut_ptr();
+            
+            let output_buffer_list_ptr = state.output_buffer_list.as_audio_buffer_list();
+            
             let status = ((*render_block_ptr).invoke)(
                 render_block_ptr,
                 &mut action_flags,
                 &timestamp,
                 frames,
                 0,
-                state.output_buffer_list.as_audio_buffer_list(),
+                output_buffer_list_ptr,
                 &pull_block,
             );
 
@@ -1139,6 +1160,67 @@ impl AudioUnitInstance {
 
             if status != 0 {
                 return Err(format!("render failed: {}", status));
+            }
+            
+            // DEBUG: Check output buffer state after render
+            static DEBUG_OUTPUT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let out_count = DEBUG_OUTPUT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            
+            // Check if AudioUnit replaced output buffer pointers
+            // Some plugins write to their own internal buffers instead of ours
+            let output_list = &*output_buffer_list_ptr;
+            let frames_usize = frames as usize;
+            
+            // Get buffer info for debug
+            let buf0 = &output_list.mBuffers[0];
+            let buf1_ptr = (output_list.mBuffers.as_ptr()).add(1);
+            let buf1 = &*buf1_ptr;
+            
+            if out_count < 5 {
+                let ptr_changed_l = buf0.mData != orig_left_ptr as *mut c_void;
+                let ptr_changed_r = buf1.mData != orig_right_ptr as *mut c_void;
+                println!("[AU output] buffers={}, L.ptr_changed={}, R.ptr_changed={}, L.bytes={}, R.bytes={}",
+                    output_list.mNumberBuffers, ptr_changed_l, ptr_changed_r, 
+                    buf0.mDataByteSize, buf1.mDataByteSize);
+                
+                // Check first few samples
+                if !buf0.mData.is_null() {
+                    let samples = std::slice::from_raw_parts(buf0.mData as *const f32, 4.min(frames_usize));
+                    println!("[AU output] L samples: {:?}", samples);
+                }
+                if !buf1.mData.is_null() {
+                    let samples = std::slice::from_raw_parts(buf1.mData as *const f32, 4.min(frames_usize));
+                    println!("[AU output] R samples: {:?}", samples);
+                }
+            }
+            
+            // Left channel
+            if output_list.mNumberBuffers >= 1 {
+                let buf0 = &output_list.mBuffers[0];
+                if !buf0.mData.is_null() && buf0.mData != orig_left_ptr as *mut c_void {
+                    // AU used its own buffer - copy data back
+                    std::ptr::copy_nonoverlapping(
+                        buf0.mData as *const f32,
+                        orig_left_ptr,
+                        frames_usize,
+                    );
+                }
+            }
+            
+            // Right channel (index 1 in our StereoAudioBufferList)
+            if output_list.mNumberBuffers >= 2 {
+                // Need to access second buffer - but AudioBufferList only has [1] array
+                // Use pointer arithmetic to get second buffer
+                let buf1_ptr = (output_list.mBuffers.as_ptr()).add(1);
+                let buf1 = &*buf1_ptr;
+                if !buf1.mData.is_null() && buf1.mData != orig_right_ptr as *mut c_void {
+                    // AU used its own buffer - copy data back
+                    std::ptr::copy_nonoverlapping(
+                        buf1.mData as *const f32,
+                        orig_right_ptr,
+                        frames_usize,
+                    );
+                }
             }
 
             Ok(())
@@ -1214,7 +1296,7 @@ impl Drop for AudioUnitInstance {
 }
 
 /// Manager for AudioUnit instances - Lock-free audio processing design
-/// 
+///
 /// Design:
 /// - Instances stored as Arc<AudioUnitInstance> directly (no inner RwLock)
 /// - process_chain() is completely lock-free - just dereferences Arc pointers
@@ -1244,13 +1326,13 @@ impl AudioUnitManager {
         let instance_id = format!("au_{}", id);
 
         let mut instance = AudioUnitInstance::new(info, instance_id.clone())?;
-        
+
         // Pre-configure the instance for audio processing
         // This ensures it's ready for the audio thread without needing locks
         if let Err(e) = instance.configure(48000.0, 1024, 2) {
             println!("[AudioUnit] Warning: Failed to pre-configure {}: {}", instance_id, e);
         }
-        
+
         self.instances.write().insert(
             instance_id.clone(),
             Arc::new(instance),
@@ -1309,7 +1391,7 @@ impl AudioUnitManager {
 
     /// Process audio through a chain of plugins (by instance IDs)
     /// Returns true if any processing was done
-    /// 
+    ///
     /// LOCK-FREE: This method uses NO locks on the audio thread
     /// - Reads instance pointers from Arc (no lock needed)
     /// - Calls process() which takes &self (no lock needed)

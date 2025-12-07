@@ -338,6 +338,16 @@ pub struct BusInfo {
     pub muted: bool,
 }
 
+/// Bus level info for metering (post-plugin, post-fader)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusLevelInfo {
+    pub id: String,
+    pub left_rms: f32,
+    pub right_rms: f32,
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
+
 /// Add a new bus
 #[tauri::command]
 fn add_bus(id: String, label: String, channels: u32) {
@@ -386,6 +396,22 @@ fn get_buses() -> Vec<BusInfo> {
             channels: b.channels,
             fader: b.fader,
             muted: b.muted,
+        })
+        .collect()
+}
+
+/// Get bus meter levels (post-plugin, post-fader)
+#[tauri::command]
+fn get_bus_levels() -> Vec<BusLevelInfo> {
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.get_bus_levels()
+        .into_iter()
+        .map(|(id, levels)| BusLevelInfo {
+            id,
+            left_rms: levels.left_rms,
+            right_rms: levels.right_rms,
+            left_peak: levels.left_peak,
+            right_peak: levels.right_peak,
         })
         .collect()
 }
@@ -1041,6 +1067,7 @@ pub fn run() {
             set_bus_mute,
             set_bus_plugins,
             get_buses,
+            get_bus_levels,
             update_bus_send,
             remove_bus_send,
             // AudioUnit commands

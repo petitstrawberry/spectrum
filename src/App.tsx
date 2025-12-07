@@ -3191,23 +3191,53 @@ export default function App() {
                             e.preventDefault();
                             e.dataTransfer.dropEffect = 'move';
                           }}
-                          onDrop={(e) => {
+                          onDrop={async (e) => {
                             e.preventDefault();
+                            e.stopPropagation();
                             const fromIdx = parseInt(e.dataTransfer.getData('plugin-idx'), 10);
                             const busId = e.dataTransfer.getData('bus-id');
                             const toIdx = idx;
-                            if (busId !== selectedBusId || fromIdx === toIdx || isNaN(fromIdx)) return;
+                            
+                            console.log('[DnD] Drop event:', { fromIdx, toIdx, busId, selectedBusId });
+                            
+                            if (busId !== selectedBusId || fromIdx === toIdx || isNaN(fromIdx)) {
+                              console.log('[DnD] Skipped:', { busIdMatch: busId === selectedBusId, sameIdx: fromIdx === toIdx, isNaN: isNaN(fromIdx) });
+                              return;
+                            }
 
-                            // Reorder plugins
+                            // Reorder plugins - get fresh reference from nodes
+                            const targetBus = nodes.find(n => n.id === selectedBusId);
+                            if (!targetBus?.plugins) {
+                              console.log('[DnD] No target bus or plugins');
+                              return;
+                            }
+                            
+                            console.log('[DnD] Reordering:', targetBus.plugins.map(p => p.name));
+                            
+                            const newPlugins = [...targetBus.plugins];
+                            const [moved] = newPlugins.splice(fromIdx, 1);
+                            newPlugins.splice(toIdx, 0, moved);
+                            
+                            console.log('[DnD] New order:', newPlugins.map(p => p.name));
+                            
+                            // Update local state
                             setNodes(prev => prev.map(n => {
-                              if (n.id === selectedBusId && n.plugins) {
-                                const newPlugins = [...n.plugins];
-                                const [moved] = newPlugins.splice(fromIdx, 1);
-                                newPlugins.splice(toIdx, 0, moved);
+                              if (n.id === selectedBusId) {
                                 return { ...n, plugins: newPlugins };
                               }
                               return n;
                             }));
+                            
+                            // Update backend with new plugin order
+                            if (targetBus.busId) {
+                              const pluginIds = newPlugins.map(p => p.id);
+                              try {
+                                await setBusPlugins(targetBus.busId, pluginIds);
+                                console.log('[DnD] Backend updated:', pluginIds);
+                              } catch (error) {
+                                console.error('Failed to reorder plugins:', error);
+                              }
+                            }
                           }}
                           onClick={async () => {
                             // Open AudioUnit UI when clicking on the plugin slot

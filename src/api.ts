@@ -158,6 +158,23 @@ export async function getBuses(): Promise<BusInfo[]> {
   }
 }
 
+export interface BusLevelInfo {
+  id: string;
+  left_rms: number;
+  right_rms: number;
+  left_peak: number;
+  right_peak: number;
+}
+
+export async function getBusLevels(): Promise<BusLevelInfo[]> {
+  try {
+    return await invoke<BusLevelInfo[]>('get_bus_levels');
+  } catch (error) {
+    console.error('Failed to get bus levels:', error);
+    return [];
+  }
+}
+
 /**
  * Add or update a bus send (Input -> Bus, Bus -> Bus, or Bus -> Output)
  * @param sourceType - "input" or "bus"

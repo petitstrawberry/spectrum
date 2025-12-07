@@ -132,10 +132,45 @@ pub fn open_audio_unit_ui(
         }
     }
     
-    // Create window
+    // Get AudioUnit's view using existing AUAudioUnit instance
+    let view = get_audio_unit_view(instance_id, au_audio_unit)?;
+    
+    // Determine window size based on the view's size
+    let (window_width, window_height) = if let Some(au_view) = view {
+        unsafe {
+            // Get the view's frame size
+            let frame: NSRect = msg_send![au_view, frame];
+            let preferred_size: NSSize = msg_send![au_view, fittingSize];
+            
+            // Use preferredContentSize if available (AUv3 view controllers often set this)
+            // Otherwise fall back to frame size or fitting size
+            let width = if preferred_size.width > 10.0 {
+                preferred_size.width
+            } else if frame.size.width > 10.0 {
+                frame.size.width
+            } else {
+                600.0
+            };
+            
+            let height = if preferred_size.height > 10.0 {
+                preferred_size.height
+            } else if frame.size.height > 10.0 {
+                frame.size.height
+            } else {
+                400.0
+            };
+            
+            // Clamp to reasonable sizes (min 200x100, max 2000x1500)
+            (width.max(200.0).min(2000.0), height.max(100.0).min(1500.0))
+        }
+    } else {
+        (600.0, 400.0) // Default size for placeholder
+    };
+    
+    // Create window with the determined size
     let content_rect = NSRect::new(
         NSPoint::new(100.0, 100.0),
-        NSSize::new(600.0, 400.0),
+        NSSize::new(window_width, window_height),
     );
     
     let style = NSWindowStyleMask::Titled
@@ -164,14 +199,25 @@ pub fn open_audio_unit_ui(
         let _: () = msg_send![&*window, setLevel: 3i64];
     }
     
-    // Get AudioUnit's view using existing AUAudioUnit instance
-    let view = get_audio_unit_view(instance_id, au_audio_unit)?;
-    
     if let Some(au_view) = view {
         unsafe {
             // Set the AudioUnit view as the window's content view
             let window_ptr: *const AnyObject = std::mem::transmute(&*window);
             let _: () = msg_send![window_ptr, setContentView: au_view];
+            
+            // Also try to get preferredContentSize from view controller and resize window
+            if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+                if !vc.is_null() {
+                    let pref_size: NSSize = msg_send![vc, preferredContentSize];
+                    if pref_size.width > 10.0 && pref_size.height > 10.0 {
+                        // Resize the window to match preferred content size
+                        let frame: NSRect = msg_send![&*window, frame];
+                        let content_frame = NSRect::new(frame.origin, pref_size);
+                        let new_frame: NSRect = msg_send![&*window, frameRectForContentRect: content_frame];
+                        let _: () = msg_send![&*window, setFrame: new_frame display: true animate: false];
+                    }
+                }
+            }
         }
     } else {
         // Create a placeholder view with a message

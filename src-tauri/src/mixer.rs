@@ -125,10 +125,14 @@ impl Default for Bus {
     }
 }
 
-/// Bus buffer for audio processing
+/// Bus buffer for audio processing with cache support
 pub struct BusBuffer {
     pub left: Box<[f32; MAX_FRAMES]>,
     pub right: Box<[f32; MAX_FRAMES]>,
+    /// Sample counter when this buffer was last processed (0 = never/invalid)
+    pub processed_at: u64,
+    /// Number of valid frames in the buffer
+    pub valid_frames: usize,
 }
 
 impl BusBuffer {
@@ -136,6 +140,8 @@ impl BusBuffer {
         Self {
             left: Box::new([0.0; MAX_FRAMES]),
             right: Box::new([0.0; MAX_FRAMES]),
+            processed_at: 0,
+            valid_frames: 0,
         }
     }
 
@@ -144,6 +150,84 @@ impl BusBuffer {
             self.left[i] = 0.0;
             self.right[i] = 0.0;
         }
+        self.valid_frames = frames;
+    }
+    
+    /// Check if this buffer is valid for the given sample counter
+    #[inline]
+    pub fn is_valid(&self, sample_counter: u64) -> bool {
+        self.processed_at == sample_counter && self.valid_frames > 0
+    }
+    
+    /// Mark this buffer as processed at the given sample counter
+    #[inline]
+    pub fn mark_processed(&mut self, sample_counter: u64, frames: usize) {
+        self.processed_at = sample_counter;
+        self.valid_frames = frames;
+    }
+}
+
+/// Global sample counter for cache invalidation
+/// Incremented each audio cycle by the first device to process
+pub struct SampleCounter {
+    counter: AtomicU64,
+}
+
+impl SampleCounter {
+    pub fn new() -> Self {
+        Self {
+            counter: AtomicU64::new(1), // Start at 1, 0 means "never processed"
+        }
+    }
+    
+    /// Get current sample counter value
+    #[inline]
+    pub fn get(&self) -> u64 {
+        self.counter.load(Ordering::Acquire)
+    }
+    
+    /// Try to increment the counter (only one device per cycle succeeds)
+    /// Returns (new_counter, true) if we incremented, (current, false) if someone else did
+    #[inline]
+    pub fn try_increment(&self) -> (u64, bool) {
+        let current = self.counter.load(Ordering::Acquire);
+        match self.counter.compare_exchange(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed
+        ) {
+            Ok(_) => (current + 1, true),
+            Err(actual) => (actual, false),
+        }
+    }
+}
+
+/// Bus processing state - tracks which buses have been processed this cycle
+pub struct BusProcessingState {
+    /// Global sample counter
+    sample_counter: SampleCounter,
+}
+
+impl BusProcessingState {
+    pub fn new() -> Self {
+        Self {
+            sample_counter: SampleCounter::new(),
+        }
+    }
+    
+    /// Get the current sample counter value
+    #[inline]
+    pub fn get_sample_counter(&self) -> u64 {
+        self.sample_counter.get()
+    }
+    
+    /// Try to advance the sample counter to the next cycle
+    /// Returns (counter, true) if this device started a new cycle
+    /// Returns (counter, false) if another device already started this cycle
+    #[inline]
+    pub fn next_cycle(&self) -> (u64, bool) {
+        self.sample_counter.try_increment()
     }
 }
 
@@ -241,6 +325,9 @@ pub struct BusSendsArray {
     bus_id_to_idx: RwLock<HashMap<String, usize>>,
     /// Active bus sends (read by audio thread)
     sends: RwLock<Vec<BusSendCompact>>,
+    /// Pre-computed processing order (Kahn's algorithm result)
+    /// Contains bus indices in the order they should be processed
+    processing_order: RwLock<Vec<u8>>,
     /// Version counter for cache invalidation
     version: AtomicU64,
 }
@@ -251,6 +338,7 @@ impl BusSendsArray {
             buses: RwLock::new(Vec::with_capacity(MAX_BUSES)),
             bus_id_to_idx: RwLock::new(HashMap::new()),
             sends: RwLock::new(Vec::with_capacity(MAX_SENDS)),
+            processing_order: RwLock::new(Vec::with_capacity(MAX_BUSES)),
             version: AtomicU64::new(0),
         }
     }
@@ -271,6 +359,12 @@ impl BusSendsArray {
     #[inline]
     pub fn try_read_buses(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<Bus>>> {
         self.buses.try_read()
+    }
+    
+    /// Read pre-computed processing order (for audio callback)
+    #[inline]
+    pub fn try_read_order(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<u8>>> {
+        self.processing_order.try_read()
     }
 
     /// Get bus count
@@ -332,6 +426,9 @@ impl BusSendsArray {
                     send.target_bus_idx -= 1;
                 }
             }
+            
+            // Recompute processing order
+            self.compute_processing_order(&sends, buses.len());
         }
         
         self.version.fetch_add(1, Ordering::Release);
@@ -457,7 +554,80 @@ impl BusSendsArray {
             });
         }
         
+        // Compute topological order using Kahn's algorithm
+        let bus_count = buses.len();
+        println!("[Mixer] update_sends complete, computing order for {} buses, {} sends", bus_count, compact.len());
+        self.compute_processing_order(&compact, bus_count);
+        
         self.version.fetch_add(1, Ordering::Release);
+    }
+    
+    /// Compute processing order using Kahn's algorithm
+    /// This determines the order in which buses should be processed
+    fn compute_processing_order(&self, sends: &[BusSendCompact], bus_count: usize) {
+        let mut order = self.processing_order.write();
+        order.clear();
+        
+        if bus_count == 0 {
+            return;
+        }
+        
+        // Step 1: Count in-degrees for each bus (how many buses feed into it)
+        let mut in_degree = vec![0u8; bus_count];
+        
+        for send in sends.iter() {
+            // Only count Bus -> Bus sends
+            if send.active && send.source_type == 1 && send.target_type == 0 {
+                let target_idx = send.target_bus_idx as usize;
+                if target_idx < bus_count {
+                    in_degree[target_idx] = in_degree[target_idx].saturating_add(1);
+                }
+            }
+        }
+        
+        // Step 2: Initialize queue with buses that have in-degree 0
+        let mut queue: Vec<u8> = Vec::with_capacity(bus_count);
+        for (idx, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 {
+                queue.push(idx as u8);
+            }
+        }
+        
+        // Step 3: Process the queue (Kahn's algorithm)
+        let mut head = 0;
+        while head < queue.len() {
+            let current = queue[head] as usize;
+            head += 1;
+            
+            order.push(current as u8);
+            
+            // Decrease in-degree for all buses this one feeds into
+            for send in sends.iter() {
+                if send.active && send.source_type == 1 && send.target_type == 0 
+                    && send.source_bus_idx as usize == current 
+                {
+                    let target_idx = send.target_bus_idx as usize;
+                    if target_idx < bus_count {
+                        in_degree[target_idx] = in_degree[target_idx].saturating_sub(1);
+                        if in_degree[target_idx] == 0 {
+                            queue.push(target_idx as u8);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check for cycles (if not all buses are in the order, there's a cycle)
+        if order.len() != bus_count {
+            println!("[Mixer] Warning: Cycle detected in bus routing! Adding remaining buses at end.");
+            for idx in 0..bus_count {
+                if !order.contains(&(idx as u8)) {
+                    order.push(idx as u8);
+                }
+            }
+        }
+        
+        println!("[Mixer] Computed bus processing order: {:?}", order.as_slice());
     }
 
     /// Add or update a bus send
@@ -534,6 +704,10 @@ impl BusSendsArray {
             sends.push(compact_send);
         }
         
+        // Recompute processing order
+        let bus_count = buses.len();
+        self.compute_processing_order(&sends, bus_count);
+        
         drop(sends);
         drop(buses);
         drop(id_map);
@@ -587,6 +761,10 @@ impl BusSendsArray {
                 && s.target_device_hash == target_device_hash
                 && s.target_channel == target_channel)
         });
+        
+        // Recompute processing order
+        let buses = self.buses.read();
+        self.compute_processing_order(&sends, buses.len());
         
         self.version.fetch_add(1, Ordering::Release);
     }
@@ -735,6 +913,8 @@ pub struct MixerState {
     pub bus_sends: BusSendsArray,
     /// Bus buffers for audio processing (indexed by bus index)
     pub bus_buffers: RwLock<Vec<BusBuffer>>,
+    /// Bus processing state - ensures buses are processed exactly once per audio cycle
+    pub bus_processing: BusProcessingState,
     /// Master fader for each Prism channel pair (0.0 to 1.0)
     pub source_faders: RwLock<[f32; PRISM_CHANNELS / 2]>,
     /// Mute state for each source channel pair
@@ -745,6 +925,8 @@ pub struct MixerState {
     pub input_levels: RwLock<[ChannelLevels; PRISM_CHANNELS / 2]>,
     /// Current output levels (per device per pair)
     pub output_levels: RwLock<HashMap<String, Vec<ChannelLevels>>>,
+    /// Bus levels (post-plugin, post-fader) - indexed by bus index
+    pub bus_levels: RwLock<[ChannelLevels; MAX_BUSES]>,
     /// Sample rate
     pub sample_rate: RwLock<u32>,
     /// Buffer size
@@ -764,11 +946,13 @@ impl MixerState {
             sends_compact: SendsArray::new(),
             bus_sends: BusSendsArray::new(),
             bus_buffers: RwLock::new(Vec::new()),
+            bus_processing: BusProcessingState::new(),
             source_faders: RwLock::new([1.0; PRISM_CHANNELS / 2]),
             source_mutes: RwLock::new([false; PRISM_CHANNELS / 2]),
             output_faders: RwLock::new(HashMap::new()),
             input_levels: RwLock::new([ChannelLevels::default(); PRISM_CHANNELS / 2]),
             output_levels: RwLock::new(HashMap::new()),
+            bus_levels: RwLock::new([ChannelLevels::default(); MAX_BUSES]),
             sample_rate: RwLock::new(48000),
             buffer_size: RwLock::new(128),
         }
@@ -975,6 +1159,37 @@ impl MixerState {
     /// Get bus sends for debugging
     pub fn get_bus_sends(&self) -> Vec<BusSendCompact> {
         self.bus_sends.get_bus_sends_compact()
+    }
+    
+    /// Update bus levels (called from audio callback after plugin processing)
+    pub fn update_bus_level(&self, bus_idx: usize, left_rms: f32, right_rms: f32, left_peak: f32, right_peak: f32) {
+        if let Some(mut levels) = self.bus_levels.try_write() {
+            if bus_idx < MAX_BUSES {
+                levels[bus_idx] = ChannelLevels {
+                    left_rms,
+                    right_rms,
+                    left_peak,
+                    right_peak,
+                };
+            }
+        }
+    }
+    
+    /// Get bus levels (for UI)
+    pub fn get_bus_levels(&self) -> Vec<(String, ChannelLevels)> {
+        let buses = self.bus_sends.get_buses();
+        let levels = self.bus_levels.read();
+        
+        buses.iter().enumerate()
+            .map(|(idx, bus)| {
+                let level = if idx < MAX_BUSES {
+                    levels[idx]
+                } else {
+                    ChannelLevels::default()
+                };
+                (bus.id.clone(), level)
+            })
+            .collect()
     }
 }
 
