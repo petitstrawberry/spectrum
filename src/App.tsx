@@ -22,6 +22,7 @@ import {
   Volume2,
   Mic,
   ExternalLink,
+  Cast,
 } from 'lucide-react';
 import {
   getPrismApps,
@@ -82,6 +83,8 @@ interface NodeData {
   deviceName?: string;        // Device name for display
   // Channel mode: mono (1ch ports) or stereo (2ch ports)
   channelMode: ChannelMode;
+  // Device availability - false when device is disconnected
+  available?: boolean;
 }
 
 interface Connection {
@@ -155,13 +158,50 @@ function getDeviceNodeColor(node: NodeData): string {
 // --- Helper: Get icon for output device type ---
 function getIconForOutputDevice(device: AudioDevice): React.ComponentType<{ className?: string }> {
   const name = device.name.toLowerCase();
-  if (name.includes('headphone')) return Headphones;
-  if (name.includes('speaker') || name.includes('built-in output')) return Speaker;
-  if (name.includes('blackhole') || name.includes('loopback')) return Radio;
-  if (name.includes('obs') || name.includes('stream')) return Video;
+  const transport = device.transport_type || '';
+  
+  // Transport type based detection (most reliable from CoreAudio)
+  if (transport === 'hdmi' || transport === 'displayport') return Monitor;
+  if (transport === 'bluetooth') return Headphones; // BT is usually headphones
+  if (transport === 'airplay') return Cast;
+  
+  // Headphones detection (various naming patterns)
+  if (name.includes('headphone') || name.includes('headset') || 
+      name.includes('airpods') || name.includes('earpods') || 
+      name.includes('earphone') || name.includes('earbuds') ||
+      name.includes('beats') || name.includes('wh-1000') || // Sony WH-1000XM
+      name.includes('bose') || name.includes('sennheiser') ||
+      name.includes('jabra') || name.includes('soundcore')) return Headphones;
+  
+  // External speakers
+  if (name.includes('speaker') || name.includes('built-in output') || 
+      name.includes('macbook pro speakers') || name.includes('internal speakers') ||
+      name.includes('homepod') || name.includes('sonos') || name.includes('echo')) return Speaker;
+  
+  // Virtual audio devices
+  if (name.includes('blackhole') || name.includes('loopback') || 
+      name.includes('soundflower') || name.includes('vb-cable') ||
+      name.includes('virtual') || name.includes('aggregate')) return Radio;
+  if (transport === 'virtual' || transport === 'aggregate') return Radio;
+  
+  // Streaming / OBS
+  if (name.includes('obs') || name.includes('stream') || 
+      name.includes('discord') || name.includes('zoom')) return Video;
+  
+  // USB audio interfaces / DACs - use Volume2 (generic audio)
+  if (name.includes('scarlett') || name.includes('focusrite') ||
+      name.includes('steinberg') || name.includes('motu') ||
+      name.includes('rme') || name.includes('universal audio') ||
+      name.includes('presonus') || name.includes('behringer') ||
+      name.includes('fiio') || name.includes('topping') ||
+      name.includes('audio interface') || name.includes('dac')) return Volume2;
+  
+  // Device type fallback
   if (device.device_type === 'virtual') return Radio;
   if (device.device_type === 'builtin') return Speaker;
-  return Monitor;
+  
+  // Default: generic volume icon for unknown devices
+  return Volume2;
 }
 
 // --- Helper: Get color for device type ---
@@ -733,6 +773,7 @@ export default function App() {
             deviceId: device.device_id,
             deviceName: device.name,
             channelMode: defaultMode,
+            available: true,
           };
         }
       }
@@ -763,6 +804,7 @@ export default function App() {
           channelOffset: channelData.channelOffset,
           sourceType: 'prism-channel',
           channelMode: 'stereo', // Prism is always stereo pairs
+          available: true, // Prism channels are available when driver is connected
         };
       }
     }
@@ -783,6 +825,7 @@ export default function App() {
       muted: false,
       channelCount: targetChannels,
       channelMode: (targetChannels >= 2 && targetChannels % 2 === 0) ? 'stereo' : 'mono', // Stereo for even channels >= 2
+      available: true,
     };
   }, [channelSources, outputTargets, inputDevices]);
 
@@ -801,6 +844,143 @@ export default function App() {
       setOutputVolume(firstTarget.deviceId, 0);
     }
   }, [outputTargets, createNode]);
+
+  // --- Sync node availability with connected devices ---
+  // When devices disconnect/reconnect, update node availability and greyout
+  // Also restart output when device reconnects
+  // Match by device name since device IDs can change on reconnect
+  useEffect(() => {
+    setNodes(prevNodes => {
+      let changed = false;
+      const newNodes = prevNodes.map(node => {
+        if (node.type === 'target') {
+          // Check if this target device still exists in audioDevices
+          // First try to match by libraryId (device ID), then fallback to name matching
+          let targetData = outputTargets.find(t => t.id === node.libraryId);
+          
+          // If not found by ID, try to find by name (device may have reconnected with new ID)
+          if (!targetData) {
+            targetData = outputTargets.find(t => t.name === node.label);
+            if (targetData) {
+              // Device reconnected with new ID - update libraryId
+              console.log(`[Spectrum] Device reconnected with new ID: ${node.label} (${node.libraryId} -> ${targetData.id})`);
+              changed = true;
+              
+              // Get old device ID from libraryId (format: "out_123")
+              const oldDeviceId = node.libraryId.replace('out_', '');
+              const newDeviceId = targetData.deviceId;
+              
+              // Restart output with current volume
+              setOutputVolume(newDeviceId, faderToDb(node.volume));
+              
+              // Re-establish all sends to this device with new device ID
+              // Find all connections targeting this node
+              const nodeConnections = connections.filter(c => c.toNodeId === node.id);
+              for (const conn of nodeConnections) {
+                const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
+                if (sourceNode) {
+                  const srcDevId = getSourceDeviceId(sourceNode);
+                  const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+                  const tgtCh = getChannelIndexForPort(node, conn.toChannel);
+                  const sendLevel = conn.muted ? 0 : conn.sendLevel / 100;
+                  
+                  // Remove old send (if it exists) and add new one
+                  removeMixerSend(srcDevId, srcCh, oldDeviceId, tgtCh).catch(() => {});
+                  updateMixerSend(srcDevId, srcCh, newDeviceId, tgtCh, sendLevel, conn.muted).catch(console.error);
+                  console.log(`[Spectrum] Re-established send: src=${srcDevId}:${srcCh} -> ${newDeviceId}:${tgtCh}`);
+                }
+              }
+              
+              return { 
+                ...node, 
+                libraryId: targetData.id,  // Update to new ID
+                available: true,
+                // Update other properties that might have changed
+                channelCount: targetData.channels,
+                icon: targetData.icon,
+                color: targetData.color,
+              };
+            }
+          }
+          
+          const isAvailable = targetData !== undefined;
+          
+          // Handle reconnection (same ID): restart output and restore volume
+          if (isAvailable && node.available === false && targetData) {
+            console.log(`[Spectrum] Device reconnected: ${node.label}, restarting output`);
+            setOutputVolume(targetData.deviceId, faderToDb(node.volume));
+          }
+          
+          if (node.available !== isAvailable) {
+            changed = true;
+            return { ...node, available: isAvailable };
+          }
+        } else if (node.type === 'source' && node.sourceType === 'device' && node.deviceId) {
+          // Check if this input device still exists
+          // First try by device ID, then by name
+          let device = inputDevices.find(d => d.device_id === node.deviceId);
+          
+          // If not found by ID, try to find by name
+          if (!device && node.deviceName) {
+            device = inputDevices.find(d => d.name === node.deviceName);
+            if (device) {
+              // Device reconnected with new ID
+              const oldDeviceId = node.deviceId;
+              const newDeviceId = device.device_id;
+              console.log(`[Spectrum] Input device reconnected with new ID: ${node.deviceName} (${oldDeviceId} -> ${newDeviceId})`);
+              changed = true;
+              
+              // Restart capture
+              startInputCapture(newDeviceId).catch(console.error);
+              
+              // Re-establish all sends from this device with new device ID
+              const nodeConnections = connections.filter(c => c.fromNodeId === node.id);
+              for (const conn of nodeConnections) {
+                const targetNode = nodes.find(n => n.id === conn.toNodeId);
+                if (targetNode) {
+                  const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+                  if (targetData) {
+                    const srcCh = getChannelIndexForPort(node, conn.fromChannel);
+                    const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+                    const sendLevel = conn.muted ? 0 : conn.sendLevel / 100;
+                    
+                    // Remove old send and add new one
+                    removeMixerSend(oldDeviceId, srcCh, targetData.deviceId, tgtCh).catch(() => {});
+                    updateMixerSend(newDeviceId, srcCh, targetData.deviceId, tgtCh, sendLevel, conn.muted).catch(console.error);
+                    console.log(`[Spectrum] Re-established send: src=${newDeviceId}:${srcCh} -> ${targetData.deviceId}:${tgtCh}`);
+                  }
+                }
+              }
+              
+              return {
+                ...node,
+                deviceId: newDeviceId,
+                libraryId: `dev_${newDeviceId}`,
+                available: true,
+                channelCount: device.channels,
+              };
+            }
+          }
+          
+          const isAvailable = device !== undefined;
+          
+          // Handle reconnection (same ID): restart input capture
+          if (isAvailable && node.available === false) {
+            console.log(`[Spectrum] Input device reconnected: ${node.label}, restarting capture`);
+            startInputCapture(node.deviceId).catch(console.error);
+          }
+          
+          if (node.available !== isAvailable) {
+            changed = true;
+            return { ...node, available: isAvailable };
+          }
+        }
+        // Prism channels are always available (when Prism is connected)
+        return node;
+      });
+      return changed ? newNodes : prevNodes;
+    });
+  }, [audioDevices, inputDevices, outputTargets]);
 
   const getPortPosition = useCallback((node: NodeData, portIndex: number, isInput: boolean) => {
     const headerHeight = 36;
@@ -1787,16 +1967,26 @@ export default function App() {
                   const startPos = getPortPosition(start, conn.fromChannel, false);
                   const endPos = getPortPosition(end, conn.toChannel, true);
 
-                  const isActive = end.id === focusedOutputId;
-                  const strokeColor = isActive ? (end.color.includes('cyan') ? '#22d3ee' : '#f472b6') : '#475569';
+                  // Check if either node is unavailable
+                  const isDisconnected = start.available === false || end.available === false;
+                  const isActive = !isDisconnected && end.id === focusedOutputId;
+                  const strokeColor = isDisconnected ? '#64748b' : (isActive ? (end.color.includes('cyan') ? '#22d3ee' : '#f472b6') : '#475569');
 
                   const path = `M ${startPos.x} ${startPos.y} C ${startPos.x + 50} ${startPos.y}, ${endPos.x - 50} ${endPos.y}, ${endPos.x} ${endPos.y}`;
 
                   return (
                     <g key={conn.id} className="pointer-events-auto group cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteConnection(conn.id); }}>
                       <path d={path} fill="none" stroke="transparent" strokeWidth="10" />
-                      <path d={path} fill="none" stroke={strokeColor} strokeWidth={isActive ? 2 : 1} className="group-hover:stroke-red-400" />
-                      {isActive && (
+                      <path 
+                        d={path} 
+                        fill="none" 
+                        stroke={strokeColor} 
+                        strokeWidth={isActive ? 2 : 1} 
+                        strokeDasharray={isDisconnected ? '4,4' : 'none'}
+                        opacity={isDisconnected ? 0.5 : 1}
+                        className="group-hover:stroke-red-400" 
+                      />
+                      {isActive && !isDisconnected && (
                         <circle r="3" fill="#fff" opacity="0.8">
                           <animateMotion dur="2s" repeatCount="indefinite" path={path} />
                         </circle>
@@ -1900,17 +2090,24 @@ export default function App() {
               const isFocused = focusedOutputId === node.id;
               const portCount = getPortCount(node);
               const nodeHeight = 36 + 16 + (portCount * 24);
+              const isUnavailable = node.available === false;
 
               let borderClass = 'border-slate-700';
-              if (node.type === 'source') {
+              if (isUnavailable) {
+                // Grayed out style for unavailable devices
+                borderClass = 'border-slate-600/50';
+              } else if (node.type === 'source') {
                 if (isDeviceNode) {
                   borderClass = 'border-amber-500/30 hover:border-amber-500';
                 } else {
                   borderClass = 'border-cyan-500/30 hover:border-cyan-500';
                 }
               }
-              if (node.type === 'target') borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
-              if (isSelected) borderClass = 'border-white ring-2 ring-white/20';
+              if (node.type === 'target' && !isUnavailable) borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
+              if (isSelected && !isUnavailable) borderClass = 'border-white ring-2 ring-white/20';
+
+              // Background class for unavailable nodes
+              const bgClass = isUnavailable ? 'bg-slate-900/50' : 'bg-slate-800';
 
               return (
                 <div
@@ -1922,7 +2119,7 @@ export default function App() {
                     e.stopPropagation();
                     setContextMenu({ nodeId: node.id, x: e.clientX, y: e.clientY });
                   }}
-                  className={`canvas-node absolute w-[180px] bg-slate-800 rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass}`}
+                  className={`canvas-node absolute w-[180px] ${bgClass} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${isUnavailable ? 'opacity-50' : ''}`}
                   style={{ left: node.x, top: node.y, height: nodeHeight }}
                 >
                 {/* Header with level meter for source nodes */}
@@ -1942,9 +2139,15 @@ export default function App() {
                       <div className={`w-2 h-2 rounded-full ${dynamicColor} shadow-[0_0_8px_currentColor]`}></div>
                     )}
                   </div>
-                  <NodeIcon className={`w-4 h-4 ${dynamicColor} relative z-10`} />
+                  <NodeIcon className={`w-4 h-4 ${isUnavailable ? 'text-slate-500' : dynamicColor} relative z-10`} />
                   <div className="flex-1 min-w-0 relative z-10">
-                    {isDeviceNode ? (
+                    {isUnavailable ? (
+                      // Unavailable device: show disconnected status
+                      <>
+                        <span className="text-xs font-bold text-slate-500 truncate block">{node.label}</span>
+                        <span className="text-[9px] text-red-400 truncate block">Disconnected</span>
+                      </>
+                    ) : isDeviceNode ? (
                       // Device node: show device name prominently
                       <>
                         <span className="text-xs font-bold text-amber-200 truncate block">{node.deviceName}</span>
@@ -2074,17 +2277,24 @@ export default function App() {
               <Maximize2 className="w-3 h-3 text-slate-500" />
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                 {focusedTarget ? (
-                  <>Mixing for <span className={`text-white ${focusedTarget.color} ml-1`}>{focusedTarget.label}</span>
-                    {focusedTargetPorts > 1 && (
+                  <>Mixing for <span className={`text-white ${focusedTarget.available === false ? 'text-slate-500' : focusedTarget.color} ml-1`}>{focusedTarget.label}</span>
+                    {focusedTarget.available === false && (
+                      <span className="ml-2 px-1.5 py-0.5 rounded text-[8px] bg-red-500/20 text-red-400">
+                        DISCONNECTED
+                      </span>
+                    )}
+                    {focusedTarget.available !== false && focusedTargetPorts > 1 && (
                       <span className="text-slate-400 ml-1">
                         {isStereoMode
                           ? `Ch ${focusedPairIndex * 2 + 1}-${focusedPairIndex * 2 + 2}`
                           : `Ch ${focusedPairIndex + 1}`}
                       </span>
                     )}
-                    <span className={`ml-2 px-1.5 py-0.5 rounded text-[8px] ${isStereoMode ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-600/50 text-slate-400'}`}>
-                      {isStereoMode ? 'STEREO' : 'MONO'}
-                    </span>
+                    {focusedTarget.available !== false && (
+                      <span className={`ml-2 px-1.5 py-0.5 rounded text-[8px] ${isStereoMode ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-600/50 text-slate-400'}`}>
+                        {isStereoMode ? 'STEREO' : 'MONO'}
+                      </span>
+                    )}
                   </>
                 ) : (
                   'Select Output on Canvas to Mix'
@@ -2204,8 +2414,13 @@ export default function App() {
                 // Unique key for mixer channel (node + source channel)
                 const mixerKey = `${node.id}_ch${fromChannel}${isStereoLinked ? '_stereo' : ''}`;
 
+                // Check if source or target node is unavailable
+                const isSourceUnavailable = node.available === false;
+                const isTargetUnavailable = focusedTarget?.available === false;
+                const isChannelDisabled = isSourceUnavailable || isTargetUnavailable;
+
                 return (
-                <div key={mixerKey} className={`w-32 bg-slate-900 border rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none ${isStereoLinked ? 'border-cyan-500/50' : isDeviceNode ? 'border-amber-500/30' : 'border-slate-700'}`}>
+                <div key={mixerKey} className={`w-32 bg-slate-900 border rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none ${isStereoLinked ? 'border-cyan-500/50' : isDeviceNode ? 'border-amber-500/30' : 'border-slate-700'} ${isChannelDisabled ? 'opacity-40 grayscale' : ''}`}>
                     {/* Stereo link indicator */}
                     {isStereoLinked && (
                       <div className="absolute top-1 right-1">
@@ -2494,18 +2709,21 @@ export default function App() {
                             }}
                             className={`
                                 flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0
-                                ${isSelected
-                                ? `bg-slate-800 border-${node.color.split('-')[1]}-500/50`
-                                : 'border-slate-800 hover:border-slate-600'}
+                                ${node.available === false 
+                                  ? 'opacity-40 grayscale border-slate-800'
+                                  : isSelected
+                                    ? `bg-slate-800 border-${node.color.split('-')[1]}-500/50`
+                                    : 'border-slate-800 hover:border-slate-600'}
                             `}
                         >
-                            <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.color}`}>
+                            <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.available === false ? 'text-slate-500' : node.color}`}>
                                 <Icon className="w-3 h-3" />
                             </div>
                             <div className="flex-1 min-w-0">
-                                <div className={`text-[10px] font-bold truncate ${isSelected ? 'text-white' : 'text-slate-400'}`}>{node.label}</div>
+                                <div className={`text-[10px] font-bold truncate ${node.available === false ? 'text-slate-500' : isSelected ? 'text-white' : 'text-slate-400'}`}>{node.label}</div>
+                                {node.available === false && <div className="text-[8px] text-red-400">Disconnected</div>}
                             </div>
-                            {isSelected && <div className={`w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
+                            {isSelected && node.available !== false && <div className={`w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
                         </div>
                     );
                 })}

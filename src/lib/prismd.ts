@@ -59,6 +59,7 @@ export interface AudioDevice {
   device_type: string;  // "prism", "virtual", "builtin", "external"
   input_channels: number;
   output_channels: number;
+  transport_type: string;  // "builtin", "usb", "bluetooth", "hdmi", "displayport", "airplay", "thunderbolt", etc.
 }
 
 // --- Helpers ---

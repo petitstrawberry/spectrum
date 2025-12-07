@@ -8,8 +8,12 @@ export interface AudioDevice {
   id: string;
   name: string;
   channels: number;
-  isInput: boolean;
-  isOutput: boolean;
+  is_input: boolean;
+  is_output: boolean;
+  device_type?: string;
+  input_channels?: number;
+  output_channels?: number;
+  transport_type?: string;  // "builtin", "usb", "bluetooth", "hdmi", "displayport", "airplay", "thunderbolt", etc.
 }
 
 export interface PrismClient {

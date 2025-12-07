@@ -29,6 +29,7 @@ pub struct AudioDevice {
     pub device_type: String,  // "prism", "virtual", "builtin", "external"
     pub input_channels: u32,
     pub output_channels: u32,
+    pub transport_type: String,  // "builtin", "usb", "bluetooth", "hdmi", "displayport", "airplay", "thunderbolt", "pci", "virtual", "unknown"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

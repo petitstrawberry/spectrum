@@ -9,6 +9,22 @@ use coreaudio::sys::{
     kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyScopeOutput,
     kAudioObjectPropertyElementMaster,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioDevicePropertyTransportType,
+    kAudioDeviceTransportTypeUnknown,
+    kAudioDeviceTransportTypeBuiltIn,
+    kAudioDeviceTransportTypeAggregate,
+    kAudioDeviceTransportTypeVirtual,
+    kAudioDeviceTransportTypePCI,
+    kAudioDeviceTransportTypeUSB,
+    kAudioDeviceTransportTypeFireWire,
+    kAudioDeviceTransportTypeBluetooth,
+    kAudioDeviceTransportTypeBluetoothLE,
+    kAudioDeviceTransportTypeHDMI,
+    kAudioDeviceTransportTypeDisplayPort,
+    kAudioDeviceTransportTypeAirPlay,
+    kAudioDeviceTransportTypeAVB,
+    kAudioDeviceTransportTypeThunderbolt,
     AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress,
@@ -17,6 +33,51 @@ use coreaudio::sys::{
 };
 use std::error::Error;
 use std::ptr;
+
+/// Get transport type for a device (usb, bluetooth, hdmi, etc.)
+fn get_transport_type(device_id: u32) -> String {
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut transport_type: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut transport_type as *mut u32 as *mut _,
+        )
+    };
+
+    if status != 0 {
+        return "unknown".to_string();
+    }
+
+    match transport_type {
+        x if x == kAudioDeviceTransportTypeBuiltIn => "builtin",
+        x if x == kAudioDeviceTransportTypeUSB => "usb",
+        x if x == kAudioDeviceTransportTypeBluetooth => "bluetooth",
+        x if x == kAudioDeviceTransportTypeBluetoothLE => "bluetooth",
+        x if x == kAudioDeviceTransportTypeHDMI => "hdmi",
+        x if x == kAudioDeviceTransportTypeDisplayPort => "displayport",
+        x if x == kAudioDeviceTransportTypeAirPlay => "airplay",
+        x if x == kAudioDeviceTransportTypeThunderbolt => "thunderbolt",
+        x if x == kAudioDeviceTransportTypePCI => "pci",
+        x if x == kAudioDeviceTransportTypeFireWire => "firewire",
+        x if x == kAudioDeviceTransportTypeVirtual => "virtual",
+        x if x == kAudioDeviceTransportTypeAggregate => "aggregate",
+        x if x == kAudioDeviceTransportTypeAVB => "avb",
+        x if x == kAudioDeviceTransportTypeUnknown => "unknown",
+        _ => "unknown",
+    }.to_string()
+}
 
 /// Get channel count for a device in a specific scope (input/output)
 fn get_channel_count(device_id: u32, is_input: bool) -> u32 {
@@ -117,6 +178,9 @@ pub fn get_devices() -> Result<Vec<AudioDevice>, Box<dyn Error + Send + Sync>> {
             "external"
         };
 
+        // Get transport type from CoreAudio
+        let transport_type = get_transport_type(device_id);
+
         devices.push(AudioDevice {
             id: device_id.to_string(),
             name,
@@ -126,6 +190,7 @@ pub fn get_devices() -> Result<Vec<AudioDevice>, Box<dyn Error + Send + Sync>> {
             device_type: device_type.to_string(),
             input_channels,
             output_channels,
+            transport_type,
         });
     }
 
