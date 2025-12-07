@@ -107,6 +107,9 @@ pub struct Bus {
     pub fader: f32,
     /// Muted
     pub muted: bool,
+    /// Plugin chain (list of AudioUnit instance IDs in processing order)
+    #[serde(default)]
+    pub plugin_ids: Vec<String>,
 }
 
 impl Default for Bus {
@@ -117,6 +120,7 @@ impl Default for Bus {
             channels: 2,
             fader: 1.0,
             muted: false,
+            plugin_ids: Vec::new(),
         }
     }
 }
@@ -355,6 +359,40 @@ impl BusSendsArray {
             }
         }
         self.version.fetch_add(1, Ordering::Release);
+    }
+    
+    /// Set bus plugin chain
+    pub fn set_bus_plugins(&self, bus_id: &str, plugin_ids: Vec<String>) {
+        let id_map = self.bus_id_to_idx.read();
+        if let Some(&idx) = id_map.get(bus_id) {
+            let mut buses = self.buses.write();
+            if let Some(bus) = buses.get_mut(idx) {
+                println!("[Mixer] Set bus {} plugins: {:?}", bus_id, plugin_ids);
+                bus.plugin_ids = plugin_ids;
+            }
+        }
+        self.version.fetch_add(1, Ordering::Release);
+    }
+    
+    /// Get bus plugin chain
+    pub fn get_bus_plugins(&self, bus_id: &str) -> Vec<String> {
+        let id_map = self.bus_id_to_idx.read();
+        if let Some(&idx) = id_map.get(bus_id) {
+            let buses = self.buses.read();
+            if let Some(bus) = buses.get(idx) {
+                return bus.plugin_ids.clone();
+            }
+        }
+        Vec::new()
+    }
+    
+    /// Get bus plugin chain by index (for audio callback)
+    pub fn get_bus_plugins_by_idx(&self, bus_idx: usize) -> Vec<String> {
+        let buses = self.buses.read();
+        if let Some(bus) = buses.get(bus_idx) {
+            return bus.plugin_ids.clone();
+        }
+        Vec::new()
     }
 
     /// Update bus sends from main thread
@@ -858,6 +896,7 @@ impl MixerState {
             channels,
             fader: 1.0,
             muted: false,
+            plugin_ids: Vec::new(),
         };
         self.bus_sends.add_bus(bus);
         
@@ -891,6 +930,16 @@ impl MixerState {
     /// Set bus mute
     pub fn set_bus_mute(&self, bus_id: &str, muted: bool) {
         self.bus_sends.set_bus_mute(bus_id, muted);
+    }
+    
+    /// Set bus plugin chain
+    pub fn set_bus_plugins(&self, bus_id: &str, plugin_ids: Vec<String>) {
+        self.bus_sends.set_bus_plugins(bus_id, plugin_ids);
+    }
+    
+    /// Get bus plugin chain
+    pub fn get_bus_plugins(&self, bus_id: &str) -> Vec<String> {
+        self.bus_sends.get_bus_plugins(bus_id)
     }
 
     /// Add or update a bus send (Input/Bus -> Bus/Output)

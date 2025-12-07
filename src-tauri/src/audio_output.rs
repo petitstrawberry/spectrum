@@ -1,6 +1,7 @@
 //! CoreAudio Output
 //! Routes audio from input buffer to output devices
 
+use crate::audio_unit::get_au_manager;
 use crate::mixer::{get_mixer_state, hash_device_id};
 use crate::vdsp::VDsp;
 use coreaudio::audio_unit::macos_helpers::{
@@ -343,6 +344,30 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 let bus_buf = &mut bus_buffers[bus_idx];
                 let target_buf = if target_ch % 2 == 0 { &mut bus_buf.left } else { &mut bus_buf.right };
                 VDsp::mix_add(&source_data[..read_count], total_gain, &mut target_buf[..read_count]);
+            }
+
+            // Pass 1.5: Apply AudioUnit plugin chains to each bus
+            // This happens after all inputs are mixed into buses but before bus->bus or bus->output
+            let au_manager = get_au_manager();
+            for (bus_idx, bus) in buses.iter().enumerate() {
+                if bus.muted || bus_idx >= bus_buffers.len() {
+                    continue;
+                }
+                
+                if !bus.plugin_ids.is_empty() {
+                    let bus_buf = &mut bus_buffers[bus_idx];
+                    
+                    // Get current sample time (approximate)
+                    let sample_time = 0.0; // TODO: Track actual sample time for accurate timing
+                    
+                    // Process plugin chain in place
+                    au_manager.process_chain(
+                        &bus.plugin_ids,
+                        &mut bus_buf.left[..frames],
+                        &mut bus_buf.right[..frames],
+                        sample_time,
+                    );
+                }
             }
 
             // Pass 2: Bus -> Bus (for chaining, e.g., Bus 1 -> Bus 2)

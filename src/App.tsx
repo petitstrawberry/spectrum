@@ -57,6 +57,7 @@ import {
   openAudioUnitUI,
   getAudioUnitState,
   setAudioUnitState,
+  setBusPlugins,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -794,6 +795,21 @@ export default function App() {
             }
             await Promise.all(pluginPromises);
             console.log(`[Spectrum] All plugin instances recreated`);
+
+            // After all plugins are recreated, sync plugin chains to backend
+            // We need to get the current nodes state with updated plugin IDs
+            setNodes(currentNodes => {
+              // Sync plugin chains for all buses
+              for (const bus of currentNodes) {
+                if (bus.type === 'bus' && bus.busId && bus.plugins && bus.plugins.length > 0) {
+                  const pluginIds = bus.plugins.map(p => p.id);
+                  setBusPlugins(bus.busId, pluginIds)
+                    .then(() => console.log(`[Spectrum] Plugin chain synced for bus ${bus.busId}`))
+                    .catch(err => console.error(`[Spectrum] Failed to sync plugin chain for bus ${bus.busId}:`, err));
+                }
+              }
+              return currentNodes;  // Return unchanged state
+            });
 
             console.log(`[Spectrum] Re-establishing ${restoredConnections.length} connections...`);
             for (const conn of restoredConnections) {
@@ -3248,6 +3264,17 @@ export default function App() {
                               // Remove plugin
                               try {
                                 await removeAudioUnitInstance(plugin.id);
+                                
+                                // Update local state and get updated plugin list
+                                const targetBus = nodes.find(n => n.id === selectedBusId);
+                                const updatedPlugins = (targetBus?.plugins || []).filter(p => p.id !== plugin.id);
+                                const pluginIds = updatedPlugins.map(p => p.id);
+                                
+                                // Update backend with new plugin chain
+                                if (targetBus?.busId) {
+                                  await setBusPlugins(targetBus.busId, pluginIds);
+                                }
+                                
                                 setNodes(prev => prev.map(n => {
                                   if (n.id === selectedBusId && n.plugins) {
                                     return {
@@ -4380,11 +4407,22 @@ export default function App() {
                                     enabled: true,
                                   };
 
+                                  // Find the target bus to get updated plugin list
+                                  const targetBus = nodes.find(n => n.id === pluginBrowserTargetBusId);
+                                  const updatedPlugins = [...(targetBus?.plugins || []), newPlugin];
+                                  const pluginIds = updatedPlugins.map(p => p.id);
+
+                                  // Update backend with plugin chain
+                                  const busId = targetBus?.busId;
+                                  if (busId) {
+                                    await setBusPlugins(busId, pluginIds);
+                                  }
+
                                   setNodes(prev => prev.map(n => {
                                     if (n.id === pluginBrowserTargetBusId) {
                                       return {
                                         ...n,
-                                        plugins: [...(n.plugins || []), newPlugin],
+                                        plugins: updatedPlugins,
                                       };
                                     }
                                     return n;

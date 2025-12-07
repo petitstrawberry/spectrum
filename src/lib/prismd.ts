@@ -532,6 +532,13 @@ export async function setBusMute(busId: string, muted: boolean): Promise<void> {
 }
 
 /**
+ * Set bus plugin chain (AudioUnit instance IDs in processing order)
+ */
+export async function setBusPlugins(busId: string, pluginIds: string[]): Promise<void> {
+  return invoke('set_bus_plugins', { busId, pluginIds });
+}
+
+/**
  * Get all buses
  */
 export async function getBuses(): Promise<BusInfo[]> {

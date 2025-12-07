@@ -366,6 +366,14 @@ fn set_bus_mute(bus_id: String, muted: bool) {
     mixer_state.set_bus_mute(&bus_id, muted);
 }
 
+/// Set bus plugin chain
+#[tauri::command]
+fn set_bus_plugins(bus_id: String, plugin_ids: Vec<String>) {
+    println!("[Spectrum] set_bus_plugins called: bus_id={}, plugin_ids={:?}", bus_id, plugin_ids);
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.set_bus_plugins(&bus_id, plugin_ids);
+}
+
 /// Get all buses
 #[tauri::command]
 fn get_buses() -> Vec<BusInfo> {
@@ -567,7 +575,6 @@ fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
     let instance = manager.get_instance(&instance_id)
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
     
-    let instance = instance.read();
     let au_audio_unit = instance.get_au_audio_unit()
         .ok_or_else(|| format!("AUAudioUnit not available for instance: {}", instance_id))?;
     let name = instance.info.name.clone();
@@ -590,7 +597,6 @@ fn get_audio_unit_state(instance_id: String) -> Result<Option<String>, String> {
     let instance = manager.get_instance(&instance_id)
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
     
-    let instance = instance.read();
     match instance.get_full_state() {
         Some(data) => Ok(Some(STANDARD.encode(&data))),
         None => Ok(None),
@@ -609,8 +615,11 @@ fn set_audio_unit_state(instance_id: String, state: String) -> Result<bool, Stri
     let data = STANDARD.decode(&state)
         .map_err(|e| format!("Failed to decode base64 state: {}", e))?;
     
-    let mut instance = instance.write();
-    Ok(instance.set_full_state(&data))
+    // SAFETY: set_full_state is only called from main thread via Tauri command
+    let inst_ptr = std::sync::Arc::as_ptr(&instance) as *mut audio_unit::AudioUnitInstance;
+    unsafe {
+        Ok((*inst_ptr).set_full_state(&data))
+    }
 }
 
 /// Check if AudioUnit plugin UI window is open
@@ -1030,6 +1039,7 @@ pub fn run() {
             remove_bus,
             set_bus_fader,
             set_bus_mute,
+            set_bus_plugins,
             get_buses,
             update_bus_send,
             remove_bus_send,
