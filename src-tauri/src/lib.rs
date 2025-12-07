@@ -365,6 +365,41 @@ pub struct OutputRoutingInfo {
     pub send_gains: Vec<HashMap<usize, f32>>,
 }
 
+/// Saved node data (serializable version of frontend NodeData)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedNode {
+    pub id: String,
+    pub library_id: String,
+    pub node_type: String,
+    pub label: String,
+    pub sub_label: Option<String>,
+    pub icon_name: String,
+    pub color: String,
+    pub x: f64,
+    pub y: f64,
+    pub volume: f64,
+    pub muted: bool,
+    pub channel_count: u32,
+    pub channel_offset: Option<u32>,
+    pub source_type: Option<String>,
+    pub device_id: Option<u32>,
+    pub device_name: Option<String>,
+    pub channel_mode: String,
+}
+
+/// Saved connection data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedConnection {
+    pub id: String,
+    pub from_node_id: String,
+    pub from_channel: u32,
+    pub to_node_id: String,
+    pub to_channel: u32,
+    pub send_level: f64,
+    pub muted: bool,
+    pub stereo_linked: Option<bool>,
+}
+
 /// App state for save/restore
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
@@ -376,6 +411,10 @@ pub struct AppState {
     pub patch_scroll_x: f64,
     pub patch_scroll_y: f64,
     pub patch_zoom: f64,
+    #[serde(default)]
+    pub saved_nodes: Vec<SavedNode>,
+    #[serde(default)]
+    pub saved_connections: Vec<SavedConnection>,
 }
 
 /// Get saved app state
@@ -398,6 +437,35 @@ fn get_app_state() -> AppState {
         patch_scroll_x: cfg.patch_view.scroll_x,
         patch_scroll_y: cfg.patch_view.scroll_y,
         patch_zoom: cfg.patch_view.zoom,
+        saved_nodes: cfg.saved_nodes.into_iter().map(|n| SavedNode {
+            id: n.id,
+            library_id: n.library_id,
+            node_type: n.node_type,
+            label: n.label,
+            sub_label: n.sub_label,
+            icon_name: n.icon_name,
+            color: n.color,
+            x: n.x,
+            y: n.y,
+            volume: n.volume,
+            muted: n.muted,
+            channel_count: n.channel_count,
+            channel_offset: n.channel_offset,
+            source_type: n.source_type,
+            device_id: n.device_id,
+            device_name: n.device_name,
+            channel_mode: n.channel_mode,
+        }).collect(),
+        saved_connections: cfg.saved_connections.into_iter().map(|c| SavedConnection {
+            id: c.id,
+            from_node_id: c.from_node_id,
+            from_channel: c.from_channel,
+            to_node_id: c.to_node_id,
+            to_channel: c.to_channel,
+            send_level: c.send_level,
+            muted: c.muted,
+            stereo_linked: c.stereo_linked,
+        }).collect(),
     }
 }
 
@@ -426,6 +494,35 @@ async fn save_app_state(state: AppState) -> Result<(), String> {
             zoom: state.patch_zoom,
         },
         active_outputs: state.active_outputs,
+        saved_nodes: state.saved_nodes.into_iter().map(|n| config::SavedNode {
+            id: n.id,
+            library_id: n.library_id,
+            node_type: n.node_type,
+            label: n.label,
+            sub_label: n.sub_label,
+            icon_name: n.icon_name,
+            color: n.color,
+            x: n.x,
+            y: n.y,
+            volume: n.volume,
+            muted: n.muted,
+            channel_count: n.channel_count,
+            channel_offset: n.channel_offset,
+            source_type: n.source_type,
+            device_id: n.device_id,
+            device_name: n.device_name,
+            channel_mode: n.channel_mode,
+        }).collect(),
+        saved_connections: state.saved_connections.into_iter().map(|c| config::SavedConnection {
+            id: c.id,
+            from_node_id: c.from_node_id,
+            from_channel: c.from_channel,
+            to_node_id: c.to_node_id,
+            to_channel: c.to_channel,
+            send_level: c.send_level,
+            muted: c.muted,
+            stereo_linked: c.stereo_linked,
+        }).collect(),
     };
     config::update_config(cfg)?;
     println!("[Spectrum] App state saved");

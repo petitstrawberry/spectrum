@@ -43,6 +43,8 @@ import {
   getActiveInputCaptures,
   getInputDeviceLevels,
   openPrismApp,
+  startAudioOutput,
+  stopAudioOutput,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -100,6 +102,24 @@ interface Connection {
 
 // --- Output Targets - will be populated from CoreAudio ---
 // Now dynamically generated from actual audio devices
+
+// --- Icon Name <-> Icon Component Mapping ---
+const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
+  Settings, Search, Maximize2, Grid, Workflow, Music, MessageSquare, Gamepad2,
+  Headphones, Radio, Globe, Speaker, LogOut, Link: LinkIcon, Plus, Trash2,
+  Monitor, Video, RefreshCw, Volume2, Mic, ExternalLink, Cast,
+};
+
+function iconToName(icon: React.ComponentType<{ className?: string }>): string {
+  for (const [name, component] of Object.entries(ICON_MAP)) {
+    if (component === icon) return name;
+  }
+  return 'Volume2'; // Default
+}
+
+function nameToIcon(name: string): React.ComponentType<{ className?: string }> {
+  return ICON_MAP[name] || Volume2;
+}
 
 // --- Helper: Get port count for a node (always 1ch per port) ---
 function getPortCount(node: NodeData): number {
@@ -159,35 +179,46 @@ function getDeviceNodeColor(node: NodeData): string {
 function getIconForOutputDevice(device: AudioDevice): React.ComponentType<{ className?: string }> {
   const name = device.name.toLowerCase();
   const transport = device.transport_type || '';
-  
+
+  // Special case: Apple Studio Display (Thunderbolt but should show as display)
+  if (name.includes('studio display')) return Monitor;
+
   // Transport type based detection (most reliable from CoreAudio)
   if (transport === 'hdmi' || transport === 'displayport') return Monitor;
   if (transport === 'bluetooth') return Headphones; // BT is usually headphones
   if (transport === 'airplay') return Cast;
-  
+
+  // Virtual audio devices - check transport type first
+  if (transport === 'virtual' || transport === 'aggregate') return Radio;
+
+  // External headphone jack (built-in headphone port)
+  if (name.includes('external headphone') || name.includes('外部ヘッドフォン') ||
+      name.includes('headphone port') || name.includes('headphones')) return Headphones;
+
   // Headphones detection (various naming patterns)
-  if (name.includes('headphone') || name.includes('headset') || 
-      name.includes('airpods') || name.includes('earpods') || 
+  if (name.includes('headphone') || name.includes('headset') ||
+      name.includes('airpods') || name.includes('earpods') ||
       name.includes('earphone') || name.includes('earbuds') ||
       name.includes('beats') || name.includes('wh-1000') || // Sony WH-1000XM
       name.includes('bose') || name.includes('sennheiser') ||
       name.includes('jabra') || name.includes('soundcore')) return Headphones;
-  
-  // External speakers
-  if (name.includes('speaker') || name.includes('built-in output') || 
+
+  // External speakers (built-in speakers)
+  if (name.includes('speaker') || name.includes('built-in output') ||
       name.includes('macbook pro speakers') || name.includes('internal speakers') ||
       name.includes('homepod') || name.includes('sonos') || name.includes('echo')) return Speaker;
-  
-  // Virtual audio devices
-  if (name.includes('blackhole') || name.includes('loopback') || 
+
+  // Virtual audio devices - name based fallback
+  if (name.includes('blackhole') || name.includes('loopback') ||
       name.includes('soundflower') || name.includes('vb-cable') ||
-      name.includes('virtual') || name.includes('aggregate')) return Radio;
-  if (transport === 'virtual' || transport === 'aggregate') return Radio;
-  
+      name.includes('virtual') || name.includes('aggregate') ||
+      name.includes('existential') || name.includes('rogue amoeba') ||
+      name.includes('audio hijack')) return Radio;
+
   // Streaming / OBS
-  if (name.includes('obs') || name.includes('stream') || 
+  if (name.includes('obs') || name.includes('stream') ||
       name.includes('discord') || name.includes('zoom')) return Video;
-  
+
   // USB audio interfaces / DACs - use Volume2 (generic audio)
   if (name.includes('scarlett') || name.includes('focusrite') ||
       name.includes('steinberg') || name.includes('motu') ||
@@ -195,11 +226,11 @@ function getIconForOutputDevice(device: AudioDevice): React.ComponentType<{ clas
       name.includes('presonus') || name.includes('behringer') ||
       name.includes('fiio') || name.includes('topping') ||
       name.includes('audio interface') || name.includes('dac')) return Volume2;
-  
+
   // Device type fallback
   if (device.device_type === 'virtual') return Radio;
   if (device.device_type === 'builtin') return Speaker;
-  
+
   // Default: generic volume icon for unknown devices
   return Volume2;
 }
@@ -469,8 +500,11 @@ export default function App() {
   };
 
   // Restore saved app state on mount
+  const restoredRef = useRef(false);
   useEffect(() => {
     const restoreState = async () => {
+      if (restoredRef.current) return;
+
       try {
         const savedState = await getAppState();
         console.log('[Spectrum] Restoring saved state:', savedState);
@@ -480,15 +514,191 @@ export default function App() {
           setBufferSizeState(savedState.io_buffer_size);
         }
 
-        // Note: Master fader and output routing restoration
-        // happens after nodes are created from devices
+        // Restore canvas transform
+        if (savedState.patch_scroll_x !== undefined && savedState.patch_scroll_y !== undefined) {
+          setCanvasTransform({
+            x: savedState.patch_scroll_x,
+            y: savedState.patch_scroll_y,
+            scale: savedState.patch_zoom || 1,
+          });
+        }
+
+        // Restore nodes and connections if available
+        if (savedState.saved_nodes && savedState.saved_nodes.length > 0) {
+          restoredRef.current = true;
+
+          // Restore nodes - mark unavailable if device doesn't exist
+          const restoredNodes: NodeData[] = savedState.saved_nodes.map(sn => {
+            // Check if the device/source is currently available
+            let available = true;
+            let currentLibraryId = sn.library_id;
+
+            if (sn.node_type === 'target') {
+              // Check if output device exists (by name, since ID can change)
+              const device = audioDevices.find(d => d.name === sn.label && d.is_output);
+              available = !!device;
+              // Update libraryId if device is available (ID may have changed)
+              if (device) {
+                currentLibraryId = `out_${device.id}`;
+              }
+            } else if (sn.source_type === 'device') {
+              // Check if input device exists
+              const device = inputDevices.find(d => d.name === sn.device_name);
+              available = !!device;
+              if (device) {
+                currentLibraryId = `input_${device.device_id}`;
+              }
+            } else if (sn.source_type === 'prism-channel') {
+              // Prism channels: check if Prism device is in audioDevices list
+              // or driver is connected
+              const prismDevice = audioDevices.find(d => d.device_type === 'prism');
+              available = !!prismDevice || driverStatus?.connected || false;
+            }
+
+            return {
+              id: sn.id,
+              libraryId: currentLibraryId,
+              type: sn.node_type as NodeType,
+              label: sn.label,
+              subLabel: sn.sub_label,
+              icon: nameToIcon(sn.icon_name),
+              color: sn.color,
+              x: sn.x,
+              y: sn.y,
+              volume: sn.volume,
+              muted: sn.muted,
+              channelCount: sn.channel_count,
+              channelOffset: sn.channel_offset,
+              sourceType: sn.source_type as SourceType | undefined,
+              deviceId: sn.device_id,
+              deviceName: sn.device_name,
+              channelMode: sn.channel_mode as ChannelMode,
+              available,
+            };
+          });
+
+          // Restore connections
+          const restoredConnections: Connection[] = (savedState.saved_connections || []).map(sc => ({
+            id: sc.id,
+            fromNodeId: sc.from_node_id,
+            fromChannel: sc.from_channel,
+            toNodeId: sc.to_node_id,
+            toChannel: sc.to_channel,
+            sendLevel: sc.send_level,
+            muted: sc.muted,
+            stereoLinked: sc.stereo_linked,
+          }));
+
+          setNodes(restoredNodes);
+          setConnections(restoredConnections);
+
+          // Set focused output to first available target, or first target
+          const firstAvailableTarget = restoredNodes.find(n => n.type === 'target' && n.available);
+          const firstTarget = restoredNodes.find(n => n.type === 'target');
+          if (firstAvailableTarget || firstTarget) {
+            setFocusedOutputId((firstAvailableTarget || firstTarget)!.id);
+          }
+
+          // Step 1: Start audio inputs and outputs first
+          const startPromises: Promise<void>[] = [];
+
+          // Start input capture for source devices
+          const prismDeviceForCapture = audioDevices.find(d =>
+            d.name.toLowerCase().includes('prism') && !d.is_output
+          );
+          const startedInputDevices = new Set<number>();
+          for (const node of restoredNodes) {
+            if (node.type === 'source' && node.available) {
+              if (node.sourceType === 'prism-channel' && prismDeviceForCapture) {
+                const prismDeviceId = parseInt(prismDeviceForCapture.id);
+                if (!isNaN(prismDeviceId) && !startedInputDevices.has(prismDeviceId)) {
+                  // Start Prism input capture
+                  startedInputDevices.add(prismDeviceId);
+                  startPromises.push(
+                    startInputCapture(prismDeviceId)
+                      .then(() => console.log(`[Spectrum] Started Prism input capture`))
+                      .catch(err => { console.error('[Spectrum] Failed to start Prism input capture:', err); })
+                  );
+                }
+              } else if (node.sourceType === 'device' && node.deviceId !== undefined && !startedInputDevices.has(node.deviceId)) {
+                // Start device input capture
+                startedInputDevices.add(node.deviceId);
+                startPromises.push(
+                  startInputCapture(node.deviceId)
+                    .then(() => console.log(`[Spectrum] Started input capture for device ${node.label}`))
+                    .catch(err => { console.error(`[Spectrum] Failed to start input capture for ${node.label}:`, err); })
+                );
+              }
+            }
+          }
+
+          // Start audio output for available targets and set volumes
+          const startedOutputDevices = new Set<number>();
+          for (const node of restoredNodes) {
+            if (node.type === 'target' && node.available) {
+              const device = audioDevices.find(d => d.name === node.label && d.is_output);
+              if (device) {
+                const deviceIdNum = parseInt(device.id);
+                if (!isNaN(deviceIdNum) && !startedOutputDevices.has(deviceIdNum)) {
+                  startedOutputDevices.add(deviceIdNum);
+                  // Start audio output to this device
+                  startPromises.push(
+                    startAudioOutput(deviceIdNum)
+                      .then(() => console.log(`[Spectrum] Started audio output to ${device.name}`))
+                      .catch(err => { console.error(`[Spectrum] Failed to start output to ${device.name}:`, err); })
+                  );
+                }
+
+                // Set output volume
+                setOutputVolume(device.id, faderToDb(node.volume))
+                  .catch(err => console.error('[Spectrum] Failed to restore output volume:', err));
+              }
+            }
+          }
+
+          // Step 2: Wait for all inputs/outputs to start, then establish mixer sends
+          Promise.all(startPromises).then(() => {
+            console.log(`[Spectrum] Re-establishing ${restoredConnections.length} connections...`);
+            for (const conn of restoredConnections) {
+              const sourceNode = restoredNodes.find(n => n.id === conn.fromNodeId);
+              const targetNode = restoredNodes.find(n => n.id === conn.toNodeId);
+
+              console.log(`[Spectrum] Connection: ${sourceNode?.label} -> ${targetNode?.label}, available: ${sourceNode?.available}, ${targetNode?.available}`);
+
+              // Only set up routing for available nodes
+              if (sourceNode?.available && targetNode?.available) {
+                const srcDevId = sourceNode.sourceType === 'device' && sourceNode.deviceId !== undefined
+                  ? sourceNode.deviceId : 0;
+                const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
+
+                // Get target device ID from libraryId (format: "out_123")
+                const tgtDevId = targetNode.libraryId.replace('out_', '');
+                const tgtCh = (targetNode.channelOffset ?? 0) + conn.toChannel;
+
+                // sendLevel is 0-100 fader value, pass as-is (not divided)
+                const sendLevel = conn.muted ? 0 : conn.sendLevel;
+
+                console.log(`[Spectrum] updateMixerSend(${srcDevId}, ${srcCh}, ${tgtDevId}, ${tgtCh}, ${sendLevel}, ${conn.muted})`);
+
+                updateMixerSend(srcDevId, srcCh, tgtDevId, tgtCh, sendLevel, conn.muted)
+                  .then(() => console.log(`[Spectrum] Send restored: ${srcDevId}:${srcCh} -> ${tgtDevId}:${tgtCh}`))
+                  .catch(err => console.error('[Spectrum] Failed to restore send:', err));
+              }
+            }
+          });
+
+          console.log(`[Spectrum] Restored ${restoredNodes.length} nodes and ${restoredConnections.length} connections`);
+        }
       } catch (error) {
         console.error('[Spectrum] Failed to restore state:', error);
       }
     };
 
-    restoreState();
-  }, []);
+    // Wait until we have device info before restoring
+    if (audioDevices.length > 0 || inputDevices.length > 0) {
+      restoreState();
+    }
+  }, [audioDevices, inputDevices, driverStatus]);
 
   // Fetch on mount and poll every 2 seconds
   useEffect(() => {
@@ -550,8 +760,68 @@ export default function App() {
       patch_scroll_x: canvasTransform.x,
       patch_scroll_y: canvasTransform.y,
       patch_zoom: canvasTransform.scale,
+      // Serialize nodes and connections for persistence
+      saved_nodes: nodes.map(n => ({
+        id: n.id,
+        library_id: n.libraryId,
+        node_type: n.type,
+        label: n.label,
+        sub_label: n.subLabel,
+        icon_name: iconToName(n.icon),
+        color: n.color,
+        x: n.x,
+        y: n.y,
+        volume: n.volume,
+        muted: n.muted,
+        channel_count: n.channelCount,
+        channel_offset: n.channelOffset,
+        source_type: n.sourceType,
+        device_id: n.deviceId,
+        device_name: n.deviceName,
+        channel_mode: n.channelMode,
+      })),
+      saved_connections: connections.map(c => ({
+        id: c.id,
+        from_node_id: c.fromNodeId,
+        from_channel: c.fromChannel,
+        to_node_id: c.toNodeId,
+        to_channel: c.toChannel,
+        send_level: c.sendLevel,
+        muted: c.muted,
+        stereo_linked: c.stereoLinked,
+      })),
     };
   }, [nodes, connections, bufferSize, focusedOutputId, canvasTransform]);
+
+  // Auto-save state when nodes/connections change (debounced)
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    // Don't save until we've initialized or restored
+    if (!initializedRef.current && !restoredRef.current) return;
+    // Don't save if no nodes
+    if (nodes.length === 0) return;
+
+    // Debounce saves to avoid excessive writes
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    saveTimeoutRef.current = setTimeout(async () => {
+      try {
+        const state = buildAppState();
+        await saveAppState(state);
+        console.log('[Spectrum] Auto-saved state');
+      } catch (error) {
+        console.error('[Spectrum] Failed to auto-save:', error);
+      }
+    }, 2000); // 2 second debounce
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [nodes, connections, canvasTransform, buildAppState]);
 
   // Pending restart flag
   const [pendingRestart, setPendingRestart] = useState(false);
@@ -829,9 +1099,15 @@ export default function App() {
     };
   }, [channelSources, outputTargets, inputDevices]);
 
-  // --- Initial Setup - add first output when devices are loaded ---
+  // --- Initial Setup - add first output when devices are loaded (only if no saved state) ---
   const initializedRef = useRef(false);
   useEffect(() => {
+    // Skip initial setup if we restored from saved state
+    if (restoredRef.current) {
+      initializedRef.current = true;
+      return;
+    }
+
     if (outputTargets.length > 0 && !initializedRef.current) {
       initializedRef.current = true;
       // Create initial nodes with first available output device
@@ -857,7 +1133,7 @@ export default function App() {
           // Check if this target device still exists in audioDevices
           // First try to match by libraryId (device ID), then fallback to name matching
           let targetData = outputTargets.find(t => t.id === node.libraryId);
-          
+
           // If not found by ID, try to find by name (device may have reconnected with new ID)
           if (!targetData) {
             targetData = outputTargets.find(t => t.name === node.label);
@@ -865,14 +1141,14 @@ export default function App() {
               // Device reconnected with new ID - update libraryId
               console.log(`[Spectrum] Device reconnected with new ID: ${node.label} (${node.libraryId} -> ${targetData.id})`);
               changed = true;
-              
+
               // Get old device ID from libraryId (format: "out_123")
               const oldDeviceId = node.libraryId.replace('out_', '');
               const newDeviceId = targetData.deviceId;
-              
+
               // Restart output with current volume
               setOutputVolume(newDeviceId, faderToDb(node.volume));
-              
+
               // Re-establish all sends to this device with new device ID
               // Find all connections targeting this node
               const nodeConnections = connections.filter(c => c.toNodeId === node.id);
@@ -883,16 +1159,16 @@ export default function App() {
                   const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
                   const tgtCh = getChannelIndexForPort(node, conn.toChannel);
                   const sendLevel = conn.muted ? 0 : conn.sendLevel / 100;
-                  
+
                   // Remove old send (if it exists) and add new one
                   removeMixerSend(srcDevId, srcCh, oldDeviceId, tgtCh).catch(() => {});
                   updateMixerSend(srcDevId, srcCh, newDeviceId, tgtCh, sendLevel, conn.muted).catch(console.error);
                   console.log(`[Spectrum] Re-established send: src=${srcDevId}:${srcCh} -> ${newDeviceId}:${tgtCh}`);
                 }
               }
-              
-              return { 
-                ...node, 
+
+              return {
+                ...node,
                 libraryId: targetData.id,  // Update to new ID
                 available: true,
                 // Update other properties that might have changed
@@ -902,15 +1178,15 @@ export default function App() {
               };
             }
           }
-          
+
           const isAvailable = targetData !== undefined;
-          
+
           // Handle reconnection (same ID): restart output and restore volume
           if (isAvailable && node.available === false && targetData) {
             console.log(`[Spectrum] Device reconnected: ${node.label}, restarting output`);
             setOutputVolume(targetData.deviceId, faderToDb(node.volume));
           }
-          
+
           if (node.available !== isAvailable) {
             changed = true;
             return { ...node, available: isAvailable };
@@ -919,7 +1195,7 @@ export default function App() {
           // Check if this input device still exists
           // First try by device ID, then by name
           let device = inputDevices.find(d => d.device_id === node.deviceId);
-          
+
           // If not found by ID, try to find by name
           if (!device && node.deviceName) {
             device = inputDevices.find(d => d.name === node.deviceName);
@@ -929,10 +1205,10 @@ export default function App() {
               const newDeviceId = device.device_id;
               console.log(`[Spectrum] Input device reconnected with new ID: ${node.deviceName} (${oldDeviceId} -> ${newDeviceId})`);
               changed = true;
-              
+
               // Restart capture
               startInputCapture(newDeviceId).catch(console.error);
-              
+
               // Re-establish all sends from this device with new device ID
               const nodeConnections = connections.filter(c => c.fromNodeId === node.id);
               for (const conn of nodeConnections) {
@@ -943,7 +1219,7 @@ export default function App() {
                     const srcCh = getChannelIndexForPort(node, conn.fromChannel);
                     const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
                     const sendLevel = conn.muted ? 0 : conn.sendLevel / 100;
-                    
+
                     // Remove old send and add new one
                     removeMixerSend(oldDeviceId, srcCh, targetData.deviceId, tgtCh).catch(() => {});
                     updateMixerSend(newDeviceId, srcCh, targetData.deviceId, tgtCh, sendLevel, conn.muted).catch(console.error);
@@ -951,7 +1227,7 @@ export default function App() {
                   }
                 }
               }
-              
+
               return {
                 ...node,
                 deviceId: newDeviceId,
@@ -961,15 +1237,15 @@ export default function App() {
               };
             }
           }
-          
+
           const isAvailable = device !== undefined;
-          
+
           // Handle reconnection (same ID): restart input capture
           if (isAvailable && node.available === false) {
             console.log(`[Spectrum] Input device reconnected: ${node.label}, restarting capture`);
             startInputCapture(node.deviceId).catch(console.error);
           }
-          
+
           if (node.available !== isAvailable) {
             changed = true;
             return { ...node, available: isAvailable };
@@ -1040,9 +1316,7 @@ export default function App() {
       if (targetData) {
         const deviceIdNum = parseInt(targetData.deviceId);
         if (!isNaN(deviceIdNum)) {
-          import('./lib/prismd').then(({ stopAudioOutput }) => {
-            stopAudioOutput(deviceIdNum);
-          });
+          stopAudioOutput(deviceIdNum).catch(console.error);
         }
       }
     }
@@ -1533,9 +1807,7 @@ export default function App() {
         if (targetData) {
           const deviceIdNum = parseInt(targetData.deviceId);
           if (!isNaN(deviceIdNum)) {
-            import('./lib/prismd').then(({ startAudioOutput }) => {
-              startAudioOutput(deviceIdNum).catch(console.error);
-            });
+            startAudioOutput(deviceIdNum).catch(console.error);
           }
 
           const defaultLevel = 80; // Default send level
@@ -1977,14 +2249,14 @@ export default function App() {
                   return (
                     <g key={conn.id} className="pointer-events-auto group cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteConnection(conn.id); }}>
                       <path d={path} fill="none" stroke="transparent" strokeWidth="10" />
-                      <path 
-                        d={path} 
-                        fill="none" 
-                        stroke={strokeColor} 
-                        strokeWidth={isActive ? 2 : 1} 
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke={strokeColor}
+                        strokeWidth={isActive ? 2 : 1}
                         strokeDasharray={isDisconnected ? '4,4' : 'none'}
                         opacity={isDisconnected ? 0.5 : 1}
-                        className="group-hover:stroke-red-400" 
+                        className="group-hover:stroke-red-400"
                       />
                       {isActive && !isDisconnected && (
                         <circle r="3" fill="#fff" opacity="0.8">
@@ -2709,7 +2981,7 @@ export default function App() {
                             }}
                             className={`
                                 flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0
-                                ${node.available === false 
+                                ${node.available === false
                                   ? 'opacity-40 grayscale border-slate-800'
                                   : isSelected
                                     ? `bg-slate-800 border-${node.color.split('-')[1]}-500/50`
@@ -2747,14 +3019,14 @@ export default function App() {
                  for (const conn of connectedSources) {
                    if (conn.muted) continue;
                    if (processedConnIds.has(conn.id)) continue;
-                   
+
                    const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
                    if (!sourceNode) continue;
-                   
+
                    // Determine level data based on source type
                    let levelData: { left_rms: number; right_rms: number; left_peak: number; right_peak: number } | undefined;
                    const isDeviceSource = sourceNode.sourceType === 'device';
-                   
+
                    if (isDeviceSource && sourceNode.deviceId !== undefined) {
                      // Device node: use deviceLevelsMap with conn.fromChannel to get the correct pair
                      const deviceLevels = deviceLevelsMap.get(sourceNode.deviceId);
@@ -2766,32 +3038,32 @@ export default function App() {
                      const pairIdx = channelOffset / 2;
                      levelData = inputLevels[pairIdx];
                    }
-                   
+
                    if (levelData) {
                      const sendGain = faderToDb(conn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(conn.sendLevel) / 20);
-                     
+
                      // In stereo mode, determine if this is L or R channel
                      if (isStereoMode) {
                        const isLeftChannel = conn.toChannel === leftCh;
                        const isRightChannel = conn.toChannel === rightCh;
-                       
+
                        // Check for stereo pair or mono-to-stereo
-                       const pairedConn = connectedSources.find(c => 
-                         c.fromNodeId === conn.fromNodeId && 
+                       const pairedConn = connectedSources.find(c =>
+                         c.fromNodeId === conn.fromNodeId &&
                          c.id !== conn.id &&
                          !processedConnIds.has(c.id)
                        );
-                       
+
                        if (pairedConn) {
                          // Mark paired connection as processed
                          processedConnIds.add(conn.id);
                          processedConnIds.add(pairedConn.id);
-                         
+
                          const pairedGain = faderToDb(pairedConn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(pairedConn.sendLevel) / 20);
-                         
+
                          // Check if mono-to-stereo (same fromChannel) or true stereo pair
                          const isMonoToStereo = conn.fromChannel === pairedConn.fromChannel;
-                         
+
                          if (isMonoToStereo) {
                            // Mono source to stereo output: use same level for both
                            const monoLevel = levelData.left_peak; // Use left (mono) level

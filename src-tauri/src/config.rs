@@ -50,6 +50,41 @@ pub struct PatchViewState {
     pub zoom: f64,
 }
 
+/// Saved node data (serializable version of frontend NodeData)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedNode {
+    pub id: String,
+    pub library_id: String,
+    pub node_type: String,  // "source" or "target"
+    pub label: String,
+    pub sub_label: Option<String>,
+    pub icon_name: String,  // Icon name as string
+    pub color: String,
+    pub x: f64,
+    pub y: f64,
+    pub volume: f64,
+    pub muted: bool,
+    pub channel_count: u32,
+    pub channel_offset: Option<u32>,
+    pub source_type: Option<String>,  // "prism-channel" or "device"
+    pub device_id: Option<u32>,
+    pub device_name: Option<String>,
+    pub channel_mode: String,  // "mono" or "stereo"
+}
+
+/// Saved connection data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedConnection {
+    pub id: String,
+    pub from_node_id: String,
+    pub from_channel: u32,
+    pub to_node_id: String,
+    pub to_channel: u32,
+    pub send_level: f64,
+    pub muted: bool,
+    pub stereo_linked: Option<bool>,
+}
+
 /// Master fader state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MasterState {
@@ -85,6 +120,12 @@ pub struct AppConfig {
     pub patch_view: PatchViewState,
     /// Last used output device names
     pub active_outputs: Vec<String>,
+    /// Saved nodes (frontend state)
+    #[serde(default)]
+    pub saved_nodes: Vec<SavedNode>,
+    /// Saved connections (frontend state)
+    #[serde(default)]
+    pub saved_connections: Vec<SavedConnection>,
 }
 
 impl Default for AppConfig {
@@ -97,6 +138,8 @@ impl Default for AppConfig {
             master: MasterState::default(),
             patch_view: PatchViewState::default(),
             active_outputs: vec![],
+            saved_nodes: vec![],
+            saved_connections: vec![],
         }
     }
 }

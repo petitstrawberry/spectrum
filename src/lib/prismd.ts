@@ -404,6 +404,39 @@ export interface OutputRoutingInfo {
   send_gains: Record<number, number>[];
 }
 
+/** Saved node data (serializable version of frontend NodeData) */
+export interface SavedNode {
+  id: string;
+  library_id: string;
+  node_type: string;  // "source" or "target"
+  label: string;
+  sub_label?: string;
+  icon_name: string;  // Icon name as string
+  color: string;
+  x: number;
+  y: number;
+  volume: number;
+  muted: boolean;
+  channel_count: number;
+  channel_offset?: number;
+  source_type?: string;  // "prism-channel" or "device"
+  device_id?: number;
+  device_name?: string;
+  channel_mode: string;  // "mono" or "stereo"
+}
+
+/** Saved connection data */
+export interface SavedConnection {
+  id: string;
+  from_node_id: string;
+  from_channel: number;
+  to_node_id: string;
+  to_channel: number;
+  send_level: number;
+  muted: boolean;
+  stereo_linked?: boolean;
+}
+
 export interface AppState {
   io_buffer_size: number;
   output_routings: Record<string, OutputRoutingInfo>;
@@ -413,6 +446,8 @@ export interface AppState {
   patch_scroll_x: number;
   patch_scroll_y: number;
   patch_zoom: number;
+  saved_nodes?: SavedNode[];
+  saved_connections?: SavedConnection[];
 }
 
 /**
