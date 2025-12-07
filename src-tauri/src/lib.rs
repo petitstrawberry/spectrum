@@ -15,6 +15,8 @@ mod vdsp;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // Re-export prismd types
 pub use prismd::{ClientInfo, RoutingUpdate, ClientRoutingUpdate};
@@ -447,7 +449,7 @@ fn update_bus_send(
             return;
         }
     };
-    
+
     let send = mixer::BusSend {
         source_type: src_type,
         source_id,
@@ -459,7 +461,7 @@ fn update_bus_send(
         level,
         muted,
     };
-    
+
     let mixer_state = mixer::get_mixer_state();
     mixer_state.set_bus_send(send);
 }
@@ -485,7 +487,7 @@ fn remove_bus_send(
         "output" => mixer::BusSendTargetType::Output,
         _ => return,
     };
-    
+
     let mixer_state = mixer::get_mixer_state();
     mixer_state.remove_bus_send(
         src_type,
@@ -546,12 +548,12 @@ fn create_audio_unit_instance(plugin_id: String) -> Result<String, String> {
     // Find the plugin info first
     let effects = audio_unit::get_effect_audio_units();
     let instruments = audio_unit::get_instrument_audio_units();
-    
+
     let info = effects.iter()
         .chain(instruments.iter())
         .find(|au| au.id == plugin_id)
         .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
-    
+
     audio_unit::get_au_manager().create_instance(info)
 }
 
@@ -600,11 +602,11 @@ fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
     let manager = audio_unit::get_au_manager();
     let instance = manager.get_instance(&instance_id)
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
-    
+
     let au_audio_unit = instance.get_au_audio_unit()
         .ok_or_else(|| format!("AUAudioUnit not available for instance: {}", instance_id))?;
     let name = instance.info.name.clone();
-    
+
     audio_unit_ui::open_audio_unit_ui(&instance_id, au_audio_unit, &name)
 }
 
@@ -618,29 +620,35 @@ fn close_audio_unit_ui(instance_id: String) {
 #[tauri::command]
 fn get_audio_unit_state(instance_id: String) -> Result<Option<String>, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    
+
     let manager = audio_unit::get_au_manager();
     let instance = manager.get_instance(&instance_id)
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
-    
+
     match instance.get_full_state() {
         Some(data) => Ok(Some(STANDARD.encode(&data))),
         None => Ok(None),
     }
 }
 
+/// Helper: collect AU states count (public, simple return type) for tests/runtime checks
+pub fn collect_all_au_state_counts() -> usize {
+    let states = audio_unit::get_au_manager().collect_all_instance_states();
+    states.len()
+}
+
 /// Set AudioUnit plugin state (for restoring)
 #[tauri::command]
 fn set_audio_unit_state(instance_id: String, state: String) -> Result<bool, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    
+
     let manager = audio_unit::get_au_manager();
     let instance = manager.get_instance(&instance_id)
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
-    
+
     let data = STANDARD.decode(&state)
         .map_err(|e| format!("Failed to decode base64 state: {}", e))?;
-    
+
     // SAFETY: set_full_state is only called from main thread via Tauri command
     let inst_ptr = std::sync::Arc::as_ptr(&instance) as *mut audio_unit::AudioUnitInstance;
     unsafe {
@@ -765,6 +773,10 @@ pub struct AppState {
     pub saved_connections: Vec<SavedConnection>,
 }
 
+/// When true, saving app state is allowed. Set to false during shutdown after
+/// an explicit save so subsequent shutdown/unload steps don't trigger saves.
+static SAVE_ALLOWED: AtomicBool = AtomicBool::new(true);
+
 /// Get saved app state
 #[tauri::command]
 fn get_app_state() -> AppState {
@@ -830,6 +842,11 @@ fn get_app_state() -> AppState {
 /// Save app state
 #[tauri::command]
 async fn save_app_state(state: AppState) -> Result<(), String> {
+    // If saving has been disabled due to shutdown sequence, skip saving.
+    if !SAVE_ALLOWED.load(Ordering::Relaxed) {
+        println!("[Spectrum] save_app_state skipped (shutdown in progress)");
+        return Ok(());
+    }
     let cfg = config::AppConfig {
         version: 1,
         io_buffer_size: state.io_buffer_size,
@@ -900,7 +917,49 @@ async fn save_app_state(state: AppState) -> Result<(), String> {
 /// Restart the application
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
-    println!("[Spectrum] Restarting application...");
+    println!("[Spectrum] Restarting application... (saving state, then stopping audio and plugins)");
+
+    // 1) Save current app state synchronously before unloading plugins
+    //    We merge live plugin fullState blobs into the saved config so plugin
+    //    parameters are preserved even if the UI hasn't explicitly saved them.
+    let mut cfg = config::get_config();
+
+    // Collect live AU instance states
+    let states = audio_unit::get_au_manager().collect_all_instance_states();
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    // Merge states into saved_nodes plugins by matching instance id
+    for node in cfg.saved_nodes.iter_mut() {
+        if let Some(ref mut plugins) = node.plugins {
+            for p in plugins.iter_mut() {
+                if let Some(opt_blob) = states.get(&p.id) {
+                    if let Some(blob) = opt_blob.as_ref() {
+                        p.state = Some(STANDARD.encode(blob));
+                    }
+                }
+            }
+        }
+    }
+
+    match config::update_config(cfg) {
+        Ok(_) => println!("[Spectrum] App state (including plugin states) saved before restart"),
+        Err(e) => eprintln!("[Spectrum] Failed to save app state before restart: {}", e),
+    }
+
+    // Disable further saves during the unload/shutdown sequence
+    SAVE_ALLOWED.store(false, Ordering::SeqCst);
+
+    // 2) Stop all outputs and captures to ensure audio threads exit
+    audio_output::stop_all_outputs();
+    audio_capture::stop_all_captures();
+
+    // 3) Remove/unload all AudioUnit instances to ensure plugins are released
+    audio_unit::get_au_manager().remove_all_instances();
+
+    // Give a short moment for threads/resources to clean up
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Finally restart the application
     app.restart();
 }
 
@@ -909,24 +968,24 @@ fn restart_app(app: tauri::AppHandle) {
 #[tauri::command]
 fn open_prism_app() -> Result<bool, String> {
     use std::process::Command;
-    
+
     // First check if Prism.app is already running
     let output = Command::new("pgrep")
         .args(["-f", "Prism.app"])
         .output();
-    
+
     if let Ok(out) = output {
         if !out.stdout.is_empty() {
             // Already running, send deep link to activate popup mode
             let result = Command::new("open")
                 .arg("prism://popup?size=800x600")
                 .spawn();
-            
+
             if result.is_ok() {
                 println!("[Spectrum] Prism.app already running, sent popup deep link");
                 return Ok(true);
             }
-            
+
             // Fallback: bring to front using AppleScript
             let _ = Command::new("osascript")
                 .args(["-e", "tell application \"Prism\" to activate"])
@@ -935,7 +994,7 @@ fn open_prism_app() -> Result<bool, String> {
             return Ok(true);
         }
     }
-    
+
     // Try to open via URL scheme first (this registers/opens Prism.app)
     match Command::new("open")
         .arg("prism://popup?size=800x600")
@@ -949,7 +1008,7 @@ fn open_prism_app() -> Result<bool, String> {
             println!("[Spectrum] URL scheme failed: {}, trying fallback...", e);
         }
     }
-    
+
     // Fallback: Try common locations for Prism.app
     let possible_paths = [
         "/Applications/Prism.app",
@@ -958,7 +1017,7 @@ fn open_prism_app() -> Result<bool, String> {
         "../prism-app/src-tauri/target/release/bundle/macos/Prism.app",
         "../prism-app/src-tauri/target/debug/bundle/macos/Prism.app",
     ];
-    
+
     for path in &possible_paths {
         let expanded_path = shellexpand::tilde(path);
         if std::path::Path::new(expanded_path.as_ref()).exists() {
@@ -976,7 +1035,7 @@ fn open_prism_app() -> Result<bool, String> {
             }
         }
     }
-    
+
     // Fallback: try opening by name (if in PATH or registered)
     match Command::new("open")
         .args(["-a", "Prism"])

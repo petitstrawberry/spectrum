@@ -496,6 +496,28 @@ fn get_default_run_loop_mode() -> *const c_void {
     unsafe { kCFRunLoopDefaultMode }
 }
 
+// Resolve dispatch symbols at runtime via dlsym to avoid linker issues
+fn resolve_dispatch_symbols() -> Option<(
+    unsafe extern "C" fn() -> *mut c_void,
+    unsafe extern "C" fn(*mut c_void, *mut c_void),
+)> {
+    use std::ffi::CString;
+    use libc::{dlsym, RTLD_DEFAULT};
+
+    unsafe {
+        let name1 = CString::new("dispatch_get_main_queue").ok()?;
+        let name2 = CString::new("dispatch_sync").ok()?;
+        let sym1 = dlsym(RTLD_DEFAULT, name1.as_ptr());
+        let sym2 = dlsym(RTLD_DEFAULT, name2.as_ptr());
+        if sym1.is_null() || sym2.is_null() {
+            return None;
+        }
+        let f1: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(sym1);
+        let f2: unsafe extern "C" fn(*mut c_void, *mut c_void) = std::mem::transmute(sym2);
+        Some((f1, f2))
+    }
+}
+
 /// Wrapper for raw pointers to make them Send + Sync
 #[derive(Clone, Copy)]
 pub struct SendSyncPtr(pub *mut AnyObject);
@@ -1354,6 +1376,24 @@ impl AudioUnitManager {
         self.instances.write().remove(id).is_some()
     }
 
+    /// Remove and release all instances
+    /// NOTE: Called from main thread only. Ensures UI controllers are cleaned up.
+    pub fn remove_all_instances(&self) {
+        // Collect IDs to avoid holding write lock while calling cleanup
+        let ids: Vec<String> = {
+            let inst = self.instances.read();
+            inst.keys().cloned().collect()
+        };
+
+        for id in ids {
+            // Clean up any cached UI controller
+            crate::audio_unit_ui::cleanup_cached_view_controller(&id);
+            // Remove instance (drop will release AU resources)
+            self.instances.write().remove(&id);
+            println!("[AudioUnit] Removed instance {} during shutdown", id);
+        }
+    }
+
     /// Set enabled state - atomic, lock-free
     pub fn set_enabled(&self, id: &str, enabled: bool) -> bool {
         if let Some(instance) = self.instances.read().get(id) {
@@ -1435,6 +1475,52 @@ impl AudioUnitManager {
         }
 
         processed
+    }
+
+    /// Collect current fullState data for all instances
+    /// Returns a map from instance_id -> Option<Vec<u8>> (None if no state)
+    pub fn collect_all_instance_states(&self) -> std::collections::HashMap<String, Option<Vec<u8>>> {
+        use std::sync::{Arc, Mutex};
+
+        // Result container shared between threads
+        let result: Arc<Mutex<std::collections::HashMap<String, Option<Vec<u8>>>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let result_for_block = Arc::clone(&result);
+        let result_for_fallback = Arc::clone(&result);
+
+        // We need to call Objective-C APIs (`-fullState` / NSPropertyListSerialization)
+        // on the main thread. Use dispatch_sync to synchronously run a block on the
+        // main queue and populate the result map there.
+
+        let mgr_ptr = self as *const AudioUnitManager as *mut AudioUnitManager;
+        let block = RcBlock::new(move || {
+            let mgr = unsafe { &*mgr_ptr };
+            let instances = mgr.instances.read();
+            for (id, inst) in instances.iter() {
+                let state = inst.get_full_state();
+                result_for_block.lock().unwrap().insert(id.clone(), state);
+            }
+        });
+
+        // Try to resolve dispatch symbols dynamically and call dispatch_sync on main queue.
+        if let Some((dispatch_get_main_queue_fn, dispatch_sync_fn)) = resolve_dispatch_symbols() {
+            unsafe {
+                let q = dispatch_get_main_queue_fn();
+                dispatch_sync_fn(q, &*block as *const _ as *mut c_void);
+            }
+        } else {
+            // Fallback: attempt to run the block on the current run loop briefly
+            // This is less reliable but better than nothing; populate from current thread.
+            let mgr = unsafe { &*mgr_ptr };
+            let instances = mgr.instances.read();
+            for (id, inst) in instances.iter() {
+                let state = inst.get_full_state();
+                result_for_fallback.lock().unwrap().insert(id.clone(), state);
+            }
+        }
+
+        // Return cloned map
+        let map = result.lock().unwrap().clone();
+        map
     }
 }
 

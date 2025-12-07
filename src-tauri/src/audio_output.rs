@@ -223,7 +223,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
         // Track callback count for skip rate monitoring
         let total = CALLBACK_TOTAL_COUNT.fetch_add(1, Ordering::Relaxed);
-        
+
         // Helper for tracking skips
         macro_rules! skip_callback {
             () => {{
@@ -240,10 +240,10 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
         // Get mixer state - use lock-free snapshot for read-only data
         let mixer_state = get_mixer_state();
-        
+
         // Lock-free snapshot access - this never blocks
         let snapshot = mixer_state.load_snapshot();
-        
+
         // Extract data from snapshot (all lock-free)
         let sends = &snapshot.sends;
         let faders = snapshot.source_faders;
@@ -251,7 +251,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         let bus_sends = &snapshot.bus_sends;
         let buses = &snapshot.buses;
         let processing_order = &snapshot.processing_order;
-        
+
         // Bus buffers need write access - use try_write with spin retry
         let mut bus_buffers = {
             let mut result = mixer_state.bus_buffers.try_write();
@@ -289,19 +289,19 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         // Process buses in dependency order, using cache to avoid reprocessing
         if let Some(ref mut bus_buffers) = bus_buffers.as_mut() {
             if !buses.is_empty() {
-            
+
             // Always get a new sample counter for this callback
             // Each output device processes independently, but caches within the same callback
             let sample_counter = mixer_state.bus_processing.next_cycle().0;
-            
+
             let au_manager = get_au_manager();
             let bus_count = buses.len().min(64);
-            
+
             // Collect which buses need to be processed (those with sends to this device)
             let mut buses_needed: u64 = 0;
             for send in bus_sends.iter() {
-                if send.active && send.source_type == 1 && send.target_type == 1 
-                    && send.target_device_hash == dev_id_hash 
+                if send.active && send.source_type == 1 && send.target_type == 1
+                    && send.target_device_hash == dev_id_hash
                 {
                     let bus_idx = send.source_bus_idx as usize;
                     if bus_idx < 64 {
@@ -309,7 +309,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     }
                 }
             }
-            
+
             // Also include buses that feed into needed buses (transitively)
             for _pass in 0..bus_count {
                 for send in bus_sends.iter() {
@@ -324,35 +324,35 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     }
                 }
             }
-            
+
             // Process buses using pre-computed topological order from snapshot
             for &bus_idx_u8 in processing_order.iter() {
                     let bus_idx = bus_idx_u8 as usize;
-                    
+
                     if bus_idx >= bus_buffers.len() || bus_idx >= buses.len() {
                         continue;
                     }
-                    
+
                     // Skip if not needed or already processed
                     if (buses_needed & (1 << bus_idx)) == 0 {
                         continue;
                     }
-                    
+
                     if bus_buffers[bus_idx].is_valid(sample_counter) {
                         continue; // Already cached this cycle
                     }
-                    
+
                     let bus = &buses[bus_idx];
                     if bus.muted {
                         bus_buffers[bus_idx].mark_processed(sample_counter, frames);
                         continue;
                     }
-                    
+
                     // In topological order, all source buses are already processed
-                    
+
                     // Clear buffer before mixing
                     bus_buffers[bus_idx].clear(frames);
-                    
+
                     // Mix from source buses (Bus -> Bus)
                     for send in bus_sends.iter() {
                         if !send.active || send.source_type != 1 || send.target_type != 0 {
@@ -361,25 +361,25 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                         if send.target_bus_idx as usize != bus_idx {
                             continue;
                         }
-                        
+
                         let source_bus_idx = send.source_bus_idx as usize;
                         if source_bus_idx >= bus_buffers.len() || source_bus_idx >= buses.len() {
                             continue;
                         }
-                        
+
                         let source_bus = &buses[source_bus_idx];
                         if source_bus.muted {
                             continue;
                         }
-                        
+
                         let total_gain = send.level * source_bus.fader;
                         if total_gain < 0.0001 {
                             continue;
                         }
-                        
+
                         let source_ch = send.source_channel as usize;
                         let target_ch = send.target_channel as usize;
-                        
+
                         // Copy to temp to avoid borrow issues
                         let mut temp = [0.0f32; crate::mixer::MAX_FRAMES];
                         {
@@ -387,12 +387,12 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                             let src = if source_ch % 2 == 0 { &src_buf.left } else { &src_buf.right };
                             temp[..frames].copy_from_slice(&src[..frames]);
                         }
-                        
+
                         let dst_buf = &mut bus_buffers[bus_idx];
                         let dst = if target_ch % 2 == 0 { &mut dst_buf.left } else { &mut dst_buf.right };
                         VDsp::mix_add(&temp[..frames], total_gain, &mut dst[..frames]);
                     }
-                    
+
                     // Mix from inputs (Input -> Bus)
                     for send in bus_sends.iter() {
                         if !send.active || send.source_type != 0 || send.target_type != 0 {
@@ -401,21 +401,21 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                         if send.target_bus_idx as usize != bus_idx {
                             continue;
                         }
-                        
+
                         let source_dev = send.source_device;
                         let source_ch = send.source_channel as usize;
                         let pair_idx = source_ch / 2;
-                        
+
                         if pair_idx < mutes.len() && mutes[pair_idx] {
                             continue;
                         }
-                        
+
                         let source_gain = if pair_idx < faders.len() { faders[pair_idx] } else { 1.0 };
                         let total_gain = send.level * source_gain;
                         if total_gain < 0.0001 {
                             continue;
                         }
-                        
+
                         // Read audio from input
                         let buffer_idx = pool.get_or_allocate(source_dev, pair_idx);
                         let read_count = if buffer_idx < 64 && (buffers_read & (1 << buffer_idx)) != 0 {
@@ -425,7 +425,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                                 Some(b) => b,
                                 None => continue,
                             };
-                            
+
                             let count = if source_dev == 0 {
                                 crate::audio_capture::read_channel_audio(
                                     dev_id_for_callback,
@@ -444,31 +444,31 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                                     &mut pair_buf.right[..frames],
                                 )
                             };
-                            
+
                             if buffer_idx < 64 {
                                 buffers_read |= 1 << buffer_idx;
                                 buffer_read_counts[buffer_idx] = count;
                             }
                             count
                         };
-                        
+
                         if read_count == 0 {
                             continue;
                         }
-                        
+
                         let pair_buf = match pool.get_buffer(buffer_idx) {
                             Some(b) => b,
                             None => continue,
                         };
                         let is_right = source_ch % 2 == 1;
                         let source_data = if is_right { &pair_buf.right[..] } else { &pair_buf.left[..] };
-                        
+
                         let target_ch = send.target_channel as usize;
                         let bus_buf = &mut bus_buffers[bus_idx];
                         let target_buf = if target_ch % 2 == 0 { &mut bus_buf.left } else { &mut bus_buf.right };
                         VDsp::mix_add(&source_data[..read_count], total_gain, &mut target_buf[..read_count]);
                     }
-                    
+
                     // Apply plugins
                     if !bus.plugin_ids.is_empty() {
                         let bus_buf = &mut bus_buffers[bus_idx];
@@ -479,11 +479,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                             0.0,
                         );
                     }
-                    
+
                     // Mark as processed
                     bus_buffers[bus_idx].mark_processed(sample_counter, frames);
                 }
-            
+
             // Mix buses to output (Bus -> Output)
             for send in bus_sends.iter() {
                 if !send.active || send.source_type != 1 || send.target_type != 1 {
@@ -492,32 +492,32 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 if send.target_device_hash != dev_id_hash {
                     continue;
                 }
-                
+
                 let source_bus_idx = send.source_bus_idx as usize;
                 if source_bus_idx >= bus_buffers.len() || source_bus_idx >= buses.len() {
                     continue;
                 }
-                
+
                 let source_bus = &buses[source_bus_idx];
                 if source_bus.muted {
                     continue;
                 }
-                
+
                 let total_gain = send.level * source_bus.fader;
                 if total_gain < 0.0001 {
                     continue;
                 }
-                
+
                 let source_ch = send.source_channel as usize;
                 let target_ch = send.target_channel as usize;
-                
+
                 if target_ch >= out_ch {
                     continue;
                 }
-                
+
                 let source_buf = &bus_buffers[source_bus_idx];
                 let source_data = if source_ch % 2 == 0 { &source_buf.left[..] } else { &source_buf.right[..] };
-                
+
                 VDsp::mix_to_interleaved(
                     &source_data[..frames],
                     total_gain,
@@ -527,24 +527,24 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     frames,
                 );
             }
-            
+
             // Update bus levels for metering
             for (bus_idx, bus) in buses.iter().enumerate() {
                 if bus_idx >= bus_buffers.len() || bus.muted {
                     continue;
                 }
-                
+
                 let bus_buf = &bus_buffers[bus_idx];
                 if !bus_buf.is_valid(sample_counter) {
                     continue;
                 }
-                
+
                 let fader = bus.fader;
                 let left_rms = VDsp::rms(&bus_buf.left[..frames]) * fader;
                 let left_peak = VDsp::peak(&bus_buf.left[..frames]) * fader;
                 let right_rms = VDsp::rms(&bus_buf.right[..frames]) * fader;
                 let right_peak = VDsp::peak(&bus_buf.right[..frames]) * fader;
-                
+
                 mixer_state.update_bus_level(bus_idx, left_rms, right_rms, left_peak, right_peak);
             }
             } // end if !buses.is_empty()
@@ -590,10 +590,10 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
             // Calculate whether it's the right channel
             let is_right = source_ch % 2 == 1;
-            
+
             // Find or allocate buffer for this source pair
             let buffer_idx = pool.get_or_allocate(source_dev, pair_idx);
-            
+
             // Read audio if not already read this callback
             let read_count = if buffer_idx < 64 && (buffers_read & (1 << buffer_idx)) != 0 {
                 // Already read this buffer
@@ -604,7 +604,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     Some(b) => b,
                     None => continue,
                 };
-                
+
                 let count = if source_dev == 0 {
                     crate::audio_capture::read_channel_audio(
                         dev_id_for_callback,
@@ -623,7 +623,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                         &mut pair_buf.right[..frames],
                     )
                 };
-                
+
                 if buffer_idx < 64 {
                     buffers_read |= 1 << buffer_idx;
                     buffer_read_counts[buffer_idx] = count;
