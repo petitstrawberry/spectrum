@@ -23,6 +23,18 @@ pub const MAX_BUSES: usize = 32;
 /// Bus channels (stereo)
 pub const BUS_CHANNELS: usize = 2;
 
+// Toggle verbose mixer logging. Set to `true` for debugging.
+const MIXER_LOG: bool = false;
+
+// Helper macro for conditional mixer logging
+macro_rules! mlog {
+    ($($arg:tt)*) => {
+        if MIXER_LOG {
+            println!($($arg)*);
+        }
+    }
+}
+
 /// A send connection from a source channel to an output device channel (1ch unit)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Send {
@@ -154,13 +166,13 @@ impl BusBuffer {
         }
         self.valid_frames = frames;
     }
-    
+
     /// Check if this buffer is valid for the given sample counter
     #[inline]
     pub fn is_valid(&self, sample_counter: u64) -> bool {
         self.processed_at == sample_counter && self.valid_frames > 0
     }
-    
+
     /// Mark this buffer as processed at the given sample counter
     #[inline]
     pub fn mark_processed(&mut self, sample_counter: u64, frames: usize) {
@@ -181,13 +193,13 @@ impl SampleCounter {
             counter: AtomicU64::new(1), // Start at 1, 0 means "never processed"
         }
     }
-    
+
     /// Get current sample counter value
     #[inline]
     pub fn get(&self) -> u64 {
         self.counter.load(Ordering::Acquire)
     }
-    
+
     /// Try to increment the counter (only one device per cycle succeeds)
     /// Returns (new_counter, true) if we incremented, (current, false) if someone else did
     #[inline]
@@ -217,13 +229,13 @@ impl BusProcessingState {
             sample_counter: SampleCounter::new(),
         }
     }
-    
+
     /// Get the current sample counter value
     #[inline]
     pub fn get_sample_counter(&self) -> u64 {
         self.sample_counter.get()
     }
-    
+
     /// Try to advance the sample counter to the next cycle
     /// Returns (counter, true) if this device started a new cycle
     /// Returns (counter, false) if another device already started this cycle
@@ -325,19 +337,19 @@ impl SendsArray {
     pub fn update(&self, sends: &[Send], output_faders: &HashMap<String, f32>) {
         let mut compact = self.sends.write();
         compact.clear();
-        
+
         for send in sends {
             if send.muted || send.level <= 0.0001 {
                 continue;
             }
-            
+
             let output_gain = output_faders.get(&send.target_device).copied().unwrap_or(1.0);
             let total_level = send.level * output_gain;
-            
+
             if total_level <= 0.0001 {
                 continue;
             }
-            
+
             compact.push(SendCompact {
                 source_device: send.source_device,
                 source_channel: send.source_channel,
@@ -347,16 +359,16 @@ impl SendsArray {
                 active: true,
             });
         }
-        
+
         self.version.fetch_add(1, Ordering::Release);
     }
 }
 
 /// Bus sends array for audio callback
 pub struct BusSendsArray {
-    /// Bus definitions (index -> Bus)
+    /// Bus definitions stored in fixed slots (slot index is stable)
     buses: RwLock<Vec<Bus>>,
-    /// Bus ID to index mapping
+    /// Bus ID to slot index mapping
     bus_id_to_idx: RwLock<HashMap<String, usize>>,
     /// Active bus sends (read by audio thread)
     sends: RwLock<Vec<BusSendCompact>>,
@@ -370,7 +382,8 @@ pub struct BusSendsArray {
 impl BusSendsArray {
     pub fn new() -> Self {
         Self {
-            buses: RwLock::new(Vec::with_capacity(MAX_BUSES)),
+            // Pre-allocate fixed slots for buses. Empty slot == default Bus with empty id.
+            buses: RwLock::new(vec![Bus::default(); MAX_BUSES]),
             bus_id_to_idx: RwLock::new(HashMap::new()),
             sends: RwLock::new(Vec::with_capacity(MAX_SENDS)),
             processing_order: RwLock::new(Vec::with_capacity(MAX_BUSES)),
@@ -395,7 +408,7 @@ impl BusSendsArray {
     pub fn try_read_buses(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<Bus>>> {
         self.buses.try_read()
     }
-    
+
     /// Read pre-computed processing order (for audio callback)
     #[inline]
     pub fn try_read_order(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<u8>>> {
@@ -404,7 +417,8 @@ impl BusSendsArray {
 
     /// Get bus count
     pub fn bus_count(&self) -> usize {
-        self.buses.read().len()
+        // Number of active buses
+        self.bus_id_to_idx.read().len()
     }
 
     /// Get bus index by ID
@@ -416,17 +430,68 @@ impl BusSendsArray {
     pub fn add_bus(&self, bus: Bus) {
         let mut buses = self.buses.write();
         let mut id_map = self.bus_id_to_idx.write();
-        
-        // Check if bus already exists
-        if id_map.contains_key(&bus.id) {
+
+        // Sanity: ignore empty id
+        if bus.id.is_empty() {
+            mlog!("[Mixer] add_bus called with empty id, ignoring");
             return;
         }
-        
-        let idx = buses.len();
-        id_map.insert(bus.id.clone(), idx);
-        buses.push(bus);
-        
-        self.version.fetch_add(1, Ordering::Release);
+
+        // If id already present in map, update the existing slot (allow metadata updates)
+        if let Some(&existing_idx) = id_map.get(&bus.id) {
+            mlog!("[Mixer] add_bus: bus '{}' already present at slot {}, updating metadata", bus.id, existing_idx);
+            if existing_idx < buses.len() {
+                buses[existing_idx] = bus.clone();
+                self.version.fetch_add(1, Ordering::Release);
+            } else {
+                mlog!("[Mixer] add_bus: existing index {} out of bounds, skipping update", existing_idx);
+            }
+            return;
+        }
+
+        // Extra safety: ensure no existing slot already contains this id
+        if let Some(existing_idx) = buses.iter().position(|b| b.id == bus.id) {
+            // If map was out-of-sync, repair it and update the slot with provided bus metadata
+            mlog!("[Mixer] add_bus: found existing bus '{}' in slot {} but missing in id_map — repairing map and updating slot", bus.id, existing_idx);
+            if existing_idx < buses.len() {
+                buses[existing_idx] = bus.clone();
+                id_map.insert(bus.id.clone(), existing_idx);
+                self.version.fetch_add(1, Ordering::Release);
+            } else {
+                mlog!("[Mixer] add_bus: found slot {} out of bounds while repairing, ignoring", existing_idx);
+            }
+            return;
+        }
+
+        // If the provided id has a numeric suffix (bus_N), try to place it at slot N-1
+        if let Some(num_str) = bus.id.strip_prefix("bus_") {
+            if let Ok(n) = num_str.parse::<usize>() {
+                if n >= 1 {
+                    let target_idx = n - 1;
+                    if target_idx < buses.len() {
+                        // If the target slot is empty or already contains the same id, use it
+                        if buses[target_idx].id.is_empty() || buses[target_idx].id == bus.id {
+                            buses[target_idx] = bus.clone();
+                            id_map.insert(bus.id.clone(), target_idx);
+                            self.version.fetch_add(1, Ordering::Release);
+                            mlog!("[Mixer] add_bus: placed '{}' into requested slot {}", bus.id, target_idx);
+                            return;
+                        } else {
+                            mlog!("[Mixer] add_bus: requested slot {} for '{}' is occupied (contains '{}'), falling back to first free slot", target_idx, bus.id, buses[target_idx].id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find first empty slot and insert
+        if let Some(idx) = buses.iter().position(|b| b.id.is_empty()) {
+            buses[idx] = bus.clone();
+            id_map.insert(bus.id.clone(), idx);
+            self.version.fetch_add(1, Ordering::Release);
+        } else {
+            mlog!("[Mixer] add_bus: no free bus slots available (MAX_BUSES={})", buses.len());
+        }
     }
 
     /// Remove a bus
@@ -434,39 +499,38 @@ impl BusSendsArray {
         let mut buses = self.buses.write();
         let mut id_map = self.bus_id_to_idx.write();
         let mut sends = self.sends.write();
-        
+
         if let Some(idx) = id_map.remove(bus_id) {
-            buses.remove(idx);
-            
-            // Update indices for remaining buses
-            for (id, old_idx) in id_map.iter_mut() {
-                if *old_idx > idx {
-                    *old_idx -= 1;
-                }
+            if idx >= buses.len() {
+                mlog!("[Mixer] remove_bus: index {} out of bounds (len={}), ignoring", idx, buses.len());
+                return;
             }
-            
-            // Remove sends involving this bus and update indices
+
+            // Clear the slot (leave indices of other slots stable)
+            mlog!("[Mixer] remove_bus: removing '{}' at slot {}", bus_id, idx);
+            buses[idx] = Bus::default();
+
+            // Remove sends that reference this slot
             sends.retain(|send| {
-                let source_ok = send.source_type != 1 || send.source_bus_idx as usize != idx;
-                let target_ok = send.target_type != 0 || send.target_bus_idx as usize != idx;
+                let source_ok = !(send.source_type == 1 && send.source_bus_idx as usize == idx);
+                let target_ok = !(send.target_type == 0 && send.target_bus_idx as usize == idx);
                 source_ok && target_ok
             });
-            
-            // Update bus indices in remaining sends
-            for send in sends.iter_mut() {
-                if send.source_type == 1 && send.source_bus_idx as usize > idx {
-                    send.source_bus_idx -= 1;
-                }
-                if send.target_type == 0 && send.target_bus_idx as usize > idx {
-                    send.target_bus_idx -= 1;
-                }
-            }
-            
-            // Recompute processing order
-            self.compute_processing_order(&sends, buses.len());
+
+            // Recompute processing order using fixed slots
+            // Note: compute_processing_order will take its own read locks; we drop our local guards to avoid deadlocks
+            drop(sends);
+            drop(id_map);
+            drop(buses);
+
+            // Re-read sends and buses for computing order
+            let sends_snapshot = self.sends.read().clone();
+            let buses_snapshot_len = self.buses.read().len();
+            self.compute_processing_order(&sends_snapshot, buses_snapshot_len);
+            self.version.fetch_add(1, Ordering::Release);
+        } else {
+            mlog!("[Mixer] remove_bus: bus '{}' not found in id_map", bus_id);
         }
-        
-        self.version.fetch_add(1, Ordering::Release);
     }
 
     /// Set bus fader
@@ -492,20 +556,21 @@ impl BusSendsArray {
         }
         self.version.fetch_add(1, Ordering::Release);
     }
-    
+
     /// Set bus plugin chain
     pub fn set_bus_plugins(&self, bus_id: &str, plugin_ids: Vec<String>) {
         let id_map = self.bus_id_to_idx.read();
         if let Some(&idx) = id_map.get(bus_id) {
             let mut buses = self.buses.write();
             if let Some(bus) = buses.get_mut(idx) {
-                println!("[Mixer] Set bus {} plugins: {:?}", bus_id, plugin_ids);
+                mlog!("[Mixer] Set bus {} plugins: {:?}", bus_id, plugin_ids);
                 bus.plugin_ids = plugin_ids;
+                self.version.fetch_add(1, Ordering::Release);
+                if MIXER_LOG { println!("[Mixer] Set bus {} plugins applied", bus_id); }
             }
         }
-        self.version.fetch_add(1, Ordering::Release);
     }
-    
+
     /// Get bus plugin chain
     pub fn get_bus_plugins(&self, bus_id: &str) -> Vec<String> {
         let id_map = self.bus_id_to_idx.read();
@@ -517,11 +582,12 @@ impl BusSendsArray {
         }
         Vec::new()
     }
-    
+
     /// Get bus plugin chain by index (for audio callback)
     pub fn get_bus_plugins_by_idx(&self, bus_idx: usize) -> Vec<String> {
         let buses = self.buses.read();
-        if let Some(bus) = buses.get(bus_idx) {
+        if bus_idx < buses.len() {
+            let bus = &buses[bus_idx];
             return bus.plugin_ids.clone();
         }
         Vec::new()
@@ -533,12 +599,12 @@ impl BusSendsArray {
         let buses = self.buses.read();
         let mut compact = self.sends.write();
         compact.clear();
-        
+
         for send in bus_sends {
             if send.muted || send.level <= 0.0001 {
                 continue;
             }
-            
+
             // Resolve source
             let (source_type, source_bus_idx) = match send.source_type {
                 BusSendSourceType::Input => (0u8, 0u8),
@@ -556,7 +622,7 @@ impl BusSendsArray {
                     }
                 }
             };
-            
+
             // Resolve target
             let (target_type, target_bus_idx, target_device_hash) = match send.target_type {
                 BusSendTargetType::Bus => {
@@ -574,7 +640,7 @@ impl BusSendsArray {
                     (1u8, 0u8, hash_device_id(&send.target_id))
                 }
             };
-            
+
             compact.push(BusSendCompact {
                 source_type,
                 source_device: send.source_device,
@@ -588,61 +654,68 @@ impl BusSendsArray {
                 active: true,
             });
         }
-        
-        // Compute topological order using Kahn's algorithm
-        let bus_count = buses.len();
-        println!("[Mixer] update_sends complete, computing order for {} buses, {} sends", bus_count, compact.len());
-        self.compute_processing_order(&compact, bus_count);
-        
+
+        // Compute topological order using Kahn's algorithm (consider only active slots)
+        mlog!("[Mixer] update_sends complete, computing order for {} active slots, {} sends", id_map.len(), compact.len());
+        self.compute_processing_order(&compact, buses.len());
+
         self.version.fetch_add(1, Ordering::Release);
     }
-    
+
     /// Compute processing order using Kahn's algorithm
     /// This determines the order in which buses should be processed
     fn compute_processing_order(&self, sends: &[BusSendCompact], bus_count: usize) {
         let mut order = self.processing_order.write();
         order.clear();
-        
+
         if bus_count == 0 {
             return;
         }
-        
-        // Step 1: Count in-degrees for each bus (how many buses feed into it)
+
+        // Step 1: Count in-degrees for each active bus (skip empty slots)
+        let buses = self.buses.read();
+        let mut active = vec![false; bus_count];
+        let mut active_count = 0usize;
+        for idx in 0..bus_count {
+            if !buses[idx].id.is_empty() {
+                active[idx] = true;
+                active_count += 1;
+            }
+        }
+
         let mut in_degree = vec![0u8; bus_count];
-        
         for send in sends.iter() {
-            // Only count Bus -> Bus sends
             if send.active && send.source_type == 1 && send.target_type == 0 {
                 let target_idx = send.target_bus_idx as usize;
-                if target_idx < bus_count {
+                if target_idx < bus_count && active[target_idx] {
                     in_degree[target_idx] = in_degree[target_idx].saturating_add(1);
                 }
             }
         }
-        
-        // Step 2: Initialize queue with buses that have in-degree 0
-        let mut queue: Vec<u8> = Vec::with_capacity(bus_count);
-        for (idx, &deg) in in_degree.iter().enumerate() {
-            if deg == 0 {
+
+        // Step 2: Initialize queue with active buses that have in-degree 0
+        let mut queue: Vec<u8> = Vec::with_capacity(active_count);
+        for idx in 0..bus_count {
+            if active[idx] && in_degree[idx] == 0 {
                 queue.push(idx as u8);
             }
         }
-        
+
         // Step 3: Process the queue (Kahn's algorithm)
         let mut head = 0;
         while head < queue.len() {
             let current = queue[head] as usize;
             head += 1;
-            
+
             order.push(current as u8);
-            
+
             // Decrease in-degree for all buses this one feeds into
             for send in sends.iter() {
-                if send.active && send.source_type == 1 && send.target_type == 0 
-                    && send.source_bus_idx as usize == current 
+                if send.active && send.source_type == 1 && send.target_type == 0
+                    && send.source_bus_idx as usize == current
                 {
                     let target_idx = send.target_bus_idx as usize;
-                    if target_idx < bus_count {
+                    if target_idx < bus_count && active[target_idx] {
                         in_degree[target_idx] = in_degree[target_idx].saturating_sub(1);
                         if in_degree[target_idx] == 0 {
                             queue.push(target_idx as u8);
@@ -651,25 +724,25 @@ impl BusSendsArray {
                 }
             }
         }
-        
-        // Check for cycles (if not all buses are in the order, there's a cycle)
-        if order.len() != bus_count {
-            println!("[Mixer] Warning: Cycle detected in bus routing! Adding remaining buses at end.");
+
+        // Check for cycles (if not all active buses are in the order, there's a cycle)
+        if order.len() != active_count {
+            mlog!("[Mixer] Warning: Cycle detected in bus routing! Adding remaining active buses at end.");
             for idx in 0..bus_count {
-                if !order.contains(&(idx as u8)) {
+                if active[idx] && !order.contains(&(idx as u8)) {
                     order.push(idx as u8);
                 }
             }
         }
-        
-        println!("[Mixer] Computed bus processing order: {:?}", order.as_slice());
+
+        mlog!("[Mixer] Computed bus processing order: {:?}", order.as_slice());
     }
 
     /// Add or update a bus send
     pub fn set_bus_send(&self, send: BusSend) {
         let id_map = self.bus_id_to_idx.read();
         let buses = self.buses.read();
-        
+
         // Resolve indices
         let source_bus_idx = match send.source_type {
             BusSendSourceType::Bus => id_map.get(&send.source_id).copied(),
@@ -679,28 +752,28 @@ impl BusSendsArray {
             BusSendTargetType::Bus => id_map.get(&send.target_id).copied(),
             _ => Some(0),
         };
-        
+
         if source_bus_idx.is_none() || target_bus_idx.is_none() {
-            println!("[Mixer] Bus send references unknown bus: source_id={}, target_id={}", send.source_id, send.target_id);
+            mlog!("[Mixer] Bus send references unknown bus: source_id={}, target_id={}", send.source_id, send.target_id);
             return;
         }
-        
-        // Check source bus mute
+
+        // Check source bus mute (ensure slot active)
         if send.source_type == BusSendSourceType::Bus {
             if let Some(idx) = source_bus_idx {
-                if let Some(bus) = buses.get(idx) {
-                    if bus.muted {
+                if idx < buses.len() {
+                    if buses[idx].muted {
                         return;
                     }
                 }
             }
         }
-        
+
         let target_device_hash = match send.target_type {
             BusSendTargetType::Output => hash_device_id(&send.target_id),
             _ => 0,
         };
-        
+
         let compact_send = BusSendCompact {
             source_type: match send.source_type {
                 BusSendSourceType::Input => 0,
@@ -719,9 +792,9 @@ impl BusSendsArray {
             level: send.level,
             active: !send.muted && send.level > 0.0001,
         };
-        
+
         let mut sends = self.sends.write();
-        
+
         // Find existing send with same source and target
         if let Some(existing) = sends.iter_mut().find(|s| {
             s.source_type == compact_send.source_type
@@ -738,15 +811,14 @@ impl BusSendsArray {
         } else {
             sends.push(compact_send);
         }
-        
-        // Recompute processing order
-        let bus_count = buses.len();
-        self.compute_processing_order(&sends, bus_count);
-        
+
+        // Recompute processing order using fixed slots
+        self.compute_processing_order(&sends, buses.len());
+
         drop(sends);
         drop(buses);
         drop(id_map);
-        
+
         self.version.fetch_add(1, Ordering::Release);
     }
 
@@ -762,7 +834,7 @@ impl BusSendsArray {
         target_channel: u32,
     ) {
         let id_map = self.bus_id_to_idx.read();
-        
+
         let source_bus_idx = match source_type {
             BusSendSourceType::Bus => id_map.get(source_id).copied().unwrap_or(255) as u8,
             _ => 0,
@@ -775,7 +847,7 @@ impl BusSendsArray {
             BusSendTargetType::Output => hash_device_id(target_id),
             _ => 0,
         };
-        
+
         let src_type = match source_type {
             BusSendSourceType::Input => 0u8,
             BusSendSourceType::Bus => 1u8,
@@ -784,7 +856,7 @@ impl BusSendsArray {
             BusSendTargetType::Bus => 0u8,
             BusSendTargetType::Output => 1u8,
         };
-        
+
         let mut sends = self.sends.write();
         sends.retain(|s| {
             !(s.source_type == src_type
@@ -796,11 +868,11 @@ impl BusSendsArray {
                 && s.target_device_hash == target_device_hash
                 && s.target_channel == target_channel)
         });
-        
+
         // Recompute processing order
         let buses = self.buses.read();
         self.compute_processing_order(&sends, buses.len());
-        
+
         self.version.fetch_add(1, Ordering::Release);
     }
 
@@ -812,6 +884,25 @@ impl BusSendsArray {
     /// Get all bus sends
     pub fn get_bus_sends_compact(&self) -> Vec<BusSendCompact> {
         self.sends.read().clone()
+    }
+
+    /// Reserve the first available bus slot and return a generated bus id (e.g. "bus_1").
+    /// This also marks the slot as used with a default Bus so concurrent callers
+    /// won't allocate the same slot.
+    pub fn reserve_bus_id(&self) -> Option<String> {
+        let mut buses = self.buses.write();
+        let mut id_map = self.bus_id_to_idx.write();
+
+        if let Some(idx) = buses.iter().position(|b| b.id.is_empty()) {
+            let id = format!("bus_{}", idx + 1);
+            buses[idx].id = id.clone();
+            id_map.insert(id.clone(), idx);
+            self.version.fetch_add(1, Ordering::Release);
+            if MIXER_LOG { println!("[Mixer] reserve_bus_id: reserved '{}' at slot {}", id, idx); }
+            return Some(id);
+        }
+        if MIXER_LOG { println!("[Mixer] reserve_bus_id: no free slots"); }
+        None
     }
 }
 
@@ -923,7 +1014,7 @@ pub fn allocate_buffers_for_output(device_id: u64, device_id_str: &str, sends: &
     let pool = get_output_buffer_pool(device_id);
     let mut pool = pool.write();
     let target_hash = hash_device_id(device_id_str);
-    
+
     // Find all unique source pairs targeting this device
     for send in sends {
         if send.muted {
@@ -966,7 +1057,7 @@ pub struct MixerState {
     pub sample_rate: RwLock<u32>,
     /// Buffer size
     pub buffer_size: RwLock<u32>,
-    
+
     // ========== Lock-Free Snapshot for Audio Callback ==========
     /// Atomically swappable snapshot for lock-free audio callback access
     pub snapshot: ArcSwap<MixerSnapshot>,
@@ -984,7 +1075,8 @@ impl MixerState {
             sends: RwLock::new(Vec::new()),
             sends_compact: SendsArray::new(),
             bus_sends: BusSendsArray::new(),
-            bus_buffers: RwLock::new(Vec::new()),
+            // Pre-allocate bus buffers for fixed slots
+            bus_buffers: RwLock::new((0..MAX_BUSES).map(|_| BusBuffer::new()).collect()),
             bus_processing: BusProcessingState::new(),
             source_faders: RwLock::new([1.0; PRISM_CHANNELS / 2]),
             source_mutes: RwLock::new([false; PRISM_CHANNELS / 2]),
@@ -997,7 +1089,7 @@ impl MixerState {
             snapshot: ArcSwap::from_pointee(MixerSnapshot::default()),
         }
     }
-    
+
     /// Rebuild the lock-free snapshot (call after any routing/fader change)
     pub fn rebuild_snapshot(&self) {
         let sends_compact = self.sends_compact.try_read()
@@ -1014,7 +1106,7 @@ impl MixerState {
             .unwrap_or_default();
         let source_faders = self.source_faders.read().clone();
         let source_mutes = self.source_mutes.read().clone();
-        
+
         let new_snapshot = MixerSnapshot {
             sends: sends_compact,
             bus_sends,
@@ -1023,10 +1115,10 @@ impl MixerState {
             source_faders,
             source_mutes,
         };
-        
+
         self.snapshot.store(Arc::new(new_snapshot));
     }
-    
+
     /// Get lock-free snapshot for audio callback
     #[inline]
     pub fn load_snapshot(&self) -> arc_swap::Guard<Arc<MixerSnapshot>> {
@@ -1038,7 +1130,7 @@ impl MixerState {
         let sends = self.sends.read();
         let output_faders = self.output_faders.read();
         self.sends_compact.update(&sends, &output_faders);
-        
+
         // Pre-allocate buffers for all output devices
         // Collect unique target devices first
         use std::collections::HashSet;
@@ -1048,12 +1140,12 @@ impl MixerState {
                 target_devices.insert((hash_device_id(&send.target_device), send.target_device.clone()));
             }
         }
-        
+
         // Allocate buffers for each target device
         for (device_hash, device_id) in target_devices {
             allocate_buffers_for_output(device_hash, &device_id, &sends);
         }
-        
+
         // Rebuild lock-free snapshot
         self.rebuild_snapshot();
     }
@@ -1069,12 +1161,12 @@ impl MixerState {
                     && s.target_device == send.target_device
                     && s.target_channel == send.target_channel
             }) {
-                println!("[Mixer] Updated send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                println!("[Mixer] Updated send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}",
                     send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
                 existing.level = send.level;
                 existing.muted = send.muted;
             } else {
-                println!("[Mixer] New send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                println!("[Mixer] New send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}",
                     send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
                 sends.push(send);
             }
@@ -1163,28 +1255,27 @@ impl MixerState {
             plugin_ids: Vec::new(),
         };
         self.bus_sends.add_bus(bus);
-        
-        // Add bus buffer
-        let mut buffers = self.bus_buffers.write();
-        buffers.push(BusBuffer::new());
-        drop(buffers);
-        
+        // Ensure bus buffer slot exists (already pre-allocated)
         self.rebuild_snapshot();
         println!("[Mixer] Added bus: {}", id);
+    }
+
+    /// Reserve a bus id (allocates a slot and returns the id) for frontends
+    pub fn reserve_bus_id(&self) -> Option<String> {
+        self.bus_sends.reserve_bus_id()
     }
 
     /// Remove a bus
     pub fn remove_bus(&self, bus_id: &str) {
         if let Some(idx) = self.bus_sends.get_bus_index(bus_id) {
             self.bus_sends.remove_bus(bus_id);
-            
-            // Remove bus buffer
+            // Clear bus buffer at slot
             let mut buffers = self.bus_buffers.write();
             if idx < buffers.len() {
-                buffers.remove(idx);
+                buffers[idx].clear(0);
             }
             drop(buffers);
-            
+
             self.rebuild_snapshot();
             println!("[Mixer] Removed bus: {}", bus_id);
         }
@@ -1201,13 +1292,13 @@ impl MixerState {
         self.bus_sends.set_bus_mute(bus_id, muted);
         self.rebuild_snapshot();
     }
-    
+
     /// Set bus plugin chain
     pub fn set_bus_plugins(&self, bus_id: &str, plugin_ids: Vec<String>) {
         self.bus_sends.set_bus_plugins(bus_id, plugin_ids);
         self.rebuild_snapshot();
     }
-    
+
     /// Get bus plugin chain
     pub fn get_bus_plugins(&self, bus_id: &str) -> Vec<String> {
         self.bus_sends.get_bus_plugins(bus_id)
@@ -1242,14 +1333,18 @@ impl MixerState {
 
     /// Get all buses
     pub fn get_buses(&self) -> Vec<Bus> {
+        // For UI we want a compact list of active buses (skip empty slots).
         self.bus_sends.get_buses()
+            .into_iter()
+            .filter(|b| !b.id.is_empty())
+            .collect()
     }
 
     /// Get bus sends for debugging
     pub fn get_bus_sends(&self) -> Vec<BusSendCompact> {
         self.bus_sends.get_bus_sends_compact()
     }
-    
+
     /// Update bus levels (called from audio callback after plugin processing)
     pub fn update_bus_level(&self, bus_idx: usize, left_rms: f32, right_rms: f32, left_peak: f32, right_peak: f32) {
         if let Some(mut levels) = self.bus_levels.try_write() {
@@ -1263,22 +1358,28 @@ impl MixerState {
             }
         }
     }
-    
+
     /// Get bus levels (for UI)
     pub fn get_bus_levels(&self) -> Vec<(String, ChannelLevels)> {
-        let buses = self.bus_sends.get_buses();
+        // We must map each bus to its fixed slot index and read the level
+        // from `bus_levels` using that slot. Use the compact active list
+        // returned by `get_buses()` so ordering matches the UI.
+        let buses = self.get_buses();
         let levels = self.bus_levels.read();
-        
-        buses.iter().enumerate()
-            .map(|(idx, bus)| {
-                let level = if idx < MAX_BUSES {
-                    levels[idx]
+
+        let mut out: Vec<(String, ChannelLevels)> = Vec::with_capacity(buses.len());
+        for bus in buses.iter() {
+            if let Some(idx) = self.bus_sends.get_bus_index(&bus.id) {
+                if idx < MAX_BUSES {
+                    out.push((bus.id.clone(), levels[idx]));
                 } else {
-                    ChannelLevels::default()
-                };
-                (bus.id.clone(), level)
-            })
-            .collect()
+                    out.push((bus.id.clone(), ChannelLevels::default()));
+                }
+            } else {
+                out.push((bus.id.clone(), ChannelLevels::default()));
+            }
+        }
+        out
     }
 }
 

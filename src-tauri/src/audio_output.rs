@@ -24,6 +24,8 @@ use std::sync::{Arc, LazyLock};
 
 // Stable master output device id (u32::MAX == none)
 static MASTER_DEVICE: AtomicU32 = AtomicU32::new(u32::MAX);
+// Master busy flag to indicate master is actively processing buses
+static MASTER_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Sample rate for audio output
 const SAMPLE_RATE: f64 = 48000.0;
@@ -309,11 +311,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             };
 
             // Occasional lightweight RT log to observe master and advancement
-            if total % 500 == 0 {
-                let master_disp = if master_device == u32::MAX { 0 } else { master_device };
-                println!("[AudioOutput] device={} master={} advanced={} sample_counter={}",
-                    dev_id_for_callback, master_disp, did_advance, sample_counter);
-            }
+            // if total % 500 == 0 {
+            //     let master_disp = if master_device == u32::MAX { 0 } else { master_device };
+            //     println!("[AudioOutput] device={} master={} advanced={} sample_counter={}",
+            //         dev_id_for_callback, master_disp, did_advance, sample_counter);
+            // }
 
             let au_manager = get_au_manager();
             let bus_count = buses.len().min(64);
@@ -361,10 +363,10 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
                     if bus_buffers[bus_idx].is_valid(sample_counter) {
                         // Occasional cache-hit log to help diagnose multi-output reprocessing
-                        if total % 200 == 0 {
-                            println!("[AudioOutput] device={} cache hit bus {} sample_counter={}",
-                                dev_id_for_callback, bus_idx, sample_counter);
-                        }
+                        // if total % 200 == 0 {
+                        //     mlog!("[AudioOutput] device={} cache hit bus {} sample_counter={}",
+                        //         dev_id_for_callback, bus_idx, sample_counter);
+                        // }
                         continue; // Already cached this cycle
                     }
 
@@ -499,10 +501,10 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     if !bus.plugin_ids.is_empty() {
                         let bus_buf = &mut bus_buffers[bus_idx];
                         // Throttle debug logging to avoid spamming the real-time callback
-                        if total % 1000 == 0 {
-                            println!("[AudioOutput] device={} processing bus {} (plugins={:?}) sample_counter={}",
-                                dev_id_for_callback, bus_idx, bus.plugin_ids, sample_counter);
-                        }
+                        // if total % 1000 == 0 {
+                        //     mlog!("[AudioOutput] device={} processing bus {} (plugins={:?}) sample_counter={}",
+                        //         dev_id_for_callback, bus_idx, bus.plugin_ids, sample_counter);
+                        // }
                         au_manager.process_chain(
                             &bus.plugin_ids,
                             &mut bus_buf.left[..frames],

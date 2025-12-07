@@ -418,6 +418,13 @@ fn get_bus_levels() -> Vec<BusLevelInfo> {
         .collect()
 }
 
+/// Reserve a bus id and mark the slot (returns e.g. "bus_1")
+#[tauri::command]
+fn reserve_bus_id() -> Option<String> {
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.reserve_bus_id()
+}
+
 /// Add or update a bus send (Input -> Bus, Bus -> Bus, or Bus -> Output)
 /// source_type: "input" or "bus"
 /// target_type: "bus" or "output"
@@ -1127,6 +1134,7 @@ pub fn run() {
             set_bus_plugins,
             get_buses,
             get_bus_levels,
+            reserve_bus_id,
             update_bus_send,
             remove_bus_send,
             // AudioUnit commands

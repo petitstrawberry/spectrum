@@ -42,6 +42,8 @@ import {
   stopInputCapture,
   getActiveInputCaptures,
   getInputDeviceLevels,
+  getBusLevels,
+  reserveBusId,
   openPrismApp,
   startAudioOutput,
   stopAudioOutput,
@@ -67,6 +69,7 @@ import {
   type InputDeviceInfo,
   type ActiveCaptureInfo,
   type AudioUnitPluginInfo,
+  type BusLevelInfo,
 } from './lib/prismd';
 
 // --- Types ---
@@ -136,7 +139,7 @@ const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   Settings, Search, Maximize2, Grid, Workflow, Music, MessageSquare, Gamepad2,
   Headphones, Radio, Globe, Speaker, LogOut, Link: LinkIcon, Plus, Trash2,
   Monitor, Video, RefreshCw, Volume2, Mic, ExternalLink, Cast,
-};
+}
 
 function iconToName(icon: React.ComponentType<{ className?: string }>): string {
   for (const [name, component] of Object.entries(ICON_MAP)) {
@@ -474,6 +477,8 @@ export default function App() {
   const [inputLevels, setInputLevels] = useState<LevelData[]>([]);
   // Per-device level meters (device_id -> levels)
   const [deviceLevelsMap, setDeviceLevelsMap] = useState<Map<number, LevelData[]>>(new Map());
+  // Per-bus level meters (bus_id -> levels)
+  const [busLevelsMap, setBusLevelsMap] = useState<Map<string, BusLevelInfo>>(new Map());
 
   // dB input editing state
   const [editingDbNodeId, setEditingDbNodeId] = useState<string | null>(null);
@@ -621,8 +626,9 @@ export default function App() {
               deviceName: sn.device_name,
               channelMode: sn.channel_mode as ChannelMode,
               available,
-              // Restore busId from saved value or extract from libraryId for bus nodes
-              busId: sn.bus_id ?? (sn.node_type === 'bus' ? sn.library_id.replace('bus_', '') : undefined),
+              // Restore busId from saved value or use full libraryId for bus nodes
+              // (keep the "bus_N" format consistent)
+              busId: sn.bus_id ?? (sn.node_type === 'bus' ? sn.library_id : undefined),
               // Temporarily store saved plugins (will be recreated with new instance IDs)
               plugins: sn.plugins?.map(p => ({
                 id: p.id,  // Old instance ID (will be replaced)
@@ -651,16 +657,17 @@ export default function App() {
           setNodes(restoredNodes);
           setConnections(restoredConnections);
 
-          // Restore busCounter to max bus number found
+          // Restore busCounter to the next available bus number (max existing + 1)
           const maxBusNumber = restoredNodes
             .filter(n => n.type === 'bus' && n.busId)
             .map(n => {
-              const match = n.busId?.match(/^(\d+)$/);
-              return match ? parseInt(match[1]) : 0;
+              // Accept either "bus_N" or "N" formats and extract the numeric part
+              const match = n.busId?.match(/(?:^bus_)?(\d+)$/);
+              return match ? parseInt(match[1], 10) : 0;
             })
             .reduce((max, num) => Math.max(max, num), 0);
           if (maxBusNumber > 0) {
-            setBusCounter(maxBusNumber);
+            setBusCounter(maxBusNumber + 1);
           }
 
           // Set focused output to first available target, or first target
@@ -1125,6 +1132,22 @@ export default function App() {
               }
               return newMap;
             });
+          }
+
+          // 3. Get bus levels
+          try {
+            const busLevels = await getBusLevels();
+            if (busLevels && busLevels.length > 0) {
+              setBusLevelsMap(prev => {
+                const m = new Map(prev);
+                for (const bl of busLevels) {
+                  m.set(bl.id, bl);
+                }
+                return m;
+              });
+            }
+          } catch (err) {
+            // ignore bus level fetch errors
           }
         } catch (error) {
           errorCount++;
@@ -3046,19 +3069,48 @@ export default function App() {
               <Workflow className="w-3 h-3" /> Buses / Aux
             </div>
             <button
-              onClick={() => {
-                // Create a new bus at center of canvas
+              onClick={async () => {
+                // Reserve bus id from backend to avoid race on numbering
+                const reserved = await reserveBusId().catch((e) => { console.error('reserveBusId failed', e); return null; });
+                if (!reserved) {
+                  console.error('[Spectrum] Failed to reserve bus id');
+                  return;
+                }
+
+                // Parse number for local counter (bus id format: "bus_N")
+                const m = reserved.match(/^bus_(\d+)$/);
+                const num = m ? parseInt(m[1], 10) : null;
+                if (num && num >= busCounter) setBusCounter(num + 1);
+
+                // Create node for reserved bus id at center of canvas
                 const centerX = 400;
                 const centerY = 250;
-                const busNode = createNode('new_bus', 'bus', centerX, centerY);
+                const colorIndex = ((num || 1) - 1) % BUS_COLORS.length;
+                const busNode: NodeData = {
+                  id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  libraryId: reserved,
+                  type: 'bus',
+                  label: `Bus ${num ?? ''}`,
+                  subLabel: 'Stereo',
+                  icon: Workflow,
+                  color: BUS_COLORS[colorIndex],
+                  x: centerX,
+                  y: centerY,
+                  volume: dbToFader(0),
+                  muted: false,
+                  channelCount: 2,
+                  channelMode: 'stereo',
+                  available: true,
+                  busId: reserved,
+                  plugins: [],
+                };
+
                 setNodes(prev => [...prev, busNode]);
 
-                // Register bus in backend
-                if (busNode.busId) {
-                  addBus(busNode.busId, busNode.label, busNode.channelCount)
-                    .then(() => console.log(`[Spectrum] Registered bus ${busNode.busId} in backend`))
-                    .catch(console.error);
-                }
+                // Register bus metadata in backend (slot already reserved)
+                addBus(busNode.busId!, busNode.label, busNode.channelCount)
+                  .then(() => console.log(`[Spectrum] Registered bus ${busNode.busId} in backend`))
+                  .catch(console.error);
               }}
               className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-dashed border-purple-500/50 bg-purple-500/10 hover:bg-purple-500/20 hover:border-purple-400 text-purple-400 hover:text-purple-300 transition-all text-xs font-medium"
             >
@@ -3523,6 +3575,22 @@ export default function App() {
                     const isRightCh = fromChannel % 2 === 1;
                     leftDb = levelData ? rmsToDb(isRightCh ? levelData.right_peak : levelData.left_peak) : -60;
                     rightDb = leftDb; // Mono display
+                  }
+                } else if (isBusNode) {
+                  // Bus node: use busLevelsMap fetched from backend
+                  const busId = node.busId;
+                  const busLevel = busId ? busLevelsMap.get(busId) : undefined;
+                  if (busLevel) {
+                    // busLevel contains RMS/peak per bus (stereo)
+                    leftDb = rmsToDb(busLevel.left_peak);
+                    rightDb = rmsToDb(busLevel.right_peak);
+                  } else {
+                    leftDb = -60;
+                    rightDb = -60;
+                  }
+                  // If mono display expected, mirror L->R
+                  if (!isStereoLinked) {
+                    rightDb = leftDb;
                   }
                 } else {
                   const channelOffset = node.channelOffset ?? 0;

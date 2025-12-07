@@ -501,6 +501,14 @@ export interface BusInfo {
   muted: boolean;
 }
 
+export interface BusLevelInfo {
+  id: string;
+  left_rms: number;
+  right_rms: number;
+  left_peak: number;
+  right_peak: number;
+}
+
 // --- Bus API Functions ---
 
 /**
@@ -543,6 +551,20 @@ export async function setBusPlugins(busId: string, pluginIds: string[]): Promise
  */
 export async function getBuses(): Promise<BusInfo[]> {
   return invoke<BusInfo[]>('get_buses');
+}
+
+/**
+ * Get current bus levels (for UI meters)
+ */
+export async function getBusLevels(): Promise<BusLevelInfo[]> {
+  return invoke<BusLevelInfo[]>('get_bus_levels');
+}
+
+/**
+ * Reserve a bus id from backend and mark the slot (returns e.g. "bus_1")
+ */
+export async function reserveBusId(): Promise<string | null> {
+  return invoke<string | null>('reserve_bus_id');
 }
 
 /**

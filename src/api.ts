@@ -175,6 +175,15 @@ export async function getBusLevels(): Promise<BusLevelInfo[]> {
   }
 }
 
+export async function reserveBusId(): Promise<string | null> {
+  try {
+    return await invoke<string | null>('reserve_bus_id');
+  } catch (error) {
+    console.error('Failed to reserve bus id:', error);
+    return null;
+  }
+}
+
 /**
  * Add or update a bus send (Input -> Bus, Bus -> Bus, or Bus -> Output)
  * @param sourceType - "input" or "bus"
