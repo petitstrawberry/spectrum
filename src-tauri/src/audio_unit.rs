@@ -3,12 +3,16 @@
 //! This module handles AudioUnit discovery, instantiation, and processing.
 //! Uses CoreAudio's AudioComponent API to enumerate and manage AudioUnits.
 
+use block2::RcBlock;
+use objc2::runtime::AnyObject;
+use objc2::{class, msg_send, Encode, Encoding, RefEncode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{c_void, CStr};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 // CoreAudio bindings
 #[allow(non_upper_case_globals)]
@@ -344,10 +348,59 @@ pub fn get_generator_audio_units() -> Vec<AudioUnitInfo> {
 /// Maximum frames per buffer for AU processing
 pub const AU_MAX_FRAMES: usize = 4096;
 
+// AudioComponentDescription for AUAudioUnit instantiation
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AUComponentDescription {
+    pub component_type: u32,
+    pub component_sub_type: u32,
+    pub component_manufacturer: u32,
+    pub component_flags: u32,
+    pub component_flags_mask: u32,
+}
+
+unsafe impl Encode for AUComponentDescription {
+    const ENCODING: Encoding = Encoding::Struct(
+        "AudioComponentDescription",
+        &[
+            Encoding::UInt,
+            Encoding::UInt,
+            Encoding::UInt,
+            Encoding::UInt,
+            Encoding::UInt,
+        ],
+    );
+}
+
+unsafe impl RefEncode for AUComponentDescription {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+// CoreFoundation RunLoop functions
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, returnAfterSourceHandled: bool) -> i32;
+}
+
+fn get_default_run_loop_mode() -> *const c_void {
+    extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+    }
+    unsafe { kCFRunLoopDefaultMode }
+}
+
+/// Wrapper for raw pointers to make them Send + Sync
+#[derive(Clone, Copy)]
+pub struct SendSyncPtr(pub *mut AnyObject);
+unsafe impl Send for SendSyncPtr {}
+unsafe impl Sync for SendSyncPtr {}
+
 /// AudioUnit instance wrapper
 pub struct AudioUnitInstance {
-    /// AudioUnit handle
+    /// AudioUnit handle (legacy AUv2)
     unit: AudioComponentInstance,
+    /// AUAudioUnit instance (AUv3 Objective-C object)
+    au_audio_unit: Option<SendSyncPtr>,
     /// Plugin info
     pub info: AudioUnitInfo,
     /// Enabled state
@@ -363,6 +416,7 @@ unsafe impl Sync for AudioUnitInstance {}
 
 impl AudioUnitInstance {
     /// Create a new AudioUnit instance from info
+    /// This creates both the legacy AudioComponentInstance and the modern AUAudioUnit
     pub fn new(info: &AudioUnitInfo, instance_id: String) -> Result<Self, String> {
         // Find the component
         let desc = AudioComponentDescription {
@@ -395,8 +449,12 @@ impl AudioUnitInstance {
                 return Err(format!("Failed to initialize AudioUnit: OSStatus {}", status));
             }
             
+            // Also create AUAudioUnit for UI support
+            let au_audio_unit = Self::create_au_audio_unit(info)?;
+            
             Ok(Self {
                 unit: instance,
+                au_audio_unit: Some(SendSyncPtr(au_audio_unit)),
                 info: info.clone(),
                 enabled: true,
                 instance_id,
@@ -404,15 +462,197 @@ impl AudioUnitInstance {
         }
     }
     
-    /// Get the raw AudioUnit handle (for Cocoa UI)
+    /// Create AUAudioUnit instance using Objective-C API
+    fn create_au_audio_unit(info: &AudioUnitInfo) -> Result<*mut AnyObject, String> {
+        let desc = AUComponentDescription {
+            component_type: info.type_code,
+            component_sub_type: info.subtype_code,
+            component_manufacturer: info.manufacturer_code,
+            component_flags: 0,
+            component_flags_mask: 0,
+        };
+        
+        unsafe {
+            let au_audio_unit_class = class!(AUAudioUnit);
+            
+            // Result holder with atomic flag for completion
+            let result: Arc<Mutex<Option<*mut AnyObject>>> = Arc::new(Mutex::new(None));
+            let result_clone = Arc::clone(&result);
+            let done = Arc::new(AtomicBool::new(false));
+            let done_clone = Arc::clone(&done);
+            
+            // Create the completion handler block
+            let block = RcBlock::new(move |au_audio_unit: *mut AnyObject, error: *mut AnyObject| {
+                if !error.is_null() {
+                    println!("[AudioUnit] AUAudioUnit instantiation error");
+                }
+                
+                if !au_audio_unit.is_null() {
+                    // Retain the AUAudioUnit to prevent deallocation
+                    let _: () = msg_send![au_audio_unit, retain];
+                    *result_clone.lock().unwrap() = Some(au_audio_unit);
+                }
+                
+                done_clone.store(true, Ordering::SeqCst);
+            });
+            
+            // Call instantiateWithComponentDescription:options:completionHandler:
+            let _: () = msg_send![
+                au_audio_unit_class,
+                instantiateWithComponentDescription: desc
+                options: 0u32
+                completionHandler: &*block
+            ];
+            
+            // Run the RunLoop to allow completion handler to be called
+            let start_time = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(10);
+            let mode = get_default_run_loop_mode();
+            
+            while !done.load(Ordering::SeqCst) {
+                if start_time.elapsed() > timeout {
+                    return Err("Timed out waiting for AUAudioUnit instantiation".to_string());
+                }
+                CFRunLoopRunInMode(mode, 0.01, false);
+            }
+            
+            let au_audio_unit = result.lock().unwrap().take();
+            
+            match au_audio_unit {
+                Some(au) => {
+                    println!("[AudioUnit] Successfully instantiated AUAudioUnit: {:?}", au);
+                    Ok(au)
+                }
+                None => Err("Failed to instantiate AUAudioUnit".to_string()),
+            }
+        }
+    }
+    
+    /// Get the raw AudioUnit handle (for legacy AUv2)
     pub fn get_handle(&self) -> AudioComponentInstance {
         self.unit
+    }
+    
+    /// Get the AUAudioUnit instance (for AUv3 UI)
+    pub fn get_au_audio_unit(&self) -> Option<*mut AnyObject> {
+        self.au_audio_unit.map(|p| p.0)
+    }
+    
+    /// Get the plugin's full state (all parameters and data) as a plist data
+    /// Returns None if no AUAudioUnit or if state couldn't be retrieved
+    pub fn get_full_state(&self) -> Option<Vec<u8>> {
+        let au = self.au_audio_unit?.0;
+        if au.is_null() {
+            return None;
+        }
+        
+        unsafe {
+            // Get fullState property (NSDictionary*)
+            let full_state: *mut AnyObject = msg_send![au, fullState];
+            if full_state.is_null() {
+                println!("[AudioUnit] fullState is nil for {}", self.info.name);
+                return None;
+            }
+            
+            // Convert NSDictionary to plist data using NSPropertyListSerialization
+            let plist_class = class!(NSPropertyListSerialization);
+            let error_ptr: *mut *mut AnyObject = &mut std::ptr::null_mut();
+            
+            // dataWithPropertyList:format:options:error:
+            // format = NSPropertyListBinaryFormat_v1_0 = 200
+            let plist_data: *mut AnyObject = msg_send![
+                plist_class,
+                dataWithPropertyList: full_state
+                format: 200i64
+                options: 0i64
+                error: error_ptr
+            ];
+            
+            if plist_data.is_null() {
+                println!("[AudioUnit] Failed to serialize fullState for {}", self.info.name);
+                return None;
+            }
+            
+            // Get bytes from NSData
+            let length: usize = msg_send![plist_data, length];
+            let bytes: *const u8 = msg_send![plist_data, bytes];
+            
+            if bytes.is_null() || length == 0 {
+                println!("[AudioUnit] Empty plist data for {}", self.info.name);
+                return None;
+            }
+            
+            let data = std::slice::from_raw_parts(bytes, length).to_vec();
+            println!("[AudioUnit] Got fullState ({} bytes) for {}", data.len(), self.info.name);
+            Some(data)
+        }
+    }
+    
+    /// Set the plugin's full state from plist data
+    /// Returns true if successful
+    pub fn set_full_state(&mut self, data: &[u8]) -> bool {
+        let au = match self.au_audio_unit {
+            Some(SendSyncPtr(au)) if !au.is_null() => au,
+            _ => return false,
+        };
+        
+        if data.is_empty() {
+            return false;
+        }
+        
+        unsafe {
+            // Create NSData from bytes
+            let ns_data_class = class!(NSData);
+            let ns_data: *mut AnyObject = msg_send![
+                ns_data_class,
+                dataWithBytes: data.as_ptr()
+                length: data.len()
+            ];
+            
+            if ns_data.is_null() {
+                println!("[AudioUnit] Failed to create NSData for {}", self.info.name);
+                return false;
+            }
+            
+            // Parse plist data to NSDictionary using NSPropertyListSerialization
+            let plist_class = class!(NSPropertyListSerialization);
+            let error_ptr: *mut *mut AnyObject = &mut std::ptr::null_mut();
+            
+            // propertyListWithData:options:format:error:
+            // options = NSPropertyListImmutable = 0
+            let mut format: i64 = 0;
+            let full_state: *mut AnyObject = msg_send![
+                plist_class,
+                propertyListWithData: ns_data
+                options: 0i64
+                format: &mut format as *mut i64
+                error: error_ptr
+            ];
+            
+            if full_state.is_null() {
+                println!("[AudioUnit] Failed to parse plist data for {}", self.info.name);
+                return false;
+            }
+            
+            // Set fullState property
+            let _: () = msg_send![au, setFullState: full_state];
+            println!("[AudioUnit] Set fullState ({} bytes) for {}", data.len(), self.info.name);
+            true
+        }
     }
 }
 
 impl Drop for AudioUnitInstance {
     fn drop(&mut self) {
         unsafe {
+            // Release AUAudioUnit if present
+            if let Some(SendSyncPtr(au)) = self.au_audio_unit.take() {
+                if !au.is_null() {
+                    println!("[AudioUnit] Releasing AUAudioUnit: {:?}", au);
+                    let _: () = msg_send![au, release];
+                }
+            }
+            
             if !self.unit.is_null() {
                 // Uninitialize before disposing
                 AudioUnitUninitialize(self.unit);
@@ -459,6 +699,8 @@ impl AudioUnitManager {
     
     /// Remove an instance
     pub fn remove_instance(&self, id: &str) -> bool {
+        // Clean up cached view controller before removing the instance
+        crate::audio_unit_ui::cleanup_cached_view_controller(id);
         self.instances.write().remove(id).is_some()
     }
     

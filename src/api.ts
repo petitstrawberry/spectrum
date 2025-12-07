@@ -228,3 +228,29 @@ export async function removeBusSend(
     throw error;
   }
 }
+
+// --- AudioUnit State API Functions ---
+
+/**
+ * Get the plugin state for saving (base64 encoded plist data)
+ */
+export async function getAudioUnitState(instanceId: string): Promise<string | null> {
+  try {
+    return await invoke<string | null>('get_audio_unit_state', { instanceId });
+  } catch (error) {
+    console.error('Failed to get AudioUnit state:', error);
+    return null;
+  }
+}
+
+/**
+ * Set the plugin state for restoring (base64 encoded plist data)
+ */
+export async function setAudioUnitState(instanceId: string, state: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>('set_audio_unit_state', { instanceId, state });
+  } catch (error) {
+    console.error('Failed to set AudioUnit state:', error);
+    return false;
+  }
+}

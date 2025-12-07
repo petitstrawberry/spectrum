@@ -55,6 +55,8 @@ import {
   createAudioUnitInstance,
   removeAudioUnitInstance,
   openAudioUnitUI,
+  getAudioUnitState,
+  setAudioUnitState,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -78,11 +80,13 @@ type ChannelMode = 'mono' | 'stereo';
 
 // AudioUnit Plugin info
 interface AudioUnitPlugin {
-  id: string;
+  id: string;        // Instance ID (e.g., "au_1")
+  pluginId: string;  // Plugin type ID (e.g., "aufx:xxxx:yyyy")
   name: string;
   manufacturer: string;
   type: string; // 'effect', 'instrument', etc.
   enabled: boolean;
+  state?: string;    // Base64 encoded plugin state (for save/restore)
 }
 
 interface NodeData {
@@ -618,7 +622,16 @@ export default function App() {
               available,
               // Restore busId from saved value or extract from libraryId for bus nodes
               busId: sn.bus_id ?? (sn.node_type === 'bus' ? sn.library_id.replace('bus_', '') : undefined),
-              plugins: sn.plugins,
+              // Temporarily store saved plugins (will be recreated with new instance IDs)
+              plugins: sn.plugins?.map(p => ({
+                id: p.id,  // Old instance ID (will be replaced)
+                pluginId: p.plugin_id,
+                name: p.name,
+                manufacturer: p.manufacturer,
+                type: p.type,
+                enabled: p.enabled,
+                state: p.state,  // Preserved state for restoration
+              })),
             };
           });
 
@@ -731,6 +744,56 @@ export default function App() {
             // Wait for all buses to be registered before setting up connections
             await Promise.all(busPromises);
             console.log(`[Spectrum] All buses registered, now establishing connections...`);
+
+            // Recreate AudioUnit plugin instances for bus nodes
+            const pluginPromises: Promise<void>[] = [];
+            for (const bus of busNodes) {
+              if (bus.plugins && bus.plugins.length > 0) {
+                for (let i = 0; i < bus.plugins.length; i++) {
+                  const plugin = bus.plugins[i];
+                  if (plugin.pluginId) {
+                    const savedState = plugin.state;  // Save the state before async operation
+                    pluginPromises.push(
+                      createAudioUnitInstance(plugin.pluginId)
+                        .then(async (newInstanceId) => {
+                          console.log(`[Spectrum] Recreated plugin instance: ${plugin.name} -> ${newInstanceId}`);
+                          
+                          // Restore plugin state if available
+                          if (savedState) {
+                            try {
+                              const restored = await setAudioUnitState(newInstanceId, savedState);
+                              if (restored) {
+                                console.log(`[Spectrum] Restored plugin state for ${plugin.name}`);
+                              } else {
+                                console.warn(`[Spectrum] Failed to restore plugin state for ${plugin.name}`);
+                              }
+                            } catch (err) {
+                              console.error(`[Spectrum] Error restoring plugin state for ${plugin.name}:`, err);
+                            }
+                          }
+                          
+                          // Update the plugin's instance ID in the nodes state
+                          setNodes(prev => prev.map(n => {
+                            if (n.id === bus.id && n.plugins) {
+                              const updatedPlugins = [...n.plugins];
+                              if (updatedPlugins[i]) {
+                                updatedPlugins[i] = { ...updatedPlugins[i], id: newInstanceId };
+                              }
+                              return { ...n, plugins: updatedPlugins };
+                            }
+                            return n;
+                          }));
+                        })
+                        .catch(err => {
+                          console.error(`[Spectrum] Failed to recreate plugin ${plugin.name}:`, err);
+                        })
+                    );
+                  }
+                }
+              }
+            }
+            await Promise.all(pluginPromises);
+            console.log(`[Spectrum] All plugin instances recreated`);
 
             console.log(`[Spectrum] Re-establishing ${restoredConnections.length} connections...`);
             for (const conn of restoredConnections) {
@@ -901,7 +964,14 @@ export default function App() {
         device_name: n.deviceName,
         channel_mode: n.channelMode,
         bus_id: n.busId,
-        plugins: n.plugins,
+        plugins: n.plugins?.map(p => ({
+          id: p.id,
+          plugin_id: p.pluginId,
+          name: p.name,
+          manufacturer: p.manufacturer,
+          type: p.type,
+          enabled: p.enabled,
+        })),
       })),
       saved_connections: connections.map(c => ({
         id: c.id,
@@ -932,6 +1002,25 @@ export default function App() {
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         const state = buildAppState();
+        
+        // Fetch plugin states for all plugins before saving
+        if (state.saved_nodes) {
+          for (const node of state.saved_nodes) {
+            if (node.plugins && node.plugins.length > 0) {
+              const pluginsWithState = await Promise.all(
+                node.plugins.map(async (p) => {
+                  const pluginState = await getAudioUnitState(p.id);
+                  return {
+                    ...p,
+                    state: pluginState ?? undefined,
+                  };
+                })
+              );
+              node.plugins = pluginsWithState;
+            }
+          }
+        }
+        
         await saveAppState(state);
         console.log('[Spectrum] Auto-saved state');
       } catch (error) {
@@ -4284,6 +4373,7 @@ export default function App() {
                                   // Add to bus plugins
                                   const newPlugin: AudioUnitPlugin = {
                                     id: instanceId,
+                                    pluginId: plugin.id,  // Store the plugin type ID
                                     name: plugin.name,
                                     manufacturer: plugin.manufacturer,
                                     type: plugin.plugin_type,

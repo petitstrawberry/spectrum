@@ -568,16 +568,49 @@ fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
     
     let instance = instance.read();
-    let handle = instance.get_handle();
+    let au_audio_unit = instance.get_au_audio_unit()
+        .ok_or_else(|| format!("AUAudioUnit not available for instance: {}", instance_id))?;
     let name = instance.info.name.clone();
     
-    audio_unit_ui::open_audio_unit_ui(&instance_id, handle, &name)
+    audio_unit_ui::open_audio_unit_ui(&instance_id, au_audio_unit, &name)
 }
 
 /// Close AudioUnit plugin UI window
 #[tauri::command]
 fn close_audio_unit_ui(instance_id: String) {
     audio_unit_ui::close_audio_unit_ui(&instance_id);
+}
+
+/// Get AudioUnit plugin state (for saving)
+#[tauri::command]
+fn get_audio_unit_state(instance_id: String) -> Result<Option<String>, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    
+    let manager = audio_unit::get_au_manager();
+    let instance = manager.get_instance(&instance_id)
+        .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
+    
+    let instance = instance.read();
+    match instance.get_full_state() {
+        Some(data) => Ok(Some(STANDARD.encode(&data))),
+        None => Ok(None),
+    }
+}
+
+/// Set AudioUnit plugin state (for restoring)
+#[tauri::command]
+fn set_audio_unit_state(instance_id: String, state: String) -> Result<bool, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    
+    let manager = audio_unit::get_au_manager();
+    let instance = manager.get_instance(&instance_id)
+        .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
+    
+    let data = STANDARD.decode(&state)
+        .map_err(|e| format!("Failed to decode base64 state: {}", e))?;
+    
+    let mut instance = instance.write();
+    Ok(instance.set_full_state(&data))
 }
 
 /// Check if AudioUnit plugin UI window is open
@@ -630,12 +663,15 @@ pub struct OutputRoutingInfo {
 /// Saved plugin data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPlugin {
-    pub id: String,
+    pub id: String,                // Instance ID (e.g., "au_1")
+    pub plugin_id: String,         // Plugin type ID (e.g., "aufx:xxxx:yyyy")
     pub name: String,
     pub manufacturer: String,
     #[serde(rename = "type")]
     pub plugin_type: String,
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,     // Base64 encoded plugin state (plist data)
 }
 
 /// Saved node data (serializable version of frontend NodeData)
@@ -735,10 +771,12 @@ fn get_app_state() -> AppState {
             bus_id: n.bus_id,
             plugins: n.plugins.map(|ps| ps.into_iter().map(|p| SavedPlugin {
                 id: p.id,
+                plugin_id: p.plugin_id,
                 name: p.name,
                 manufacturer: p.manufacturer,
                 plugin_type: p.plugin_type,
                 enabled: p.enabled,
+                state: p.state,
             }).collect()),
         }).collect(),
         saved_connections: cfg.saved_connections.into_iter().map(|c| SavedConnection {
@@ -800,10 +838,12 @@ async fn save_app_state(state: AppState) -> Result<(), String> {
             bus_id: n.bus_id,
             plugins: n.plugins.map(|ps| ps.into_iter().map(|p| config::SavedPlugin {
                 id: p.id,
+                plugin_id: p.plugin_id,
                 name: p.name,
                 manufacturer: p.manufacturer,
                 plugin_type: p.plugin_type,
                 enabled: p.enabled,
+                state: p.state,
             }).collect()),
         }).collect(),
         saved_connections: state.saved_connections.into_iter().map(|c| config::SavedConnection {
@@ -1003,6 +1043,8 @@ pub fn run() {
             open_audio_unit_ui,
             close_audio_unit_ui,
             is_audio_unit_ui_open,
+            get_audio_unit_state,
+            set_audio_unit_state,
             // Config commands
             get_app_state,
             save_app_state,

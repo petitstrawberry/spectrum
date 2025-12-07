@@ -79,12 +79,15 @@ pub struct SavedNode {
 /// Saved AudioUnit plugin data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPlugin {
-    pub id: String,
+    pub id: String,                // Instance ID (e.g., "au_1")
+    pub plugin_id: String,         // Plugin type ID (e.g., "aufx:xxxx:yyyy")
     pub name: String,
     pub manufacturer: String,
     #[serde(rename = "type")]
     pub plugin_type: String,  // "effect" or "instrument"
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,     // Base64 encoded plugin state (plist data)
 }
 
 /// Saved connection data

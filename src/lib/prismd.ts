@@ -406,11 +406,13 @@ export interface OutputRoutingInfo {
 
 /** Saved AudioUnit plugin data */
 export interface SavedPlugin {
-  id: string;
+  id: string;         // Instance ID (e.g., "au_1")
+  plugin_id: string;  // Plugin type ID (e.g., "aufx:xxxx:yyyy")
   name: string;
   manufacturer: string;
   type: string;  // "effect" or "instrument"
   enabled: boolean;
+  state?: string;     // Base64 encoded plugin state (plist data)
 }
 
 /** Saved node data (serializable version of frontend NodeData) */
@@ -678,4 +680,18 @@ export async function closeAudioUnitUI(instanceId: string): Promise<void> {
  */
 export async function isAudioUnitUIOpen(instanceId: string): Promise<boolean> {
   return invoke<boolean>('is_audio_unit_ui_open', { instanceId });
+}
+
+/**
+ * Get the plugin state for saving (base64 encoded plist data)
+ */
+export async function getAudioUnitState(instanceId: string): Promise<string | null> {
+  return invoke<string | null>('get_audio_unit_state', { instanceId });
+}
+
+/**
+ * Set the plugin state for restoring (base64 encoded plist data)
+ */
+export async function setAudioUnitState(instanceId: string, state: string): Promise<boolean> {
+  return invoke<boolean>('set_audio_unit_state', { instanceId, state });
 }

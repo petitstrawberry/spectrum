@@ -80,20 +80,28 @@ extern "C" {
     fn AudioComponentCopyName(inComponent: *mut c_void, outName: *mut *mut c_void) -> i32;
 }
 
+// Wrapper for raw pointers to make them Send + Sync
+#[derive(Clone, Copy)]
+struct SendSyncPtr(*mut AnyObject);
+unsafe impl Send for SendSyncPtr {}
+unsafe impl Sync for SendSyncPtr {}
+
 // Store open plugin window numbers (i64 is Send + Sync)
 lazy_static::lazy_static! {
     static ref PLUGIN_WINDOW_NUMBERS: RwLock<HashMap<String, isize>> = RwLock::new(HashMap::new());
+    // Cache view controllers to prevent deallocation while window is open
+    static ref CACHED_VIEW_CONTROLLERS: RwLock<HashMap<String, SendSyncPtr>> = RwLock::new(HashMap::new());
 }
 
 /// Open a native window for an AudioUnit plugin's custom view
 /// 
 /// This function:
-/// 1. Gets the AudioUnit's CocoaUI view factory
+/// 1. Uses the existing AUAudioUnit instance to get the view controller
 /// 2. Creates an NSWindow
 /// 3. Embeds the AudioUnit's custom view in the window
 pub fn open_audio_unit_ui(
     instance_id: &str,
-    audio_unit: *mut c_void,
+    au_audio_unit: *mut AnyObject,
     plugin_name: &str,
 ) -> Result<(), String> {
     // Must run on main thread for UI operations
@@ -103,14 +111,24 @@ pub fn open_audio_unit_ui(
     };
     
     // Check if window is already open
-    if let Some(&window_number) = PLUGIN_WINDOW_NUMBERS.read().unwrap().get(instance_id) {
+    // 1) まず read ロックで現在のウィンドウ番号だけ読み取り、すぐにロックを解放する
+    // 2) 既存ウィンドウが存在しない場合だけ write ロックを取ってマップを更新する
+    let existing_window_number = {
+        let map = PLUGIN_WINDOW_NUMBERS.read().unwrap();
+        map.get(instance_id).copied()
+    };
+
+    if let Some(window_number) = existing_window_number {
         // Try to bring existing window to front
         if let Some(window) = get_window_by_number(window_number, mtm) {
             window.makeKeyAndOrderFront(None);
             return Ok(());
         } else {
             // Window was closed externally, remove from tracking
-            PLUGIN_WINDOW_NUMBERS.write().unwrap().remove(instance_id);
+            // Keep the cached view controller for reuse
+            let mut map = PLUGIN_WINDOW_NUMBERS.write().unwrap();
+            map.remove(instance_id);
+            drop(map);
         }
     }
     
@@ -140,10 +158,14 @@ pub fn open_audio_unit_ui(
     let title = NSString::from_str(&format!("{} - Plugin", plugin_name));
     window.setTitle(&title);
     
-    // Get AudioUnit's CocoaUI view
-    // Note: This requires calling AudioUnitGetProperty with kAudioUnitProperty_CocoaUI
-    // to get the view factory class, then instantiating it
-    let view = get_audio_unit_view(audio_unit)?;
+    // Set floating window level (always on top)
+    unsafe {
+        // NSFloatingWindowLevel = 3 (CGWindowLevelForKey(kCGFloatingWindowLevelKey))
+        let _: () = msg_send![&*window, setLevel: 3i64];
+    }
+    
+    // Get AudioUnit's view using existing AUAudioUnit instance
+    let view = get_audio_unit_view(instance_id, au_audio_unit)?;
     
     if let Some(au_view) = view {
         unsafe {
@@ -180,6 +202,10 @@ pub fn close_audio_unit_ui(instance_id: &str) {
         None => return,
     };
     
+    // Note: We keep the cached view controller alive so the window can be reopened.
+    // The view controller will be released when the AudioUnitInstance is dropped.
+    // We only need to remove the window tracking.
+    
     // Must be on main thread
     let mtm = match MainThreadMarker::new() {
         Some(m) => m,
@@ -187,6 +213,11 @@ pub fn close_audio_unit_ui(instance_id: &str) {
     };
     
     if let Some(window) = get_window_by_number(window_number, mtm) {
+        unsafe {
+            // Remove the content view from the window before closing
+            // to prevent the view from being deallocated with the window
+            let _: () = msg_send![&*window, setContentView: std::ptr::null::<AnyObject>()];
+        }
         window.close();
     }
 }
@@ -205,21 +236,36 @@ fn get_window_by_number(window_number: isize, mtm: MainThreadMarker) -> Option<R
     }
 }
 
-/// Get the AudioUnit's custom view
-/// Uses AUv3 (requestViewController) - no fallback, we don't give up!
-fn get_audio_unit_view(audio_unit: *mut c_void) -> Result<Option<*mut AnyObject>, String> {
-    if audio_unit.is_null() {
-        eprintln!("AudioUnit handle is null");
-        return Err("AudioUnit handle is null".to_string());
+/// Get the AudioUnit's custom view using existing AUAudioUnit instance
+/// Uses AUv3 requestViewController - reuses the same AUAudioUnit instance
+fn get_audio_unit_view(instance_id: &str, au_audio_unit: *mut AnyObject) -> Result<Option<*mut AnyObject>, String> {
+    if au_audio_unit.is_null() {
+        eprintln!("AUAudioUnit handle is null");
+        return Err("AUAudioUnit handle is null".to_string());
     }
     
-    println!("Getting AudioUnit view for handle: {:?}", audio_unit);
+    println!("Getting AudioUnit view for AUAudioUnit: {:?}, instance: {}", au_audio_unit, instance_id);
     
-    // Use AUv3 approach - retry up to 3 times if needed
+    // Check if we already have a cached view controller for this instance
+    if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+        if !vc.is_null() {
+            println!("Using cached view controller for {}", instance_id);
+            unsafe {
+                let view: *mut AnyObject = msg_send![vc, view];
+                if !view.is_null() {
+                    return Ok(Some(view));
+                }
+            }
+        }
+    }
+    
+    // Request view controller from existing AUAudioUnit instance
     for attempt in 1..=3 {
         println!("AUv3 view attempt {}/3", attempt);
-        if let Some(view) = try_get_auv3_view(audio_unit) {
+        if let Some((view, view_controller)) = request_view_controller(au_audio_unit) {
             println!("Successfully obtained AUv3 view on attempt {}", attempt);
+            // Cache the view controller to keep it alive
+            CACHED_VIEW_CONTROLLERS.write().unwrap().insert(instance_id.to_string(), SendSyncPtr(view_controller));
             return Ok(Some(view));
         }
         // Brief pause before retry
@@ -228,107 +274,16 @@ fn get_audio_unit_view(audio_unit: *mut c_void) -> Result<Option<*mut AnyObject>
         }
     }
     
-    println!("Failed to get AUv3 view after 3 attempts - but we don't give up!");
-    // Return None but don't fall back to anything else
+    println!("Failed to get AUv3 view after 3 attempts");
     Ok(None)
 }
 
-/// Try to get AUv3 view using AUAudioUnit.requestViewController
-fn try_get_auv3_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
+/// Request view controller from existing AUAudioUnit instance
+/// Returns (view, view_controller) tuple for caching
+fn request_view_controller(au_audio_unit: *mut AnyObject) -> Option<(*mut AnyObject, *mut AnyObject)> {
     unsafe {
-        // Get the AudioComponent from the instance
-        let component = AudioComponentInstanceGetComponent(audio_unit);
-        if component.is_null() {
-            println!("Failed to get AudioComponent from instance");
-            return None;
-        }
+        println!("Requesting view controller from AUAudioUnit: {:?}", au_audio_unit);
         
-        extern "C" {
-            fn AudioComponentGetDescription(
-                component: *mut c_void,
-                desc: *mut AudioComponentDescription,
-            ) -> i32;
-        }
-        
-        let mut desc = AudioComponentDescription {
-            component_type: 0,
-            component_sub_type: 0,
-            component_manufacturer: 0,
-            component_flags: 0,
-            component_flags_mask: 0,
-        };
-        
-        let status = AudioComponentGetDescription(component, &mut desc);
-        if status != 0 {
-            println!("Failed to get AudioComponent description: {}", status);
-            return None;
-        }
-        
-        println!("AudioComponent description: type={:08x}, subtype={:08x}, manufacturer={:08x}", 
-                 desc.component_type, desc.component_sub_type, desc.component_manufacturer);
-        
-        // Create an AUAudioUnit instance using the component description
-        // We need to use +[AUAudioUnit instantiateWithComponentDescription:options:completionHandler:]
-        // This is async - we run the RunLoop to allow callbacks on main thread
-        
-        let au_audio_unit_class = class!(AUAudioUnit);
-        
-        // Create result holder with atomic flag for completion
-        let result: Arc<Mutex<Option<*mut AnyObject>>> = Arc::new(Mutex::new(None));
-        let result_clone = Arc::clone(&result);
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = Arc::clone(&done);
-        
-        // Create the completion handler block
-        // void (^)(AUAudioUnit * _Nullable audioUnit, NSError * _Nullable error)
-        let block = RcBlock::new(move |au_audio_unit: *mut AnyObject, error: *mut AnyObject| {
-            if !error.is_null() {
-                println!("AUAudioUnit instantiation error");
-            }
-            
-            if !au_audio_unit.is_null() {
-                // Retain the AUAudioUnit to prevent deallocation
-                let _: () = msg_send![au_audio_unit, retain];
-                *result_clone.lock().unwrap() = Some(au_audio_unit);
-            }
-            
-            done_clone.store(true, Ordering::SeqCst);
-        });
-        
-        // Call instantiateWithComponentDescription:options:completionHandler:
-        // options = 0 (default)
-        let _: () = msg_send![
-            au_audio_unit_class,
-            instantiateWithComponentDescription: desc
-            options: 0u32
-            completionHandler: &*block
-        ];
-        
-        // Run the RunLoop to allow completion handler to be called on main thread
-        let start_time = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(10);
-        let mode = get_default_run_loop_mode();
-        
-        while !done.load(Ordering::SeqCst) {
-            if start_time.elapsed() > timeout {
-                println!("Timed out waiting for AUAudioUnit instantiation");
-                return None;
-            }
-            // Run the RunLoop for a short interval to process pending events
-            CFRunLoopRunInMode(mode, 0.01, false);
-        }
-        
-        let au_audio_unit = result.lock().unwrap().take();
-        
-        if au_audio_unit.is_none() {
-            println!("Failed to instantiate AUAudioUnit");
-            return None;
-        }
-        
-        let au_audio_unit = au_audio_unit.unwrap();
-        println!("Successfully instantiated AUAudioUnit: {:?}", au_audio_unit);
-        
-        // Now call requestViewControllerWithCompletionHandler:
         let view_result: Arc<Mutex<Option<*mut AnyObject>>> = Arc::new(Mutex::new(None));
         let view_result_clone = Arc::clone(&view_result);
         let view_done = Arc::new(AtomicBool::new(false));
@@ -348,6 +303,8 @@ fn try_get_auv3_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
         
         // Run the RunLoop to allow completion handler to be called
         let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
+        let mode = get_default_run_loop_mode();
         
         while !view_done.load(Ordering::SeqCst) {
             if start_time.elapsed() > timeout {
@@ -367,13 +324,7 @@ fn try_get_auv3_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
         let view_controller = view_controller.unwrap();
         println!("Got AUv3 view controller: {:?}", view_controller);
         
-        // Verify the view controller is still valid before accessing view
-        if view_controller.is_null() {
-            println!("View controller became null");
-            return None;
-        }
-        
-        // Get the view from the view controller - force loadView if needed
+        // Get the view from the view controller
         let _: () = msg_send![view_controller, loadViewIfNeeded];
         let view: *mut AnyObject = msg_send![view_controller, view];
         
@@ -383,7 +334,7 @@ fn try_get_auv3_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
         }
         
         println!("Successfully obtained AUv3 view: {:?}", view);
-        Some(view)
+        Some((view, view_controller))
     }
 }
 
@@ -602,6 +553,23 @@ pub fn close_all_plugin_windows() {
     for window_number in window_numbers {
         if let Some(window) = get_window_by_number(window_number, mtm) {
             window.close();
+        }
+    }
+}
+
+/// Clean up cached view controller when AudioUnit instance is removed
+/// This should be called when the AudioUnitInstance is dropped
+pub fn cleanup_cached_view_controller(instance_id: &str) {
+    // Close window if open
+    close_audio_unit_ui(instance_id);
+    
+    // Release cached view controller
+    if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.write().unwrap().remove(instance_id) {
+        if !vc.is_null() {
+            unsafe {
+                println!("[AudioUnit] Releasing cached view controller for {}", instance_id);
+                let _: () = msg_send![vc, release];
+            }
         }
     }
 }
