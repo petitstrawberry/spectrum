@@ -181,6 +181,22 @@ impl BusBuffer {
     }
 }
 
+impl Clone for BusBuffer {
+    fn clone(&self) -> Self {
+        let mut left = Box::new([0.0f32; MAX_FRAMES]);
+        let mut right = Box::new([0.0f32; MAX_FRAMES]);
+        let frames = self.valid_frames.min(MAX_FRAMES);
+        left[..frames].copy_from_slice(&self.left[..frames]);
+        right[..frames].copy_from_slice(&self.right[..frames]);
+        Self {
+            left,
+            right,
+            processed_at: self.processed_at,
+            valid_frames: self.valid_frames,
+        }
+    }
+}
+
 /// Global sample counter for cache invalidation
 /// Incremented each audio cycle by the first device to process
 pub struct SampleCounter {
@@ -1061,6 +1077,8 @@ pub struct MixerState {
     // ========== Lock-Free Snapshot for Audio Callback ==========
     /// Atomically swappable snapshot for lock-free audio callback access
     pub snapshot: ArcSwap<MixerSnapshot>,
+    /// Processed bus buffers produced by the master output for lock-free reads
+    pub processed_bus_buffers: ArcSwap<Vec<BusBuffer>>,
 }
 
 impl Default for MixerState {
@@ -1087,6 +1105,7 @@ impl MixerState {
             sample_rate: RwLock::new(48000),
             buffer_size: RwLock::new(128),
             snapshot: ArcSwap::from_pointee(MixerSnapshot::default()),
+            processed_bus_buffers: ArcSwap::from_pointee((0..MAX_BUSES).map(|_| BusBuffer::new()).collect()),
         }
     }
 
@@ -1123,6 +1142,16 @@ impl MixerState {
     #[inline]
     pub fn load_snapshot(&self) -> arc_swap::Guard<Arc<MixerSnapshot>> {
         self.snapshot.load()
+    }
+
+    /// Store processed bus buffers (called by master output thread after processing)
+    pub fn store_processed_bus_buffers(&self, buffers: Vec<BusBuffer>) {
+        self.processed_bus_buffers.store(Arc::new(buffers));
+    }
+
+    /// Load processed bus buffers snapshot for lock-free reads
+    pub fn load_processed_bus_buffers(&self) -> arc_swap::Guard<Arc<Vec<BusBuffer>>> {
+        self.processed_bus_buffers.load()
     }
 
     /// Rebuild compact sends array (call after any send/fader change)
