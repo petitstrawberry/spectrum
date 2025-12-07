@@ -194,17 +194,8 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
     let dev_id_for_callback = device_id;
     let out_ch = channels as usize;
 
-    // Pre-allocated buffers for audio data - avoids allocation in callback
-    const MAX_FRAMES: usize = 4096;
-    // Maximum unique source pairs we can cache per callback (keep small to avoid stack overflow)
-    const MAX_CACHED_PAIRS: usize = 8;
-
-    // Pre-allocate buffers outside the callback closure to avoid stack overflow
-    // These are captured by the closure and live on the heap via the closure
-    let mut left_bufs: [[f32; MAX_FRAMES]; MAX_CACHED_PAIRS] = [[0.0; MAX_FRAMES]; MAX_CACHED_PAIRS];
-    let mut right_bufs: [[f32; MAX_FRAMES]; MAX_CACHED_PAIRS] = [[0.0; MAX_FRAMES]; MAX_CACHED_PAIRS];
-    let mut cache_keys: [(u32, usize, usize); MAX_CACHED_PAIRS] = [(0, 0, 0); MAX_CACHED_PAIRS]; // (source_device, pair_idx, read_count)
-    let mut cache_valid: [bool; MAX_CACHED_PAIRS] = [false; MAX_CACHED_PAIRS];
+    // Get the buffer pool for this output device (use hash as key)
+    let buffer_pool = crate::mixer::get_output_buffer_pool(dev_id_hash);
 
     // Set render callback
     type Args = render_callback::Args<data::Interleaved<f32>>;
@@ -218,7 +209,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         let buffer = data.buffer;
 
         let frames = num_frames as usize;
-        if frames > MAX_FRAMES {
+        if frames > crate::mixer::MAX_FRAMES {
             return Ok(()); // Safety check
         }
 
@@ -241,11 +232,16 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             None => return Ok(()),
         };
 
-        // Reset cache for this callback
-        let mut cache_count = 0usize;
-        for i in 0..MAX_CACHED_PAIRS {
-            cache_valid[i] = false;
-        }
+        // Get buffer pool - use try_write to avoid blocking
+        let mut pool = match buffer_pool.try_write() {
+            Some(p) => p,
+            None => return Ok(()), // Skip if locked
+        };
+
+        // Track which buffers have been read this callback
+        // Using a simple bitset approach with u64 for up to 64 buffers
+        let mut buffers_read: u64 = 0;
+        let mut buffer_read_counts: [usize; 64] = [0; 64];
 
         // Mix audio from sends targeting this device (1ch unit)
         for send in sends.iter() {
@@ -287,47 +283,44 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             // Calculate whether it's the right channel
             let is_right = source_ch % 2 == 1;
             
-            // Find or create cache entry (linear search is fine for small N)
-            let (cache_idx, read_count) = {
-                let mut found_idx: Option<usize> = None;
-                for i in 0..cache_count {
-                    if cache_valid[i] && cache_keys[i].0 == source_dev && cache_keys[i].1 == pair_idx {
-                        found_idx = Some(i);
-                        break;
-                    }
-                }
+            // Find or allocate buffer for this source pair
+            let buffer_idx = pool.get_or_allocate(source_dev, pair_idx);
+            
+            // Read audio if not already read this callback
+            let read_count = if buffer_idx < 64 && (buffers_read & (1 << buffer_idx)) != 0 {
+                // Already read this buffer
+                buffer_read_counts[buffer_idx]
+            } else {
+                // Need to read audio
+                let pair_buf = match pool.get_buffer_mut(buffer_idx) {
+                    Some(b) => b,
+                    None => continue,
+                };
                 
-                if let Some(idx) = found_idx {
-                    (idx, cache_keys[idx].2)
-                } else if cache_count < MAX_CACHED_PAIRS {
-                    // Read audio data into pre-allocated buffers
-                    let idx = cache_count;
-                    let count = if source_dev == 0 {
-                        crate::audio_capture::read_channel_audio(
-                            dev_id_for_callback,
-                            pair_idx * 2,
-                            pair_idx * 2 + 1,
-                            &mut left_bufs[idx][..frames],
-                            &mut right_bufs[idx][..frames],
-                        )
-                    } else {
-                        crate::audio_capture::read_input_audio(
-                            source_dev,
-                            dev_id_for_callback,
-                            pair_idx * 2,
-                            pair_idx * 2 + 1,
-                            &mut left_bufs[idx][..frames],
-                            &mut right_bufs[idx][..frames],
-                        )
-                    };
-                    
-                    cache_keys[idx] = (source_dev, pair_idx, count);
-                    cache_valid[idx] = true;
-                    cache_count += 1;
-                    (idx, count)
+                let count = if source_dev == 0 {
+                    crate::audio_capture::read_channel_audio(
+                        dev_id_for_callback,
+                        pair_idx * 2,
+                        pair_idx * 2 + 1,
+                        &mut pair_buf.left[..frames],
+                        &mut pair_buf.right[..frames],
+                    )
                 } else {
-                    continue; // Cache full, skip
+                    crate::audio_capture::read_input_audio(
+                        source_dev,
+                        dev_id_for_callback,
+                        pair_idx * 2,
+                        pair_idx * 2 + 1,
+                        &mut pair_buf.left[..frames],
+                        &mut pair_buf.right[..frames],
+                    )
+                };
+                
+                if buffer_idx < 64 {
+                    buffers_read |= 1 << buffer_idx;
+                    buffer_read_counts[buffer_idx] = count;
                 }
+                count
             };
 
             if read_count == 0 {
@@ -335,7 +328,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             }
 
             // Get the correct channel data
-            let source_data = if is_right { &right_bufs[cache_idx] } else { &left_bufs[cache_idx] };
+            let pair_buf = match pool.get_buffer(buffer_idx) {
+                Some(b) => b,
+                None => continue,
+            };
+            let source_data = if is_right { &pair_buf.right[..] } else { &pair_buf.left[..] };
 
             // DAW-style mixing: use vDSP with stride for interleaved output
             VDsp::mix_to_interleaved(

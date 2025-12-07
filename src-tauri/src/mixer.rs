@@ -129,6 +129,120 @@ pub fn hash_device_id(device_id: &str) -> u64 {
     hasher.finish()
 }
 
+/// Maximum frames per buffer
+pub const MAX_FRAMES: usize = 4096;
+
+/// Pre-allocated buffer for one source pair (stereo)
+pub struct PairBuffer {
+    pub left: Box<[f32; MAX_FRAMES]>,
+    pub right: Box<[f32; MAX_FRAMES]>,
+}
+
+impl PairBuffer {
+    pub fn new() -> Self {
+        Self {
+            left: Box::new([0.0; MAX_FRAMES]),
+            right: Box::new([0.0; MAX_FRAMES]),
+        }
+    }
+}
+
+/// Buffer pool for an output device
+/// Grows dynamically when new source pairs are routed to this device
+pub struct OutputBufferPool {
+    /// Buffers indexed by cache slot
+    buffers: Vec<PairBuffer>,
+    /// Map from (source_device, pair_idx) to buffer index
+    pair_to_buffer: HashMap<(u32, usize), usize>,
+}
+
+impl OutputBufferPool {
+    pub fn new() -> Self {
+        Self {
+            buffers: Vec::new(),
+            pair_to_buffer: HashMap::new(),
+        }
+    }
+
+    /// Get or allocate buffer for a source pair
+    /// Returns buffer index
+    pub fn get_or_allocate(&mut self, source_device: u32, pair_idx: usize) -> usize {
+        let key = (source_device, pair_idx);
+        if let Some(&idx) = self.pair_to_buffer.get(&key) {
+            return idx;
+        }
+        // Allocate new buffer
+        let idx = self.buffers.len();
+        self.buffers.push(PairBuffer::new());
+        self.pair_to_buffer.insert(key, idx);
+        idx
+    }
+
+    /// Get buffer by index (for audio callback)
+    #[inline]
+    pub fn get_buffer(&self, idx: usize) -> Option<&PairBuffer> {
+        self.buffers.get(idx)
+    }
+
+    /// Get mutable buffer by index (for audio callback)
+    #[inline]
+    pub fn get_buffer_mut(&mut self, idx: usize) -> Option<&mut PairBuffer> {
+        self.buffers.get_mut(idx)
+    }
+
+    /// Find buffer index for a source pair (for audio callback - no allocation)
+    #[inline]
+    pub fn find_buffer(&self, source_device: u32, pair_idx: usize) -> Option<usize> {
+        self.pair_to_buffer.get(&(source_device, pair_idx)).copied()
+    }
+
+    /// Number of allocated buffers
+    pub fn len(&self) -> usize {
+        self.buffers.len()
+    }
+}
+
+/// Global buffer pools for each output device
+static OUTPUT_BUFFER_POOLS: std::sync::LazyLock<RwLock<HashMap<u64, Arc<RwLock<OutputBufferPool>>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Get or create buffer pool for an output device
+pub fn get_output_buffer_pool(device_id: u64) -> Arc<RwLock<OutputBufferPool>> {
+    // Try read first
+    {
+        let pools = OUTPUT_BUFFER_POOLS.read();
+        if let Some(pool) = pools.get(&device_id) {
+            return Arc::clone(pool);
+        }
+    }
+    // Create new pool
+    let mut pools = OUTPUT_BUFFER_POOLS.write();
+    pools.entry(device_id)
+        .or_insert_with(|| Arc::new(RwLock::new(OutputBufferPool::new())))
+        .clone()
+}
+
+/// Pre-allocate buffers for an output device based on sends
+/// Call this when routing changes
+pub fn allocate_buffers_for_output(device_id: u64, device_id_str: &str, sends: &[Send]) {
+    let pool = get_output_buffer_pool(device_id);
+    let mut pool = pool.write();
+    let target_hash = hash_device_id(device_id_str);
+    
+    // Find all unique source pairs targeting this device
+    for send in sends {
+        if send.muted {
+            continue;
+        }
+        let send_target_hash = hash_device_id(&send.target_device);
+        if send_target_hash != target_hash {
+            continue;
+        }
+        let pair_idx = send.source_channel as usize / 2;
+        pool.get_or_allocate(send.source_device, pair_idx);
+    }
+}
+
 /// Global mixer state shared between audio thread and UI
 pub struct MixerState {
     /// Send connections (source -> target mappings) - for UI
@@ -177,6 +291,21 @@ impl MixerState {
         let sends = self.sends.read();
         let output_faders = self.output_faders.read();
         self.sends_compact.update(&sends, &output_faders);
+        
+        // Pre-allocate buffers for all output devices
+        // Collect unique target devices first
+        use std::collections::HashSet;
+        let mut target_devices: HashSet<(u64, String)> = HashSet::new();
+        for send in sends.iter() {
+            if !send.muted && send.level > 0.0001 {
+                target_devices.insert((hash_device_id(&send.target_device), send.target_device.clone()));
+            }
+        }
+        
+        // Allocate buffers for each target device
+        for (device_hash, device_id) in target_devices {
+            allocate_buffers_for_output(device_hash, &device_id, &sends);
+        }
     }
 
     /// Add or update a send (1ch unit)
