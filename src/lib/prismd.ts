@@ -477,3 +477,109 @@ export async function restartApp(): Promise<void> {
 export async function openPrismApp(): Promise<boolean> {
   return invoke<boolean>('open_prism_app');
 }
+
+// --- Bus Types ---
+
+export interface BusInfo {
+  id: string;
+  label: string;
+  channels: number;
+  fader: number;
+  muted: boolean;
+}
+
+// --- Bus API Functions ---
+
+/**
+ * Add a new bus
+ */
+export async function addBus(id: string, label: string, channels: number): Promise<void> {
+  return invoke('add_bus', { id, label, channels });
+}
+
+/**
+ * Remove a bus
+ */
+export async function removeBus(busId: string): Promise<void> {
+  return invoke('remove_bus', { busId });
+}
+
+/**
+ * Set bus fader level (0.0-1.0)
+ */
+export async function setBusFader(busId: string, level: number): Promise<void> {
+  return invoke('set_bus_fader', { busId, level });
+}
+
+/**
+ * Set bus mute state
+ */
+export async function setBusMute(busId: string, muted: boolean): Promise<void> {
+  return invoke('set_bus_mute', { busId, muted });
+}
+
+/**
+ * Get all buses
+ */
+export async function getBuses(): Promise<BusInfo[]> {
+  return invoke<BusInfo[]>('get_buses');
+}
+
+/**
+ * Add or update a bus send (Input -> Bus, Bus -> Bus, or Bus -> Output)
+ * @param sourceType - "input" or "bus"
+ * @param sourceId - device ID (for input) or bus ID (for bus)
+ * @param sourceDevice - device ID number (0 for Prism, other for input devices)
+ * @param sourceChannel - source channel index
+ * @param targetType - "bus" or "output"
+ * @param targetId - bus ID (for bus) or device ID string (for output)
+ * @param targetChannel - target channel index
+ * @param level - send level (0.0-1.0)
+ * @param muted - mute state
+ */
+export async function updateBusSend(
+  sourceType: 'input' | 'bus',
+  sourceId: string,
+  sourceDevice: number,
+  sourceChannel: number,
+  targetType: 'bus' | 'output',
+  targetId: string,
+  targetChannel: number,
+  level: number,
+  muted: boolean
+): Promise<void> {
+  return invoke('update_bus_send', {
+    sourceType,
+    sourceId,
+    sourceDevice,
+    sourceChannel,
+    targetType,
+    targetId,
+    targetChannel,
+    level,
+    muted,
+  });
+}
+
+/**
+ * Remove a bus send
+ */
+export async function removeBusSend(
+  sourceType: 'input' | 'bus',
+  sourceId: string,
+  sourceDevice: number,
+  sourceChannel: number,
+  targetType: 'bus' | 'output',
+  targetId: string,
+  targetChannel: number
+): Promise<void> {
+  return invoke('remove_bus_send', {
+    sourceType,
+    sourceId,
+    sourceDevice,
+    sourceChannel,
+    targetType,
+    targetId,
+    targetChannel,
+  });
+}

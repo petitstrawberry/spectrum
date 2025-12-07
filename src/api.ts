@@ -98,3 +98,133 @@ export async function getAudioLevels(deviceId: string): Promise<number[]> {
     return [];
   }
 }
+
+// --- Bus Types ---
+
+export interface BusInfo {
+  id: string;
+  label: string;
+  channels: number;
+  fader: number;
+  muted: boolean;
+}
+
+// --- Bus API Functions ---
+
+export async function addBus(id: string, label: string, channels: number): Promise<void> {
+  try {
+    await invoke('add_bus', { id, label, channels });
+    console.log(`[API] Added bus: ${id} (${label})`);
+  } catch (error) {
+    console.error('Failed to add bus:', error);
+    throw error;
+  }
+}
+
+export async function removeBus(busId: string): Promise<void> {
+  try {
+    await invoke('remove_bus', { busId });
+    console.log(`[API] Removed bus: ${busId}`);
+  } catch (error) {
+    console.error('Failed to remove bus:', error);
+    throw error;
+  }
+}
+
+export async function setBusFader(busId: string, level: number): Promise<void> {
+  try {
+    await invoke('set_bus_fader', { busId, level });
+  } catch (error) {
+    console.error('Failed to set bus fader:', error);
+    throw error;
+  }
+}
+
+export async function setBusMute(busId: string, muted: boolean): Promise<void> {
+  try {
+    await invoke('set_bus_mute', { busId, muted });
+  } catch (error) {
+    console.error('Failed to set bus mute:', error);
+    throw error;
+  }
+}
+
+export async function getBuses(): Promise<BusInfo[]> {
+  try {
+    return await invoke<BusInfo[]>('get_buses');
+  } catch (error) {
+    console.error('Failed to get buses:', error);
+    return [];
+  }
+}
+
+/**
+ * Add or update a bus send (Input -> Bus, Bus -> Bus, or Bus -> Output)
+ * @param sourceType - "input" or "bus"
+ * @param sourceId - device ID (for input) or bus ID (for bus)
+ * @param sourceDevice - device ID number (0 for Prism, other for input devices)
+ * @param sourceChannel - source channel index
+ * @param targetType - "bus" or "output"
+ * @param targetId - bus ID (for bus) or device ID string (for output)
+ * @param targetChannel - target channel index
+ * @param level - send level (0.0-1.0)
+ * @param muted - mute state
+ */
+export async function updateBusSend(
+  sourceType: 'input' | 'bus',
+  sourceId: string,
+  sourceDevice: number,
+  sourceChannel: number,
+  targetType: 'bus' | 'output',
+  targetId: string,
+  targetChannel: number,
+  level: number,
+  muted: boolean
+): Promise<void> {
+  try {
+    await invoke('update_bus_send', {
+      sourceType,
+      sourceId,
+      sourceDevice,
+      sourceChannel,
+      targetType,
+      targetId,
+      targetChannel,
+      level,
+      muted,
+    });
+    console.log(`[API] Bus send: ${sourceType}:${sourceId}[${sourceChannel}] -> ${targetType}:${targetId}[${targetChannel}] level=${level}`);
+  } catch (error) {
+    console.error('Failed to update bus send:', error);
+    throw error;
+  }
+}
+
+/**
+ * Remove a bus send
+ */
+export async function removeBusSend(
+  sourceType: 'input' | 'bus',
+  sourceId: string,
+  sourceDevice: number,
+  sourceChannel: number,
+  targetType: 'bus' | 'output',
+  targetId: string,
+  targetChannel: number
+): Promise<void> {
+  try {
+    await invoke('remove_bus_send', {
+      sourceType,
+      sourceId,
+      sourceDevice,
+      sourceChannel,
+      targetType,
+      targetId,
+      targetChannel,
+    });
+    console.log(`[API] Removed bus send: ${sourceType}:${sourceId}[${sourceChannel}] -> ${targetType}:${targetId}[${targetChannel}]`);
+  } catch (error) {
+    console.error('Failed to remove bus send:', error);
+    throw error;
+  }
+}

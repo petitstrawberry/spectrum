@@ -324,6 +324,153 @@ fn start_default_output() -> Result<(), String> {
     audio_output::start_default_output()
 }
 
+// --- Bus Commands ---
+
+/// Bus info for frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusInfo {
+    pub id: String,
+    pub label: String,
+    pub channels: u32,
+    pub fader: f32,
+    pub muted: bool,
+}
+
+/// Add a new bus
+#[tauri::command]
+fn add_bus(id: String, label: String, channels: u32) {
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.add_bus(id, label, channels);
+}
+
+/// Remove a bus
+#[tauri::command]
+fn remove_bus(bus_id: String) {
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.remove_bus(&bus_id);
+}
+
+/// Set bus fader level (0.0-1.0)
+#[tauri::command]
+fn set_bus_fader(bus_id: String, level: f32) {
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.set_bus_fader(&bus_id, level);
+}
+
+/// Set bus mute state
+#[tauri::command]
+fn set_bus_mute(bus_id: String, muted: bool) {
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.set_bus_mute(&bus_id, muted);
+}
+
+/// Get all buses
+#[tauri::command]
+fn get_buses() -> Vec<BusInfo> {
+    let mixer_state = mixer::get_mixer_state();
+    let buses = mixer_state.get_buses();
+    let sends = mixer_state.get_bus_sends();
+    println!("[DEBUG] get_buses: {} buses, {} bus_sends", buses.len(), sends.len());
+    for send in &sends {
+        println!("[DEBUG] BusSend: src_type={} src_dev={} src_ch={} src_bus={} -> tgt_type={} tgt_bus={} tgt_hash={} tgt_ch={} level={} active={}",
+            send.source_type, send.source_device, send.source_channel, send.source_bus_idx,
+            send.target_type, send.target_bus_idx, send.target_device_hash, send.target_channel,
+            send.level, send.active);
+    }
+    buses
+        .into_iter()
+        .map(|b| BusInfo {
+            id: b.id,
+            label: b.label,
+            channels: b.channels,
+            fader: b.fader,
+            muted: b.muted,
+        })
+        .collect()
+}
+
+/// Add or update a bus send (Input -> Bus, Bus -> Bus, or Bus -> Output)
+/// source_type: "input" or "bus"
+/// target_type: "bus" or "output"
+#[tauri::command]
+fn update_bus_send(
+    source_type: String,
+    source_id: String,
+    source_device: u32,
+    source_channel: u32,
+    target_type: String,
+    target_id: String,
+    target_channel: u32,
+    level: f32,
+    muted: bool,
+) {
+    let src_type = match source_type.as_str() {
+        "input" => mixer::BusSendSourceType::Input,
+        "bus" => mixer::BusSendSourceType::Bus,
+        _ => {
+            println!("[Spectrum] Invalid source_type: {}", source_type);
+            return;
+        }
+    };
+    let tgt_type = match target_type.as_str() {
+        "bus" => mixer::BusSendTargetType::Bus,
+        "output" => mixer::BusSendTargetType::Output,
+        _ => {
+            println!("[Spectrum] Invalid target_type: {}", target_type);
+            return;
+        }
+    };
+    
+    let send = mixer::BusSend {
+        source_type: src_type,
+        source_id,
+        source_device,
+        source_channel,
+        target_type: tgt_type,
+        target_id,
+        target_channel,
+        level,
+        muted,
+    };
+    
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.set_bus_send(send);
+}
+
+/// Remove a bus send
+#[tauri::command]
+fn remove_bus_send(
+    source_type: String,
+    source_id: String,
+    source_device: u32,
+    source_channel: u32,
+    target_type: String,
+    target_id: String,
+    target_channel: u32,
+) {
+    let src_type = match source_type.as_str() {
+        "input" => mixer::BusSendSourceType::Input,
+        "bus" => mixer::BusSendSourceType::Bus,
+        _ => return,
+    };
+    let tgt_type = match target_type.as_str() {
+        "bus" => mixer::BusSendTargetType::Bus,
+        "output" => mixer::BusSendTargetType::Output,
+        _ => return,
+    };
+    
+    let mixer_state = mixer::get_mixer_state();
+    mixer_state.remove_bus_send(
+        src_type,
+        &source_id,
+        source_device,
+        source_channel,
+        tgt_type,
+        &target_id,
+        target_channel,
+    );
+}
+
 /// Get current I/O buffer size setting
 #[tauri::command]
 fn get_buffer_size() -> usize {
@@ -692,6 +839,14 @@ pub fn run() {
             start_default_output,
             get_buffer_size,
             set_buffer_size,
+            // Bus commands
+            add_bus,
+            remove_bus,
+            set_bus_fader,
+            set_bus_mute,
+            get_buses,
+            update_bus_send,
+            remove_bus_send,
             // Config commands
             get_app_state,
             save_app_state,

@@ -45,6 +45,11 @@ import {
   openPrismApp,
   startAudioOutput,
   stopAudioOutput,
+  // Bus API
+  addBus,
+  removeBus as removeBusApi,
+  updateBusSend,
+  removeBusSend,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -599,6 +604,8 @@ export default function App() {
               deviceName: sn.device_name,
               channelMode: sn.channel_mode as ChannelMode,
               available,
+              // Restore busId from libraryId for bus nodes (format: "bus_xxx")
+              busId: sn.node_type === 'bus' ? sn.library_id.replace('bus_', '') : undefined,
             };
           });
 
@@ -682,7 +689,24 @@ export default function App() {
           }
 
           // Step 2: Wait for all inputs/outputs to start, then establish mixer sends
-          Promise.all(startPromises).then(() => {
+          Promise.all(startPromises).then(async () => {
+            // First, register all buses in the backend and wait for completion
+            const busNodes = restoredNodes.filter(n => n.type === 'bus');
+            const busPromises = busNodes.map(async (bus) => {
+              if (bus.busId) {
+                try {
+                  await addBus(bus.busId, bus.label, bus.channelCount);
+                  console.log(`[Spectrum] Restored bus ${bus.busId}`);
+                } catch (err) {
+                  console.error(`[Spectrum] Failed to restore bus ${bus.busId}:`, err);
+                }
+              }
+            });
+
+            // Wait for all buses to be registered before setting up connections
+            await Promise.all(busPromises);
+            console.log(`[Spectrum] All buses registered, now establishing connections...`);
+
             console.log(`[Spectrum] Re-establishing ${restoredConnections.length} connections...`);
             for (const conn of restoredConnections) {
               const sourceNode = restoredNodes.find(n => n.id === conn.fromNodeId);
@@ -690,13 +714,54 @@ export default function App() {
 
               console.log(`[Spectrum] Connection: ${sourceNode?.label} -> ${targetNode?.label}, available: ${sourceNode?.available}, ${targetNode?.available}`);
 
-              // Skip Bus connections - they're UI only for now (backend Bus routing not yet implemented)
-              if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') {
-                console.log(`[Spectrum] Skipping Bus connection: ${sourceNode?.label} -> ${targetNode?.label}`);
-                return;
+              // Handle Bus connections
+              if (sourceNode?.type === 'source' && targetNode?.type === 'bus') {
+                // Input -> Bus
+                const busId = targetNode.busId;
+                if (busId && sourceNode.available) {
+                  const srcDevId = sourceNode.sourceType === 'device' && sourceNode.deviceId !== undefined
+                    ? sourceNode.deviceId : 0;
+                  const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
+                  const level = conn.muted ? 0 : conn.sendLevel / 100;
+                  updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, conn.toChannel, level, conn.muted)
+                    .then(() => console.log(`[Spectrum] Bus send restored: Input -> ${busId}`))
+                    .catch(console.error);
+                }
+                continue;
               }
 
-              // Only set up routing for available nodes
+              if (sourceNode?.type === 'bus' && targetNode?.type === 'bus') {
+                // Bus -> Bus
+                const srcBusId = sourceNode.busId;
+                const tgtBusId = targetNode.busId;
+                if (srcBusId && tgtBusId) {
+                  const level = conn.muted ? 0 : conn.sendLevel / 100;
+                  updateBusSend('bus', srcBusId, 0, conn.fromChannel, 'bus', tgtBusId, conn.toChannel, level, conn.muted)
+                    .then(() => console.log(`[Spectrum] Bus chain restored: ${srcBusId} -> ${tgtBusId}`))
+                    .catch(console.error);
+                }
+                continue;
+              }
+
+              if (sourceNode?.type === 'bus' && targetNode?.type === 'target') {
+                // Bus -> Output
+                const srcBusId = sourceNode.busId;
+                if (srcBusId && targetNode.available) {
+                  const tgtDevId = targetNode.libraryId.replace('out_', '');
+                  const level = conn.muted ? 0 : conn.sendLevel / 100;
+                  updateBusSend('bus', srcBusId, 0, conn.fromChannel, 'output', tgtDevId, conn.toChannel, level, conn.muted)
+                    .then(() => console.log(`[Spectrum] Bus to output restored: ${srcBusId} -> ${tgtDevId}`))
+                    .catch(console.error);
+                }
+                continue;
+              }
+
+              // Skip if source or target is bus (already handled above)
+              if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') {
+                continue;
+              }
+
+              // Only set up routing for available nodes (Input -> Output direct)
               if (sourceNode?.available && targetNode?.available) {
                 const srcDevId = sourceNode.sourceType === 'device' && sourceNode.deviceId !== undefined
                   ? sourceNode.deviceId : 0;
@@ -1354,12 +1419,39 @@ export default function App() {
       const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
       const targetNode = nodes.find(n => n.id === conn.toNodeId);
       if (sourceNode && targetNode) {
-        const srcDevId = getSourceDeviceId(sourceNode);
-        const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
-        const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
-        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-        if (targetData) {
-          removeMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh).catch(console.error);
+        // Handle Bus connections
+        if (sourceNode.type === 'source' && targetNode.type === 'bus' && targetNode.busId) {
+          const srcDevId = getSourceDeviceId(sourceNode);
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+          removeBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', targetNode.busId, tgtCh).catch(console.error);
+          continue;
+        }
+        if (sourceNode.type === 'bus' && targetNode.type === 'bus' && sourceNode.busId && targetNode.busId) {
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+          removeBusSend('bus', sourceNode.busId, 0, srcCh, 'bus', targetNode.busId, tgtCh).catch(console.error);
+          continue;
+        }
+        if (sourceNode.type === 'bus' && targetNode.type === 'target' && sourceNode.busId) {
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (targetData) {
+            removeBusSend('bus', sourceNode.busId, 0, srcCh, 'output', targetData.deviceId, tgtCh).catch(console.error);
+          }
+          continue;
+        }
+
+        // Direct Input -> Output
+        if (sourceNode.type === 'source' && targetNode.type === 'target') {
+          const srcDevId = getSourceDeviceId(sourceNode);
+          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (targetData) {
+            removeMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh).catch(console.error);
+          }
         }
       }
     }
@@ -1371,6 +1463,11 @@ export default function App() {
       if (selectedInputDeviceId === nodeToDelete.deviceId) {
         setSelectedInputDeviceId(null);
       }
+    }
+
+    // Remove bus from backend if deleting a bus node
+    if (nodeToDelete?.type === 'bus' && nodeToDelete.busId) {
+      removeBusApi(nodeToDelete.busId).catch(console.error);
     }
 
     // Also stop audio output if deleting a target node
@@ -1414,17 +1511,38 @@ export default function App() {
       const sourceNode = nodesById.get(conn.fromNodeId);
       const targetNode = nodesById.get(conn.toNodeId);
 
-      // Skip Bus connections for backend cleanup - backend Bus routing not yet implemented
-      if (sourceNode?.type !== 'bus' && targetNode?.type !== 'bus' && sourceNode && targetNode) {
-        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-        if (targetData) {
-          // Get source device ID and channel indices
-          const srcDevId = getSourceDeviceId(sourceNode);
-          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
-          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+      if (sourceNode && targetNode) {
+        const srcDevId = getSourceDeviceId(sourceNode);
+        const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+        const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
 
-          // Remove send from backend (1ch unit)
-          removeMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh).catch(console.error);
+        // Handle different connection types
+        if (sourceNode.type === 'source' && targetNode.type === 'target') {
+          // Input -> Output (direct)
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (targetData) {
+            removeMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh).catch(console.error);
+          }
+        } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
+          // Input -> Bus
+          const busId = targetNode.busId;
+          if (busId) {
+            removeBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh).catch(console.error);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
+          // Bus -> Bus
+          const srcBusId = sourceNode.busId;
+          const tgtBusId = targetNode.busId;
+          if (srcBusId && tgtBusId) {
+            removeBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh).catch(console.error);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'target') {
+          // Bus -> Output
+          const srcBusId = sourceNode.busId;
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (srcBusId && targetData) {
+            removeBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh).catch(console.error);
+          }
         }
       }
     }
@@ -1440,7 +1558,7 @@ export default function App() {
       return c;
     }));
 
-    // Update backend for all connections (skip Bus connections)
+    // Update backend for all connections
     for (const connId of connIds) {
       const conn = connections.find(c => c.id === connId);
       if (!conn) continue;
@@ -1448,16 +1566,34 @@ export default function App() {
       const sourceNode = nodesById.get(conn.fromNodeId);
       const targetNode = nodesById.get(conn.toNodeId);
 
-      // Skip Bus connections - backend Bus routing not yet implemented
-      if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') continue;
-
       if (sourceNode && targetNode) {
-        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-        if (targetData) {
-          const srcDevId = getSourceDeviceId(sourceNode);
-          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
-          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
-          updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, level, conn.muted);
+        const srcDevId = getSourceDeviceId(sourceNode);
+        const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+        const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+
+        // Handle different connection types
+        if (sourceNode.type === 'source' && targetNode.type === 'target') {
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (targetData) {
+            updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, level, conn.muted);
+          }
+        } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
+          const busId = targetNode.busId;
+          if (busId) {
+            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, level / 100, conn.muted).catch(console.error);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
+          const srcBusId = sourceNode.busId;
+          const tgtBusId = targetNode.busId;
+          if (srcBusId && tgtBusId) {
+            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, level / 100, conn.muted).catch(console.error);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'target') {
+          const srcBusId = sourceNode.busId;
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (srcBusId && targetData) {
+            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, level / 100, conn.muted).catch(console.error);
+          }
         }
       }
     }
@@ -1474,7 +1610,7 @@ export default function App() {
       return c;
     }));
 
-    // Update backend for all connections (skip Bus connections)
+    // Update backend for all connections
     for (const connId of connIds) {
       const conn = connections.find(c => c.id === connId);
       if (!conn) continue;
@@ -1482,16 +1618,34 @@ export default function App() {
       const sourceNode = nodesById.get(conn.fromNodeId);
       const targetNode = nodesById.get(conn.toNodeId);
 
-      // Skip Bus connections - backend Bus routing not yet implemented
-      if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') continue;
-
       if (sourceNode && targetNode) {
-        const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
-        if (targetData) {
-          const srcDevId = getSourceDeviceId(sourceNode);
-          const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
-          const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
-          updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, conn.sendLevel, newMuted);
+        const srcDevId = getSourceDeviceId(sourceNode);
+        const srcCh = getChannelIndexForPort(sourceNode, conn.fromChannel);
+        const tgtCh = getChannelIndexForPort(targetNode, conn.toChannel);
+
+        // Handle different connection types
+        if (sourceNode.type === 'source' && targetNode.type === 'target') {
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (targetData) {
+            updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, conn.sendLevel, newMuted);
+          }
+        } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
+          const busId = targetNode.busId;
+          if (busId) {
+            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, conn.sendLevel / 100, newMuted).catch(console.error);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
+          const srcBusId = sourceNode.busId;
+          const tgtBusId = targetNode.busId;
+          if (srcBusId && tgtBusId) {
+            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, conn.sendLevel / 100, newMuted).catch(console.error);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'target') {
+          const srcBusId = sourceNode.busId;
+          const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
+          if (srcBusId && targetData) {
+            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, conn.sendLevel / 100, newMuted).catch(console.error);
+          }
         }
       }
     }
@@ -1892,9 +2046,9 @@ export default function App() {
         const srcCh = getChannelIndexForPort(sourceNode, srcPort);
         const tgtCh = getChannelIndexForPort(targetNode, tgtPort);
 
-        // Only update backend mixer for real source/output devices (not buses)
-        // Bus routing is UI-only for now - backend support pending
+        // Handle different connection types
         if (sourceNode.type !== 'bus' && targetNode.type === 'target' && targetData) {
+          // Input -> Output (direct connection)
           const deviceIdNum = parseInt(targetData.deviceId);
           if (!isNaN(deviceIdNum)) {
             startAudioOutput(deviceIdNum).catch(console.error);
@@ -1905,9 +2059,66 @@ export default function App() {
           // Update mixer send (1ch unit)
           updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, defaultLevel, false);
           console.log(`Route device ${srcDevId} channel ${srcCh} → device ${targetData.deviceId} ch ${tgtCh}${isStereoPair ? ' (stereo pair)' : ''}`);
-        } else if (sourceNode.type === 'bus' || targetNode.type === 'bus') {
-          // Bus connection - currently UI-only, backend support pending
-          console.log(`Bus connection: ${sourceNode.label} → ${targetNode.label} ch ${tgtCh} (UI only)`);
+        } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
+          // Input -> Bus
+          const busId = targetNode.busId;
+          if (busId) {
+            const defaultLevel = 1.0; // 0dB unity
+            updateBusSend(
+              'input',
+              sourceNode.deviceId?.toString() ?? '0',
+              srcDevId,
+              srcCh,
+              'bus',
+              busId,
+              tgtCh,
+              defaultLevel,
+              false
+            ).catch(console.error);
+            console.log(`Bus route: Input ${srcDevId}:${srcCh} → Bus ${busId}:${tgtCh}`);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
+          // Bus -> Bus (chaining)
+          const srcBusId = sourceNode.busId;
+          const tgtBusId = targetNode.busId;
+          if (srcBusId && tgtBusId) {
+            const defaultLevel = 1.0;
+            updateBusSend(
+              'bus',
+              srcBusId,
+              0,
+              srcCh,
+              'bus',
+              tgtBusId,
+              tgtCh,
+              defaultLevel,
+              false
+            ).catch(console.error);
+            console.log(`Bus chain: Bus ${srcBusId}:${srcCh} → Bus ${tgtBusId}:${tgtCh}`);
+          }
+        } else if (sourceNode.type === 'bus' && targetNode.type === 'target' && targetData) {
+          // Bus -> Output
+          const srcBusId = sourceNode.busId;
+          if (srcBusId) {
+            const deviceIdNum = parseInt(targetData.deviceId);
+            if (!isNaN(deviceIdNum)) {
+              startAudioOutput(deviceIdNum).catch(console.error);
+            }
+
+            const defaultLevel = 1.0;
+            updateBusSend(
+              'bus',
+              srcBusId,
+              0,
+              srcCh,
+              'output',
+              targetData.deviceId,
+              tgtCh,
+              defaultLevel,
+              false
+            ).catch(console.error);
+            console.log(`Bus to output: Bus ${srcBusId}:${srcCh} → device ${targetData.deviceId}:${tgtCh}`);
+          }
         }
 
         newConnections.push({
@@ -2709,6 +2920,13 @@ export default function App() {
                 const centerY = 250;
                 const busNode = createNode('new_bus', 'bus', centerX, centerY);
                 setNodes(prev => [...prev, busNode]);
+                
+                // Register bus in backend
+                if (busNode.busId) {
+                  addBus(busNode.busId, busNode.label, busNode.channelCount)
+                    .then(() => console.log(`[Spectrum] Registered bus ${busNode.busId} in backend`))
+                    .catch(console.error);
+                }
               }}
               className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-dashed border-purple-500/50 bg-purple-500/10 hover:bg-purple-500/20 hover:border-purple-400 text-purple-400 hover:text-purple-300 transition-all text-xs font-medium"
             >

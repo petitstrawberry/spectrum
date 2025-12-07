@@ -232,6 +232,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             None => return Ok(()),
         };
 
+        // Get bus-related state
+        let bus_sends = mixer_state.bus_sends.try_read_sends();
+        let buses = mixer_state.bus_sends.try_read_buses();
+        let mut bus_buffers = mixer_state.bus_buffers.try_write();
+
         // Get buffer pool - use try_write to avoid blocking
         let mut pool = match buffer_pool.try_write() {
             Some(p) => p,
@@ -243,6 +248,199 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         let mut buffers_read: u64 = 0;
         let mut buffer_read_counts: [usize; 64] = [0; 64];
 
+        // ========== Bus Processing ==========
+        // Process bus sends if available
+        if let (Some(bus_sends), Some(buses), Some(ref mut bus_buffers)) = (bus_sends, buses, bus_buffers.as_mut()) {
+            // Clear all bus buffers first
+            for bus_buf in bus_buffers.iter_mut() {
+                bus_buf.clear(frames);
+            }
+
+            // We need multiple passes for bus chains (Bus 1 -> Bus 2 -> Output)
+            // Do topological-style processing: Input->Bus first, then Bus->Bus, then Bus->Output
+            
+            // Pass 1: Input -> Bus
+            for send in bus_sends.iter() {
+                if !send.active || send.source_type != 0 || send.target_type != 0 {
+                    continue; // Only Input -> Bus
+                }
+                
+                let bus_idx = send.target_bus_idx as usize;
+                if bus_idx >= bus_buffers.len() || bus_idx >= buses.len() {
+                    continue;
+                }
+                
+                let bus = &buses[bus_idx];
+                if bus.muted {
+                    continue;
+                }
+
+                let source_dev = send.source_device;
+                let source_ch = send.source_channel as usize;
+                let pair_idx = source_ch / 2;
+                
+                // Check source mute
+                if pair_idx < mutes.len() && mutes[pair_idx] {
+                    continue;
+                }
+
+                let source_gain = if pair_idx < faders.len() { faders[pair_idx] } else { 1.0 };
+                let total_gain = send.level * source_gain;
+                if total_gain < 0.0001 {
+                    continue;
+                }
+
+                // Read audio from input
+                let buffer_idx = pool.get_or_allocate(source_dev, pair_idx);
+                let read_count = if buffer_idx < 64 && (buffers_read & (1 << buffer_idx)) != 0 {
+                    buffer_read_counts[buffer_idx]
+                } else {
+                    let pair_buf = match pool.get_buffer_mut(buffer_idx) {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    
+                    let count = if source_dev == 0 {
+                        crate::audio_capture::read_channel_audio(
+                            dev_id_for_callback,
+                            pair_idx * 2,
+                            pair_idx * 2 + 1,
+                            &mut pair_buf.left[..frames],
+                            &mut pair_buf.right[..frames],
+                        )
+                    } else {
+                        crate::audio_capture::read_input_audio(
+                            source_dev,
+                            dev_id_for_callback,
+                            pair_idx * 2,
+                            pair_idx * 2 + 1,
+                            &mut pair_buf.left[..frames],
+                            &mut pair_buf.right[..frames],
+                        )
+                    };
+                    
+                    if buffer_idx < 64 {
+                        buffers_read |= 1 << buffer_idx;
+                        buffer_read_counts[buffer_idx] = count;
+                    }
+                    count
+                };
+
+                if read_count == 0 {
+                    continue;
+                }
+
+                // Get source audio
+                let pair_buf = match pool.get_buffer(buffer_idx) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let is_right = source_ch % 2 == 1;
+                let source_data = if is_right { &pair_buf.right[..] } else { &pair_buf.left[..] };
+
+                // Mix to bus buffer
+                let target_ch = send.target_channel as usize;
+                let bus_buf = &mut bus_buffers[bus_idx];
+                let target_buf = if target_ch % 2 == 0 { &mut bus_buf.left } else { &mut bus_buf.right };
+                VDsp::mix_add(&source_data[..read_count], total_gain, &mut target_buf[..read_count]);
+            }
+
+            // Pass 2: Bus -> Bus (for chaining, e.g., Bus 1 -> Bus 2)
+            // We do this multiple times to handle chains (max depth = number of buses)
+            let bus_count = buses.len();
+            for _pass in 0..bus_count {
+                for send in bus_sends.iter() {
+                    if !send.active || send.source_type != 1 || send.target_type != 0 {
+                        continue; // Only Bus -> Bus
+                    }
+                    
+                    let source_bus_idx = send.source_bus_idx as usize;
+                    let target_bus_idx = send.target_bus_idx as usize;
+                    
+                    if source_bus_idx >= bus_buffers.len() || target_bus_idx >= bus_buffers.len() {
+                        continue;
+                    }
+                    if source_bus_idx >= buses.len() || target_bus_idx >= buses.len() {
+                        continue;
+                    }
+                    
+                    let source_bus = &buses[source_bus_idx];
+                    let target_bus = &buses[target_bus_idx];
+                    if source_bus.muted || target_bus.muted {
+                        continue;
+                    }
+
+                    let total_gain = send.level * source_bus.fader;
+                    if total_gain < 0.0001 {
+                        continue;
+                    }
+
+                    let source_ch = send.source_channel as usize;
+                    let target_ch = send.target_channel as usize;
+                    
+                    // We need to copy to avoid borrowing issues
+                    let mut temp_buf = [0.0f32; crate::mixer::MAX_FRAMES];
+                    {
+                        let source_buf = &bus_buffers[source_bus_idx];
+                        let src = if source_ch % 2 == 0 { &source_buf.left } else { &source_buf.right };
+                        temp_buf[..frames].copy_from_slice(&src[..frames]);
+                    }
+                    
+                    let target_buf_data = &mut bus_buffers[target_bus_idx];
+                    let dst = if target_ch % 2 == 0 { &mut target_buf_data.left } else { &mut target_buf_data.right };
+                    VDsp::mix_add(&temp_buf[..frames], total_gain, &mut dst[..frames]);
+                }
+            }
+
+            // Pass 3: Bus -> Output
+            for send in bus_sends.iter() {
+                if !send.active || send.source_type != 1 || send.target_type != 1 {
+                    continue; // Only Bus -> Output
+                }
+                
+                // Check if targeting this output device
+                if send.target_device_hash != dev_id_hash {
+                    continue;
+                }
+
+                let source_bus_idx = send.source_bus_idx as usize;
+                if source_bus_idx >= bus_buffers.len() || source_bus_idx >= buses.len() {
+                    continue;
+                }
+                
+                let source_bus = &buses[source_bus_idx];
+                if source_bus.muted {
+                    continue;
+                }
+
+                let total_gain = send.level * source_bus.fader;
+                if total_gain < 0.0001 {
+                    continue;
+                }
+
+                let source_ch = send.source_channel as usize;
+                let target_ch = send.target_channel as usize;
+
+                if target_ch >= out_ch {
+                    continue;
+                }
+
+                let source_buf = &bus_buffers[source_bus_idx];
+                let source_data = if source_ch % 2 == 0 { &source_buf.left[..] } else { &source_buf.right[..] };
+
+                // Mix to interleaved output
+                VDsp::mix_to_interleaved(
+                    &source_data[..frames],
+                    total_gain,
+                    buffer,
+                    target_ch,
+                    out_ch,
+                    frames,
+                );
+            }
+        }
+
+        // ========== Direct Sends (Input -> Output) ==========
         // Mix audio from sends targeting this device (1ch unit)
         for send in sends.iter() {
             if !send.active {

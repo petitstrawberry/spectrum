@@ -16,6 +16,10 @@ pub const MAX_OUTPUTS: usize = 16;
 pub const MAX_OUTPUT_PAIRS: usize = 32;
 /// Maximum number of sends
 pub const MAX_SENDS: usize = 1024;
+/// Maximum number of buses
+pub const MAX_BUSES: usize = 32;
+/// Bus channels (stereo)
+pub const BUS_CHANNELS: usize = 2;
 
 /// A send connection from a source channel to an output device channel (1ch unit)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +36,111 @@ pub struct Send {
     pub level: f32,
     /// Muted
     pub muted: bool,
+}
+
+/// Source type for bus sends
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BusSendSourceType {
+    /// Source is a Prism/input device channel
+    Input,
+    /// Source is another bus
+    Bus,
+}
+
+/// Target type for bus sends
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BusSendTargetType {
+    /// Target is a bus
+    Bus,
+    /// Target is an output device
+    Output,
+}
+
+/// A send connection involving buses (for chaining)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusSend {
+    /// Source type (Input or Bus)
+    pub source_type: BusSendSourceType,
+    /// Source ID (device_id for Input, bus_id string for Bus)
+    pub source_id: String,
+    /// Source device ID (only used when source_type is Input)
+    pub source_device: u32,
+    /// Source channel index
+    pub source_channel: u32,
+    /// Target type (Bus or Output)
+    pub target_type: BusSendTargetType,
+    /// Target ID (bus_id for Bus, device_id for Output)
+    pub target_id: String,
+    /// Target channel index
+    pub target_channel: u32,
+    /// Send level (0.0 to 1.0)
+    pub level: f32,
+    /// Muted
+    pub muted: bool,
+}
+
+/// Compact bus send for audio callback
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BusSendCompact {
+    pub source_type: u8, // 0 = Input, 1 = Bus
+    pub source_device: u32,
+    pub source_channel: u32,
+    pub source_bus_idx: u8, // Index into bus array (when source_type = Bus)
+    pub target_type: u8, // 0 = Bus, 1 = Output
+    pub target_bus_idx: u8, // Index into bus array (when target_type = Bus)
+    pub target_device_hash: u64, // Hash of output device (when target_type = Output)
+    pub target_channel: u32,
+    pub level: f32,
+    pub active: bool,
+}
+
+/// Bus definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bus {
+    /// Bus identifier (e.g., "bus_1", "bus_2")
+    pub id: String,
+    /// Bus label/name
+    pub label: String,
+    /// Number of channels (typically 2 for stereo)
+    pub channels: u32,
+    /// Fader level (0.0 to 1.0)
+    pub fader: f32,
+    /// Muted
+    pub muted: bool,
+}
+
+impl Default for Bus {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            channels: 2,
+            fader: 1.0,
+            muted: false,
+        }
+    }
+}
+
+/// Bus buffer for audio processing
+pub struct BusBuffer {
+    pub left: Box<[f32; MAX_FRAMES]>,
+    pub right: Box<[f32; MAX_FRAMES]>,
+}
+
+impl BusBuffer {
+    pub fn new() -> Self {
+        Self {
+            left: Box::new([0.0; MAX_FRAMES]),
+            right: Box::new([0.0; MAX_FRAMES]),
+        }
+    }
+
+    pub fn clear(&mut self, frames: usize) {
+        for i in 0..frames.min(MAX_FRAMES) {
+            self.left[i] = 0.0;
+            self.right[i] = 0.0;
+        }
+    }
 }
 
 /// Optimized send for audio callback (no String allocation)
@@ -117,6 +226,345 @@ impl SendsArray {
         }
         
         self.version.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Bus sends array for audio callback
+pub struct BusSendsArray {
+    /// Bus definitions (index -> Bus)
+    buses: RwLock<Vec<Bus>>,
+    /// Bus ID to index mapping
+    bus_id_to_idx: RwLock<HashMap<String, usize>>,
+    /// Active bus sends (read by audio thread)
+    sends: RwLock<Vec<BusSendCompact>>,
+    /// Version counter for cache invalidation
+    version: AtomicU64,
+}
+
+impl BusSendsArray {
+    pub fn new() -> Self {
+        Self {
+            buses: RwLock::new(Vec::with_capacity(MAX_BUSES)),
+            bus_id_to_idx: RwLock::new(HashMap::new()),
+            sends: RwLock::new(Vec::with_capacity(MAX_SENDS)),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    /// Get current version
+    #[inline]
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// Read bus sends (for audio callback)
+    #[inline]
+    pub fn try_read_sends(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<BusSendCompact>>> {
+        self.sends.try_read()
+    }
+
+    /// Read buses (for audio callback)
+    #[inline]
+    pub fn try_read_buses(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<Bus>>> {
+        self.buses.try_read()
+    }
+
+    /// Get bus count
+    pub fn bus_count(&self) -> usize {
+        self.buses.read().len()
+    }
+
+    /// Get bus index by ID
+    pub fn get_bus_index(&self, bus_id: &str) -> Option<usize> {
+        self.bus_id_to_idx.read().get(bus_id).copied()
+    }
+
+    /// Add a bus
+    pub fn add_bus(&self, bus: Bus) {
+        let mut buses = self.buses.write();
+        let mut id_map = self.bus_id_to_idx.write();
+        
+        // Check if bus already exists
+        if id_map.contains_key(&bus.id) {
+            return;
+        }
+        
+        let idx = buses.len();
+        id_map.insert(bus.id.clone(), idx);
+        buses.push(bus);
+        
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Remove a bus
+    pub fn remove_bus(&self, bus_id: &str) {
+        let mut buses = self.buses.write();
+        let mut id_map = self.bus_id_to_idx.write();
+        let mut sends = self.sends.write();
+        
+        if let Some(idx) = id_map.remove(bus_id) {
+            buses.remove(idx);
+            
+            // Update indices for remaining buses
+            for (id, old_idx) in id_map.iter_mut() {
+                if *old_idx > idx {
+                    *old_idx -= 1;
+                }
+            }
+            
+            // Remove sends involving this bus and update indices
+            sends.retain(|send| {
+                let source_ok = send.source_type != 1 || send.source_bus_idx as usize != idx;
+                let target_ok = send.target_type != 0 || send.target_bus_idx as usize != idx;
+                source_ok && target_ok
+            });
+            
+            // Update bus indices in remaining sends
+            for send in sends.iter_mut() {
+                if send.source_type == 1 && send.source_bus_idx as usize > idx {
+                    send.source_bus_idx -= 1;
+                }
+                if send.target_type == 0 && send.target_bus_idx as usize > idx {
+                    send.target_bus_idx -= 1;
+                }
+            }
+        }
+        
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Set bus fader
+    pub fn set_bus_fader(&self, bus_id: &str, level: f32) {
+        let id_map = self.bus_id_to_idx.read();
+        if let Some(&idx) = id_map.get(bus_id) {
+            let mut buses = self.buses.write();
+            if let Some(bus) = buses.get_mut(idx) {
+                bus.fader = level;
+            }
+        }
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Set bus mute
+    pub fn set_bus_mute(&self, bus_id: &str, muted: bool) {
+        let id_map = self.bus_id_to_idx.read();
+        if let Some(&idx) = id_map.get(bus_id) {
+            let mut buses = self.buses.write();
+            if let Some(bus) = buses.get_mut(idx) {
+                bus.muted = muted;
+            }
+        }
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Update bus sends from main thread
+    pub fn update_sends(&self, bus_sends: &[BusSend], output_faders: &HashMap<String, f32>) {
+        let id_map = self.bus_id_to_idx.read();
+        let buses = self.buses.read();
+        let mut compact = self.sends.write();
+        compact.clear();
+        
+        for send in bus_sends {
+            if send.muted || send.level <= 0.0001 {
+                continue;
+            }
+            
+            // Resolve source
+            let (source_type, source_bus_idx) = match send.source_type {
+                BusSendSourceType::Input => (0u8, 0u8),
+                BusSendSourceType::Bus => {
+                    if let Some(&idx) = id_map.get(&send.source_id) {
+                        // Check if source bus is muted
+                        if let Some(bus) = buses.get(idx) {
+                            if bus.muted {
+                                continue;
+                            }
+                        }
+                        (1u8, idx as u8)
+                    } else {
+                        continue; // Unknown bus
+                    }
+                }
+            };
+            
+            // Resolve target
+            let (target_type, target_bus_idx, target_device_hash) = match send.target_type {
+                BusSendTargetType::Bus => {
+                    if let Some(&idx) = id_map.get(&send.target_id) {
+                        (0u8, idx as u8, 0u64)
+                    } else {
+                        continue; // Unknown bus
+                    }
+                }
+                BusSendTargetType::Output => {
+                    let output_gain = output_faders.get(&send.target_id).copied().unwrap_or(1.0);
+                    if output_gain <= 0.0001 {
+                        continue;
+                    }
+                    (1u8, 0u8, hash_device_id(&send.target_id))
+                }
+            };
+            
+            compact.push(BusSendCompact {
+                source_type,
+                source_device: send.source_device,
+                source_channel: send.source_channel,
+                source_bus_idx,
+                target_type,
+                target_bus_idx,
+                target_device_hash,
+                target_channel: send.target_channel,
+                level: send.level,
+                active: true,
+            });
+        }
+        
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Add or update a bus send
+    pub fn set_bus_send(&self, send: BusSend) {
+        let id_map = self.bus_id_to_idx.read();
+        let buses = self.buses.read();
+        
+        println!("[Mixer] set_bus_send: id_map has {} buses: {:?}", id_map.len(), id_map.keys().collect::<Vec<_>>());
+        
+        // Resolve indices
+        let source_bus_idx = match send.source_type {
+            BusSendSourceType::Bus => id_map.get(&send.source_id).copied(),
+            _ => Some(0),
+        };
+        let target_bus_idx = match send.target_type {
+            BusSendTargetType::Bus => id_map.get(&send.target_id).copied(),
+            _ => Some(0),
+        };
+        
+        println!("[Mixer] set_bus_send: source_bus_idx={:?}, target_bus_idx={:?}", source_bus_idx, target_bus_idx);
+        
+        if source_bus_idx.is_none() || target_bus_idx.is_none() {
+            println!("[Mixer] Bus send references unknown bus: source_id={}, target_id={}", send.source_id, send.target_id);
+            return;
+        }
+        
+        // Check source bus mute
+        if send.source_type == BusSendSourceType::Bus {
+            if let Some(idx) = source_bus_idx {
+                if let Some(bus) = buses.get(idx) {
+                    if bus.muted {
+                        return;
+                    }
+                }
+            }
+        }
+        
+        let target_device_hash = match send.target_type {
+            BusSendTargetType::Output => hash_device_id(&send.target_id),
+            _ => 0,
+        };
+        
+        let compact_send = BusSendCompact {
+            source_type: match send.source_type {
+                BusSendSourceType::Input => 0,
+                BusSendSourceType::Bus => 1,
+            },
+            source_device: send.source_device,
+            source_channel: send.source_channel,
+            source_bus_idx: source_bus_idx.unwrap_or(0) as u8,
+            target_type: match send.target_type {
+                BusSendTargetType::Bus => 0,
+                BusSendTargetType::Output => 1,
+            },
+            target_bus_idx: target_bus_idx.unwrap_or(0) as u8,
+            target_device_hash,
+            target_channel: send.target_channel,
+            level: send.level,
+            active: !send.muted && send.level > 0.0001,
+        };
+        
+        let mut sends = self.sends.write();
+        
+        // Find existing send with same source and target
+        if let Some(existing) = sends.iter_mut().find(|s| {
+            s.source_type == compact_send.source_type
+                && s.source_device == compact_send.source_device
+                && s.source_channel == compact_send.source_channel
+                && s.source_bus_idx == compact_send.source_bus_idx
+                && s.target_type == compact_send.target_type
+                && s.target_bus_idx == compact_send.target_bus_idx
+                && s.target_device_hash == compact_send.target_device_hash
+                && s.target_channel == compact_send.target_channel
+        }) {
+            existing.level = compact_send.level;
+            existing.active = compact_send.active;
+        } else {
+            sends.push(compact_send);
+        }
+        
+        drop(sends);
+        drop(buses);
+        drop(id_map);
+        
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Remove a bus send
+    pub fn remove_bus_send(
+        &self,
+        source_type: BusSendSourceType,
+        source_id: &str,
+        source_device: u32,
+        source_channel: u32,
+        target_type: BusSendTargetType,
+        target_id: &str,
+        target_channel: u32,
+    ) {
+        let id_map = self.bus_id_to_idx.read();
+        
+        let source_bus_idx = match source_type {
+            BusSendSourceType::Bus => id_map.get(source_id).copied().unwrap_or(255) as u8,
+            _ => 0,
+        };
+        let target_bus_idx = match target_type {
+            BusSendTargetType::Bus => id_map.get(target_id).copied().unwrap_or(255) as u8,
+            _ => 0,
+        };
+        let target_device_hash = match target_type {
+            BusSendTargetType::Output => hash_device_id(target_id),
+            _ => 0,
+        };
+        
+        let src_type = match source_type {
+            BusSendSourceType::Input => 0u8,
+            BusSendSourceType::Bus => 1u8,
+        };
+        let tgt_type = match target_type {
+            BusSendTargetType::Bus => 0u8,
+            BusSendTargetType::Output => 1u8,
+        };
+        
+        let mut sends = self.sends.write();
+        sends.retain(|s| {
+            !(s.source_type == src_type
+                && s.source_device == source_device
+                && s.source_channel == source_channel
+                && s.source_bus_idx == source_bus_idx
+                && s.target_type == tgt_type
+                && s.target_bus_idx == target_bus_idx
+                && s.target_device_hash == target_device_hash
+                && s.target_channel == target_channel)
+        });
+        
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Get all buses
+    pub fn get_buses(&self) -> Vec<Bus> {
+        self.buses.read().clone()
+    }
+
+    /// Get all bus sends
+    pub fn get_bus_sends_compact(&self) -> Vec<BusSendCompact> {
+        self.sends.read().clone()
     }
 }
 
@@ -249,6 +697,10 @@ pub struct MixerState {
     pub sends: RwLock<Vec<Send>>,
     /// Compact sends for audio callback (lock-free read)
     pub sends_compact: SendsArray,
+    /// Bus sends for routing via buses
+    pub bus_sends: BusSendsArray,
+    /// Bus buffers for audio processing (indexed by bus index)
+    pub bus_buffers: RwLock<Vec<BusBuffer>>,
     /// Master fader for each Prism channel pair (0.0 to 1.0)
     pub source_faders: RwLock<[f32; PRISM_CHANNELS / 2]>,
     /// Mute state for each source channel pair
@@ -276,6 +728,8 @@ impl MixerState {
         Self {
             sends: RwLock::new(Vec::new()),
             sends_compact: SendsArray::new(),
+            bus_sends: BusSendsArray::new(),
+            bus_buffers: RwLock::new(Vec::new()),
             source_faders: RwLock::new([1.0; PRISM_CHANNELS / 2]),
             source_mutes: RwLock::new([false; PRISM_CHANNELS / 2]),
             output_faders: RwLock::new(HashMap::new()),
@@ -396,6 +850,86 @@ impl MixerState {
             .get(device_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    // ========== Bus Operations ==========
+
+    /// Add a bus
+    pub fn add_bus(&self, id: String, label: String, channels: u32) {
+        let bus = Bus {
+            id: id.clone(),
+            label,
+            channels,
+            fader: 1.0,
+            muted: false,
+        };
+        self.bus_sends.add_bus(bus);
+        
+        // Add bus buffer
+        let mut buffers = self.bus_buffers.write();
+        buffers.push(BusBuffer::new());
+        
+        println!("[Mixer] Added bus: {}", id);
+    }
+
+    /// Remove a bus
+    pub fn remove_bus(&self, bus_id: &str) {
+        if let Some(idx) = self.bus_sends.get_bus_index(bus_id) {
+            self.bus_sends.remove_bus(bus_id);
+            
+            // Remove bus buffer
+            let mut buffers = self.bus_buffers.write();
+            if idx < buffers.len() {
+                buffers.remove(idx);
+            }
+            
+            println!("[Mixer] Removed bus: {}", bus_id);
+        }
+    }
+
+    /// Set bus fader
+    pub fn set_bus_fader(&self, bus_id: &str, level: f32) {
+        self.bus_sends.set_bus_fader(bus_id, level.clamp(0.0, 1.0));
+    }
+
+    /// Set bus mute
+    pub fn set_bus_mute(&self, bus_id: &str, muted: bool) {
+        self.bus_sends.set_bus_mute(bus_id, muted);
+    }
+
+    /// Add or update a bus send (Input/Bus -> Bus/Output)
+    pub fn set_bus_send(&self, send: BusSend) {
+        println!("[Mixer] Bus send: {:?} {} ch{} -> {:?} {} ch{} level={}",
+            send.source_type, send.source_id, send.source_channel,
+            send.target_type, send.target_id, send.target_channel, send.level);
+        self.bus_sends.set_bus_send(send);
+    }
+
+    /// Remove a bus send
+    pub fn remove_bus_send(
+        &self,
+        source_type: BusSendSourceType,
+        source_id: &str,
+        source_device: u32,
+        source_channel: u32,
+        target_type: BusSendTargetType,
+        target_id: &str,
+        target_channel: u32,
+    ) {
+        self.bus_sends.remove_bus_send(
+            source_type, source_id, source_device, source_channel,
+            target_type, target_id, target_channel,
+        );
+    }
+
+    /// Get all buses
+    pub fn get_buses(&self) -> Vec<Bus> {
+        self.bus_sends.get_buses()
+    }
+
+    /// Get bus sends for debugging
+    pub fn get_bus_sends(&self) -> Vec<BusSendCompact> {
+        self.bus_sends.get_bus_sends_compact()
     }
 }
 
