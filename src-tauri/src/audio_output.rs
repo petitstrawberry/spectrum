@@ -238,47 +238,47 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             }};
         }
 
-        // Get mixer state - use compact sends for fast iteration
-        // Use try_read with retry to reduce dropouts
+        // Get mixer state - use lock-free snapshot for read-only data
         let mixer_state = get_mixer_state();
         
-        // Helper macro for lock acquisition with spin retry
-        macro_rules! try_acquire {
-            ($lock:expr, $retries:expr) => {{
-                let mut result = $lock;
-                for _ in 0..$retries {
-                    if result.is_some() {
-                        break;
-                    }
-                    std::hint::spin_loop();
-                    result = $lock;
-                }
-                result
-            }};
-        }
+        // Lock-free snapshot access - this never blocks
+        let snapshot = mixer_state.load_snapshot();
         
-        let sends = match try_acquire!(mixer_state.sends_compact.try_read(), 3) {
-            Some(s) => s,
-            None => skip_callback!(),
-        };
-        let faders = match try_acquire!(mixer_state.source_faders.try_read(), 3) {
-            Some(f) => *f,
-            None => skip_callback!(),
-        };
-        let mutes = match try_acquire!(mixer_state.source_mutes.try_read(), 3) {
-            Some(m) => *m,
-            None => skip_callback!(),
+        // Extract data from snapshot (all lock-free)
+        let sends = &snapshot.sends;
+        let faders = snapshot.source_faders;
+        let mutes = snapshot.source_mutes;
+        let bus_sends = &snapshot.bus_sends;
+        let buses = &snapshot.buses;
+        let processing_order = &snapshot.processing_order;
+        
+        // Bus buffers need write access - use try_write with spin retry
+        let mut bus_buffers = {
+            let mut result = mixer_state.bus_buffers.try_write();
+            for _ in 0..3 {
+                if result.is_some() {
+                    break;
+                }
+                std::hint::spin_loop();
+                result = mixer_state.bus_buffers.try_write();
+            }
+            result
         };
 
-        // Get bus-related state (optional - if locked, skip bus processing only)
-        let bus_sends = try_acquire!(mixer_state.bus_sends.try_read_sends(), 2);
-        let buses = try_acquire!(mixer_state.bus_sends.try_read_buses(), 2);
-        let mut bus_buffers = try_acquire!(mixer_state.bus_buffers.try_write(), 2);
-
-        // Get buffer pool - use try_write to avoid blocking
-        let mut pool = match try_acquire!(buffer_pool.try_write(), 5) {
-            Some(p) => p,
-            None => skip_callback!(),
+        // Get buffer pool - use try_write with spin retry
+        let mut pool = {
+            let mut result = buffer_pool.try_write();
+            for _ in 0..5 {
+                if result.is_some() {
+                    break;
+                }
+                std::hint::spin_loop();
+                result = buffer_pool.try_write();
+            }
+            match result {
+                Some(p) => p,
+                None => skip_callback!(),
+            }
         };
 
         // Track which input buffers have been read this callback (per-device tracking)
@@ -287,7 +287,8 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
         // ========== Bus Processing (Cache-based with topological ordering) ==========
         // Process buses in dependency order, using cache to avoid reprocessing
-        if let (Some(bus_sends), Some(buses), Some(ref mut bus_buffers)) = (bus_sends, buses, bus_buffers.as_mut()) {
+        if let Some(ref mut bus_buffers) = bus_buffers.as_mut() {
+            if !buses.is_empty() {
             
             // Always get a new sample counter for this callback
             // Each output device processes independently, but caches within the same callback
@@ -324,11 +325,8 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 }
             }
             
-            // Process buses using pre-computed topological order
-            let processing_order = mixer_state.bus_sends.try_read_order();
-            
-            if let Some(order) = processing_order {
-                for &bus_idx_u8 in order.iter() {
+            // Process buses using pre-computed topological order from snapshot
+            for &bus_idx_u8 in processing_order.iter() {
                     let bus_idx = bus_idx_u8 as usize;
                     
                     if bus_idx >= bus_buffers.len() || bus_idx >= buses.len() {
@@ -485,7 +483,6 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     // Mark as processed
                     bus_buffers[bus_idx].mark_processed(sample_counter, frames);
                 }
-            }
             
             // Mix buses to output (Bus -> Output)
             for send in bus_sends.iter() {
@@ -550,6 +547,7 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 
                 mixer_state.update_bus_level(bus_idx, left_rms, right_rms, left_peak, right_peak);
             }
+            } // end if !buses.is_empty()
         }
 
         // ========== Direct Sends (Input -> Output) ==========

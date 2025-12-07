@@ -1,7 +1,9 @@
 //! Audio Mixer Engine
 //! Uses Accelerate vDSP for hardware-accelerated mixing
+//! Lock-free design using ArcSwap for audio callback safety
 
 use crate::vdsp::VDsp;
+use arc_swap::ArcSwap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -228,6 +230,39 @@ impl BusProcessingState {
     #[inline]
     pub fn next_cycle(&self) -> (u64, bool) {
         self.sample_counter.try_increment()
+    }
+}
+
+// ========== Lock-Free Snapshot Structures ==========
+
+/// Immutable snapshot of mixer state for audio callback
+/// This is atomically swapped using ArcSwap for lock-free access
+#[derive(Clone)]
+pub struct MixerSnapshot {
+    /// Direct sends (Input -> Output)
+    pub sends: Vec<SendCompact>,
+    /// Bus sends (compact form)
+    pub bus_sends: Vec<BusSendCompact>,
+    /// Bus definitions
+    pub buses: Vec<Bus>,
+    /// Pre-computed topological processing order
+    pub processing_order: Vec<u8>,
+    /// Source faders (per stereo pair)
+    pub source_faders: [f32; PRISM_CHANNELS / 2],
+    /// Source mutes (per stereo pair)
+    pub source_mutes: [bool; PRISM_CHANNELS / 2],
+}
+
+impl Default for MixerSnapshot {
+    fn default() -> Self {
+        Self {
+            sends: Vec::new(),
+            bus_sends: Vec::new(),
+            buses: Vec::new(),
+            processing_order: Vec::new(),
+            source_faders: [1.0; PRISM_CHANNELS / 2],
+            source_mutes: [false; PRISM_CHANNELS / 2],
+        }
     }
 }
 
@@ -931,6 +966,10 @@ pub struct MixerState {
     pub sample_rate: RwLock<u32>,
     /// Buffer size
     pub buffer_size: RwLock<u32>,
+    
+    // ========== Lock-Free Snapshot for Audio Callback ==========
+    /// Atomically swappable snapshot for lock-free audio callback access
+    pub snapshot: ArcSwap<MixerSnapshot>,
 }
 
 impl Default for MixerState {
@@ -955,7 +994,43 @@ impl MixerState {
             bus_levels: RwLock::new([ChannelLevels::default(); MAX_BUSES]),
             sample_rate: RwLock::new(48000),
             buffer_size: RwLock::new(128),
+            snapshot: ArcSwap::from_pointee(MixerSnapshot::default()),
         }
+    }
+    
+    /// Rebuild the lock-free snapshot (call after any routing/fader change)
+    pub fn rebuild_snapshot(&self) {
+        let sends_compact = self.sends_compact.try_read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let bus_sends = self.bus_sends.try_read_sends()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let buses = self.bus_sends.try_read_buses()
+            .map(|b| b.clone())
+            .unwrap_or_default();
+        let processing_order = self.bus_sends.try_read_order()
+            .map(|o| o.clone())
+            .unwrap_or_default();
+        let source_faders = self.source_faders.read().clone();
+        let source_mutes = self.source_mutes.read().clone();
+        
+        let new_snapshot = MixerSnapshot {
+            sends: sends_compact,
+            bus_sends,
+            buses,
+            processing_order,
+            source_faders,
+            source_mutes,
+        };
+        
+        self.snapshot.store(Arc::new(new_snapshot));
+    }
+    
+    /// Get lock-free snapshot for audio callback
+    #[inline]
+    pub fn load_snapshot(&self) -> arc_swap::Guard<Arc<MixerSnapshot>> {
+        self.snapshot.load()
     }
 
     /// Rebuild compact sends array (call after any send/fader change)
@@ -978,6 +1053,9 @@ impl MixerState {
         for (device_hash, device_id) in target_devices {
             allocate_buffers_for_output(device_hash, &device_id, &sends);
         }
+        
+        // Rebuild lock-free snapshot
+        self.rebuild_snapshot();
     }
 
     /// Add or update a send (1ch unit)
@@ -1024,6 +1102,7 @@ impl MixerState {
     pub fn set_source_fader(&self, pair_index: usize, level: f32) {
         if pair_index < PRISM_CHANNELS / 2 {
             self.source_faders.write()[pair_index] = (level / 100.0).clamp(0.0, 1.0);
+            self.rebuild_snapshot();
         }
     }
 
@@ -1031,6 +1110,7 @@ impl MixerState {
     pub fn set_source_mute(&self, pair_index: usize, muted: bool) {
         if pair_index < PRISM_CHANNELS / 2 {
             self.source_mutes.write()[pair_index] = muted;
+            self.rebuild_snapshot();
         }
     }
 
@@ -1087,7 +1167,9 @@ impl MixerState {
         // Add bus buffer
         let mut buffers = self.bus_buffers.write();
         buffers.push(BusBuffer::new());
+        drop(buffers);
         
+        self.rebuild_snapshot();
         println!("[Mixer] Added bus: {}", id);
     }
 
@@ -1101,7 +1183,9 @@ impl MixerState {
             if idx < buffers.len() {
                 buffers.remove(idx);
             }
+            drop(buffers);
             
+            self.rebuild_snapshot();
             println!("[Mixer] Removed bus: {}", bus_id);
         }
     }
@@ -1109,16 +1193,19 @@ impl MixerState {
     /// Set bus fader
     pub fn set_bus_fader(&self, bus_id: &str, level: f32) {
         self.bus_sends.set_bus_fader(bus_id, level.clamp(0.0, 1.0));
+        self.rebuild_snapshot();
     }
 
     /// Set bus mute
     pub fn set_bus_mute(&self, bus_id: &str, muted: bool) {
         self.bus_sends.set_bus_mute(bus_id, muted);
+        self.rebuild_snapshot();
     }
     
     /// Set bus plugin chain
     pub fn set_bus_plugins(&self, bus_id: &str, plugin_ids: Vec<String>) {
         self.bus_sends.set_bus_plugins(bus_id, plugin_ids);
+        self.rebuild_snapshot();
     }
     
     /// Get bus plugin chain
@@ -1132,6 +1219,7 @@ impl MixerState {
             send.source_type, send.source_id, send.source_channel,
             send.target_type, send.target_id, send.target_channel, send.level);
         self.bus_sends.set_bus_send(send);
+        self.rebuild_snapshot();
     }
 
     /// Remove a bus send
@@ -1149,6 +1237,7 @@ impl MixerState {
             source_type, source_id, source_device, source_channel,
             target_type, target_id, target_channel,
         );
+        self.rebuild_snapshot();
     }
 
     /// Get all buses
