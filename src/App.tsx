@@ -50,6 +50,11 @@ import {
   removeBus as removeBusApi,
   updateBusSend,
   removeBusSend,
+  // AudioUnit API
+  getEffectAudioUnits,
+  createAudioUnitInstance,
+  removeAudioUnitInstance,
+  openAudioUnitUI,
   // setRouting, // TODO: Re-enable when channel routing is implemented
   type AppSource,
   type DriverStatus,
@@ -58,6 +63,7 @@ import {
   type AppState,
   type InputDeviceInfo,
   type ActiveCaptureInfo,
+  type AudioUnitPluginInfo,
 } from './lib/prismd';
 
 // --- Types ---
@@ -484,6 +490,12 @@ export default function App() {
   // Bus node counter and selected bus for detail view
   const [busCounter, setBusCounter] = useState(1);
   const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
+
+  // Plugin browser state
+  const [showPluginBrowser, setShowPluginBrowser] = useState(false);
+  const [availablePlugins, setAvailablePlugins] = useState<AudioUnitPluginInfo[]>([]);
+  const [pluginSearchQuery, setPluginSearchQuery] = useState('');
+  const [pluginBrowserTargetBusId, setPluginBrowserTargetBusId] = useState<string | null>(null);
 
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -3048,7 +3060,7 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Effect Chain (Logic-style) */}
+                {/* Effect Chain (Logic-style) with drag-and-drop reordering */}
                 <div className="flex-1 overflow-y-auto p-3">
                   <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-2">
                     Effect Chain
@@ -3064,19 +3076,62 @@ export default function App() {
                       selectedBus.plugins?.map((plugin, idx) => (
                         <div
                           key={plugin.id}
-                          className={`flex items-center gap-2 p-2 rounded-lg border transition-all ${
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData('plugin-idx', idx.toString());
+                            e.dataTransfer.setData('bus-id', selectedBusId || '');
+                            e.dataTransfer.effectAllowed = 'move';
+                          }}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const fromIdx = parseInt(e.dataTransfer.getData('plugin-idx'), 10);
+                            const busId = e.dataTransfer.getData('bus-id');
+                            const toIdx = idx;
+                            if (busId !== selectedBusId || fromIdx === toIdx || isNaN(fromIdx)) return;
+
+                            // Reorder plugins
+                            setNodes(prev => prev.map(n => {
+                              if (n.id === selectedBusId && n.plugins) {
+                                const newPlugins = [...n.plugins];
+                                const [moved] = newPlugins.splice(fromIdx, 1);
+                                newPlugins.splice(toIdx, 0, moved);
+                                return { ...n, plugins: newPlugins };
+                              }
+                              return n;
+                            }));
+                          }}
+                          onClick={async () => {
+                            // Open AudioUnit UI when clicking on the plugin slot
+                            try {
+                              await openAudioUnitUI(plugin.id);
+                            } catch (error) {
+                              console.error('Failed to open AudioUnit UI:', error);
+                            }
+                          }}
+                          className={`flex items-center gap-2 p-2 rounded-lg border transition-all cursor-pointer hover:border-purple-400 ${
                             plugin.enabled
                               ? 'bg-purple-500/10 border-purple-500/30'
                               : 'bg-slate-800/50 border-slate-700 opacity-50'
                           }`}
                         >
+                          {/* Drag handle */}
+                          <div className="w-4 flex flex-col items-center gap-0.5 cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400">
+                            <div className="w-2 h-0.5 bg-current rounded"></div>
+                            <div className="w-2 h-0.5 bg-current rounded"></div>
+                            <div className="w-2 h-0.5 bg-current rounded"></div>
+                          </div>
                           <div className="w-4 text-[9px] text-slate-500 text-center">{idx + 1}</div>
                           <div className="flex-1 min-w-0">
                             <div className="text-[10px] font-medium text-slate-200 truncate">{plugin.name}</div>
                             <div className="text-[8px] text-slate-500 truncate">{plugin.manufacturer}</div>
                           </div>
                           <button
-                            onClick={() => {
+                            onClick={(e) => {
+                              e.stopPropagation(); // Prevent opening UI
                               // Toggle plugin enabled state
                               setNodes(prev => prev.map(n => {
                                 if (n.id === selectedBusId && n.plugins) {
@@ -3098,6 +3153,29 @@ export default function App() {
                           >
                             {plugin.enabled ? 'ON' : 'OFF'}
                           </button>
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation(); // Prevent opening UI
+                              // Remove plugin
+                              try {
+                                await removeAudioUnitInstance(plugin.id);
+                                setNodes(prev => prev.map(n => {
+                                  if (n.id === selectedBusId && n.plugins) {
+                                    return {
+                                      ...n,
+                                      plugins: n.plugins.filter(p => p.id !== plugin.id),
+                                    };
+                                  }
+                                  return n;
+                                }));
+                              } catch (error) {
+                                console.error('Failed to remove AudioUnit instance:', error);
+                              }
+                            }}
+                            className="w-5 h-5 rounded flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-red-500/20 transition-colors"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
                         </div>
                       ))
                     )}
@@ -3105,25 +3183,16 @@ export default function App() {
 
                   {/* Add Plugin Button */}
                   <button
-                    onClick={() => {
-                      // TODO: Open AudioUnit plugin browser
-                      // For now, add a placeholder plugin
-                      const newPlugin: AudioUnitPlugin = {
-                        id: `plugin_${Date.now()}`,
-                        name: 'Placeholder Effect',
-                        manufacturer: 'System',
-                        type: 'effect',
-                        enabled: true,
-                      };
-                      setNodes(prev => prev.map(n => {
-                        if (n.id === selectedBusId) {
-                          return {
-                            ...n,
-                            plugins: [...(n.plugins || []), newPlugin],
-                          };
-                        }
-                        return n;
-                      }));
+                    onClick={async () => {
+                      // Open AudioUnit plugin browser
+                      setPluginBrowserTargetBusId(selectedBusId);
+                      try {
+                        const plugins = await getEffectAudioUnits();
+                        setAvailablePlugins(plugins);
+                        setShowPluginBrowser(true);
+                      } catch (error) {
+                        console.error('Failed to fetch AudioUnit plugins:', error);
+                      }
                     }}
                     className="w-full mt-3 py-2 px-3 rounded-lg border border-dashed border-purple-500/30 bg-purple-500/5 hover:bg-purple-500/10 text-purple-400 hover:text-purple-300 transition-all text-[10px] font-medium flex items-center justify-center gap-2"
                   >
@@ -4115,6 +4184,162 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Plugin Browser Modal */}
+      {showPluginBrowser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => {
+            setShowPluginBrowser(false);
+            setPluginSearchQuery('');
+          }}
+        >
+          <div
+            className="bg-slate-900 border border-purple-500/30 rounded-xl shadow-2xl w-[600px] max-h-[80vh] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b border-slate-700">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Workflow className="w-5 h-5 text-purple-400" />
+                AudioUnit Plugins
+              </h2>
+              <button
+                onClick={() => {
+                  setShowPluginBrowser(false);
+                  setPluginSearchQuery('');
+                }}
+                className="text-slate-400 hover:text-white transition-colors p-1 hover:bg-slate-800 rounded"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Search */}
+            <div className="p-4 border-b border-slate-800">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                <input
+                  type="text"
+                  value={pluginSearchQuery}
+                  onChange={e => setPluginSearchQuery(e.target.value)}
+                  placeholder="Search plugins..."
+                  className="w-full bg-slate-800 border border-slate-600 rounded-lg pl-10 pr-4 py-2 text-white text-sm focus:border-purple-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            {/* Plugin List */}
+            <div className="flex-1 overflow-y-auto p-2">
+              {(() => {
+                // Filter plugins by search query
+                const filteredPlugins = availablePlugins.filter(plugin => {
+                  const query = pluginSearchQuery.toLowerCase();
+                  return plugin.name.toLowerCase().includes(query) ||
+                    plugin.manufacturer.toLowerCase().includes(query);
+                });
+
+                // Group by manufacturer
+                const byManufacturer = filteredPlugins.reduce((acc, plugin) => {
+                  if (!acc[plugin.manufacturer]) {
+                    acc[plugin.manufacturer] = [];
+                  }
+                  acc[plugin.manufacturer].push(plugin);
+                  return acc;
+                }, {} as Record<string, AudioUnitPluginInfo[]>);
+
+                const manufacturers = Object.keys(byManufacturer).sort();
+
+                if (manufacturers.length === 0) {
+                  return (
+                    <div className="flex items-center justify-center h-32 text-slate-500 text-sm">
+                      {pluginSearchQuery ? 'No plugins found' : 'Loading plugins...'}
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-4">
+                    {manufacturers.map(manufacturer => (
+                      <div key={manufacturer}>
+                        <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-2 py-1">
+                          {manufacturer}
+                        </div>
+                        <div className="space-y-1">
+                          {byManufacturer[manufacturer].map(plugin => (
+                            <button
+                              key={plugin.id}
+                              onClick={async () => {
+                                if (!pluginBrowserTargetBusId) return;
+
+                                try {
+                                  // Create AudioUnit instance
+                                  const instanceId = await createAudioUnitInstance(plugin.id);
+
+                                  // Add to bus plugins
+                                  const newPlugin: AudioUnitPlugin = {
+                                    id: instanceId,
+                                    name: plugin.name,
+                                    manufacturer: plugin.manufacturer,
+                                    type: plugin.plugin_type,
+                                    enabled: true,
+                                  };
+
+                                  setNodes(prev => prev.map(n => {
+                                    if (n.id === pluginBrowserTargetBusId) {
+                                      return {
+                                        ...n,
+                                        plugins: [...(n.plugins || []), newPlugin],
+                                      };
+                                    }
+                                    return n;
+                                  }));
+
+                                  setShowPluginBrowser(false);
+                                  setPluginSearchQuery('');
+                                } catch (error) {
+                                  console.error('Failed to create AudioUnit instance:', error);
+                                }
+                              }}
+                              className="w-full flex items-center gap-3 p-3 rounded-lg bg-slate-800/50 hover:bg-purple-500/20 border border-transparent hover:border-purple-500/30 transition-all text-left group"
+                            >
+                              <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center shrink-0">
+                                <Music className="w-4 h-4 text-purple-400" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm font-medium text-white truncate group-hover:text-purple-300">
+                                  {plugin.name}
+                                </div>
+                                <div className="text-[10px] text-slate-500 flex items-center gap-2">
+                                  <span>{plugin.plugin_type}</span>
+                                  {plugin.sandbox_safe && (
+                                    <span className="px-1 py-0.5 rounded bg-green-500/20 text-green-400 text-[8px]">
+                                      Sandbox Safe
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <Plus className="w-4 h-4 text-slate-600 group-hover:text-purple-400 transition-colors" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="p-3 border-t border-slate-700 bg-slate-900/50">
+              <div className="text-[10px] text-slate-500 text-center">
+                {availablePlugins.length} AudioUnit effect{availablePlugins.length !== 1 ? 's' : ''} available
+              </div>
             </div>
           </div>
         </div>

@@ -3549,10 +3549,14 @@ dependencies = [
 name = "spectrum"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "coreaudio-rs",
  "crossbeam-channel",
  "dirs 5.0.1",
  "lazy_static",
+ "objc2 0.6.3",
+ "objc2-app-kit",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "ringbuf",
  "serde",

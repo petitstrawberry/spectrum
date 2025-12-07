@@ -27,6 +27,11 @@ ringbuf = "0.4"
 lazy_static = "1.5"
 dirs = "5"
 shellexpand = "3"
+# For AudioUnit UI (Cocoa/AppKit integration)
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+block2 = "0.6"
 
 [profile.dev]
 incremental = true

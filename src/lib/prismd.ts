@@ -594,3 +594,88 @@ export async function removeBusSend(
     targetChannel,
   });
 }
+
+// --- AudioUnit Types ---
+
+export interface AudioUnitPluginInfo {
+  id: string;
+  name: string;
+  manufacturer: string;
+  plugin_type: string;  // "effect", "music_effect", "instrument", "generator"
+  sandbox_safe: boolean;
+}
+
+export interface AudioUnitInstanceInfo {
+  instance_id: string;
+  plugin_id: string;
+  name: string;
+  manufacturer: string;
+  plugin_type: string;
+  enabled: boolean;
+}
+
+// --- AudioUnit API Functions ---
+
+/**
+ * Get all effect AudioUnits (includes 'aufx' and 'aumf' types)
+ */
+export async function getEffectAudioUnits(): Promise<AudioUnitPluginInfo[]> {
+  return invoke<AudioUnitPluginInfo[]>('get_effect_audio_units');
+}
+
+/**
+ * Get all instrument AudioUnits
+ */
+export async function getInstrumentAudioUnits(): Promise<AudioUnitPluginInfo[]> {
+  return invoke<AudioUnitPluginInfo[]>('get_instrument_audio_units');
+}
+
+/**
+ * Create an AudioUnit instance from a plugin ID
+ * Returns the instance ID
+ */
+export async function createAudioUnitInstance(pluginId: string): Promise<string> {
+  return invoke<string>('create_audio_unit_instance', { pluginId });
+}
+
+/**
+ * Remove an AudioUnit instance
+ */
+export async function removeAudioUnitInstance(instanceId: string): Promise<boolean> {
+  return invoke<boolean>('remove_audio_unit_instance', { instanceId });
+}
+
+/**
+ * Set AudioUnit instance enabled state
+ */
+export async function setAudioUnitEnabled(instanceId: string, enabled: boolean): Promise<boolean> {
+  return invoke<boolean>('set_audio_unit_enabled', { instanceId, enabled });
+}
+
+/**
+ * List all AudioUnit instances
+ */
+export async function listAudioUnitInstances(): Promise<AudioUnitInstanceInfo[]> {
+  return invoke<AudioUnitInstanceInfo[]>('list_audio_unit_instances');
+}
+
+/**
+ * Open the AudioUnit UI for a specific instance
+ */
+export async function openAudioUnitUI(instanceId: string): Promise<void> {
+  return invoke('open_audio_unit_ui', { instanceId });
+}
+
+/**
+ * Close the AudioUnit UI for a specific instance
+ */
+export async function closeAudioUnitUI(instanceId: string): Promise<void> {
+  return invoke('close_audio_unit_ui', { instanceId });
+}
+
+/**
+ * Check if an AudioUnit UI is open
+ */
+export async function isAudioUnitUIOpen(instanceId: string): Promise<boolean> {
+  return invoke<boolean>('is_audio_unit_ui_open', { instanceId });
+}

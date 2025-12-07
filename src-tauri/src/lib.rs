@@ -5,6 +5,8 @@
 mod audio;
 mod audio_capture;
 mod audio_output;
+mod audio_unit;
+mod audio_unit_ui;
 mod config;
 mod mixer;
 mod prismd;
@@ -462,6 +464,128 @@ fn remove_bus_send(
     );
 }
 
+// --- AudioUnit Commands ---
+
+/// AudioUnit plugin info for frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioUnitPluginInfo {
+    pub id: String,
+    pub name: String,
+    pub manufacturer: String,
+    pub plugin_type: String,
+    pub sandbox_safe: bool,
+}
+
+/// Get all effect AudioUnits
+#[tauri::command]
+fn get_effect_audio_units() -> Vec<AudioUnitPluginInfo> {
+    audio_unit::get_effect_audio_units()
+        .into_iter()
+        .map(|au| AudioUnitPluginInfo {
+            id: au.id,
+            name: au.name,
+            manufacturer: au.manufacturer,
+            plugin_type: au.plugin_type,
+            sandbox_safe: au.sandbox_safe,
+        })
+        .collect()
+}
+
+/// Get all instrument AudioUnits
+#[tauri::command]
+fn get_instrument_audio_units() -> Vec<AudioUnitPluginInfo> {
+    audio_unit::get_instrument_audio_units()
+        .into_iter()
+        .map(|au| AudioUnitPluginInfo {
+            id: au.id,
+            name: au.name,
+            manufacturer: au.manufacturer,
+            plugin_type: au.plugin_type,
+            sandbox_safe: au.sandbox_safe,
+        })
+        .collect()
+}
+
+/// Create an AudioUnit instance
+#[tauri::command]
+fn create_audio_unit_instance(plugin_id: String) -> Result<String, String> {
+    // Find the plugin info first
+    let effects = audio_unit::get_effect_audio_units();
+    let instruments = audio_unit::get_instrument_audio_units();
+    
+    let info = effects.iter()
+        .chain(instruments.iter())
+        .find(|au| au.id == plugin_id)
+        .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
+    
+    audio_unit::get_au_manager().create_instance(info)
+}
+
+/// Remove an AudioUnit instance
+#[tauri::command]
+fn remove_audio_unit_instance(instance_id: String) -> bool {
+    audio_unit::get_au_manager().remove_instance(&instance_id)
+}
+
+/// Set AudioUnit instance enabled state
+#[tauri::command]
+fn set_audio_unit_enabled(instance_id: String, enabled: bool) -> bool {
+    audio_unit::get_au_manager().set_enabled(&instance_id, enabled)
+}
+
+/// AudioUnit instance info for frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioUnitInstanceInfo {
+    pub instance_id: String,
+    pub plugin_id: String,
+    pub name: String,
+    pub manufacturer: String,
+    pub plugin_type: String,
+    pub enabled: bool,
+}
+
+/// List all AudioUnit instances
+#[tauri::command]
+fn list_audio_unit_instances() -> Vec<AudioUnitInstanceInfo> {
+    audio_unit::get_au_manager().list_instances()
+        .into_iter()
+        .map(|(id, info, enabled)| AudioUnitInstanceInfo {
+            instance_id: id,
+            plugin_id: info.id,
+            name: info.name,
+            manufacturer: info.manufacturer,
+            plugin_type: info.plugin_type,
+            enabled,
+        })
+        .collect()
+}
+
+/// Open AudioUnit plugin UI window
+#[tauri::command]
+fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
+    let manager = audio_unit::get_au_manager();
+    let instance = manager.get_instance(&instance_id)
+        .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
+    
+    let instance = instance.read();
+    let handle = instance.get_handle();
+    let name = instance.info.name.clone();
+    
+    audio_unit_ui::open_audio_unit_ui(&instance_id, handle, &name)
+}
+
+/// Close AudioUnit plugin UI window
+#[tauri::command]
+fn close_audio_unit_ui(instance_id: String) {
+    audio_unit_ui::close_audio_unit_ui(&instance_id);
+}
+
+/// Check if AudioUnit plugin UI window is open
+#[tauri::command]
+fn is_audio_unit_ui_open(instance_id: String) -> bool {
+    audio_unit_ui::is_plugin_window_open(&instance_id)
+}
+
 /// Get current I/O buffer size setting
 #[tauri::command]
 fn get_buffer_size() -> usize {
@@ -869,6 +993,16 @@ pub fn run() {
             get_buses,
             update_bus_send,
             remove_bus_send,
+            // AudioUnit commands
+            get_effect_audio_units,
+            get_instrument_audio_units,
+            create_audio_unit_instance,
+            remove_audio_unit_instance,
+            set_audio_unit_enabled,
+            list_audio_unit_instances,
+            open_audio_unit_ui,
+            close_audio_unit_ui,
+            is_audio_unit_ui_open,
             // Config commands
             get_app_state,
             save_app_state,
