@@ -128,12 +128,89 @@ extern "C" {
         n: vDSP_Length,
         flag: u32, // 0 = power, 1 = amplitude
     );
+    
+    // Gather from interleaved: extract every stride-th element
+    // C[i] = A[i * stride_a]
+    pub fn vDSP_vgathr(
+        a: *const f32,
+        indices: *const vDSP_Length,
+        stride_indices: vDSP_Stride,
+        c: *mut f32,
+        stride_c: vDSP_Stride,
+        n: vDSP_Length,
+    );
 }
 
 /// Safe wrapper for vDSP operations
 pub struct VDsp;
 
 impl VDsp {
+    /// Deinterleave: extract single channel from interleaved buffer using vDSP stride
+    /// input: interleaved buffer [L0, R0, L1, R1, ...]
+    /// channel: 0 for L, 1 for R, etc.
+    /// num_channels: total channels in interleaved data
+    /// output: single channel samples
+    #[inline]
+    pub fn deinterleave(
+        input: &[f32],
+        channel: usize,
+        num_channels: usize,
+        output: &mut [f32],
+    ) {
+        if num_channels == 0 || channel >= num_channels || input.is_empty() || output.is_empty() {
+            return;
+        }
+        let count = output.len().min(input.len() / num_channels);
+        if count == 0 {
+            return;
+        }
+        unsafe {
+            // Use vDSP_vsmul with stride to copy every num_channels-th sample starting at offset
+            vDSP_vsmul(
+                input.as_ptr().add(channel),
+                num_channels as i32,
+                &1.0f32,
+                output.as_mut_ptr(),
+                1,
+                count,
+            );
+        }
+    }
+
+    /// RMS with stride (for interleaved buffers)
+    #[inline]
+    pub fn rms_strided(buf: &[f32], offset: usize, stride: usize, count: usize) -> f32 {
+        if count == 0 || offset >= buf.len() || stride == 0 {
+            return 0.0;
+        }
+        let actual_count = count.min((buf.len() - offset) / stride + 1);
+        if actual_count == 0 {
+            return 0.0;
+        }
+        let mut mean_sq: f32 = 0.0;
+        unsafe {
+            vDSP_measqv(buf.as_ptr().add(offset), stride as i32, &mut mean_sq, actual_count);
+        }
+        mean_sq.sqrt()
+    }
+
+    /// Peak with stride (for interleaved buffers)
+    #[inline]
+    pub fn peak_strided(buf: &[f32], offset: usize, stride: usize, count: usize) -> f32 {
+        if count == 0 || offset >= buf.len() || stride == 0 {
+            return 0.0;
+        }
+        let actual_count = count.min((buf.len() - offset) / stride + 1);
+        if actual_count == 0 {
+            return 0.0;
+        }
+        let mut peak: f32 = 0.0;
+        unsafe {
+            vDSP_maxmgv(buf.as_ptr().add(offset), stride as i32, &mut peak, actual_count);
+        }
+        peak
+    }
+
     /// Mix input buffer into interleaved output with gain and stride
     /// This is the DAW-style mixing: out[offset + i*stride] += input[i] * gain
     /// Fully hardware-accelerated using vDSP_vsma

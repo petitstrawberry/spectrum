@@ -1,7 +1,7 @@
 //! CoreAudio Output
 //! Routes audio from input buffer to output devices
 
-use crate::mixer::get_mixer_state;
+use crate::mixer::{get_mixer_state, hash_device_id};
 use crate::vdsp::VDsp;
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_default_device_id, get_device_name, set_device_sample_rate,
@@ -190,13 +190,21 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
     }
 
     let running_callback = running.clone();
-    let dev_id_str = device_id.to_string();
+    let dev_id_hash = hash_device_id(&device_id.to_string());
     let dev_id_for_callback = device_id;
     let out_ch = channels as usize;
 
-    // Temporary buffers for audio data - pre-allocate for efficiency
-    // These are sized for typical audio buffer sizes (512-2048 frames)
+    // Pre-allocated buffers for audio data - avoids allocation in callback
     const MAX_FRAMES: usize = 4096;
+    // Maximum unique source pairs we can cache per callback (keep small to avoid stack overflow)
+    const MAX_CACHED_PAIRS: usize = 8;
+
+    // Pre-allocate buffers outside the callback closure to avoid stack overflow
+    // These are captured by the closure and live on the heap via the closure
+    let mut left_bufs: [[f32; MAX_FRAMES]; MAX_CACHED_PAIRS] = [[0.0; MAX_FRAMES]; MAX_CACHED_PAIRS];
+    let mut right_bufs: [[f32; MAX_FRAMES]; MAX_CACHED_PAIRS] = [[0.0; MAX_FRAMES]; MAX_CACHED_PAIRS];
+    let mut cache_keys: [(u32, usize, usize); MAX_CACHED_PAIRS] = [(0, 0, 0); MAX_CACHED_PAIRS]; // (source_device, pair_idx, read_count)
+    let mut cache_valid: [bool; MAX_CACHED_PAIRS] = [false; MAX_CACHED_PAIRS];
 
     // Set render callback
     type Args = render_callback::Args<data::Interleaved<f32>>;
@@ -209,45 +217,64 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         let Args { data, num_frames, .. } = args;
         let buffer = data.buffer;
 
-        // Get mixer state
-        let mixer_state = get_mixer_state();
-        let sends = mixer_state.sends.read();
-        let output_faders = mixer_state.output_faders.read();
-
-        // Initialize output buffer to silence using vDSP (hardware accelerated)
-        VDsp::clear(buffer);
-
         let frames = num_frames as usize;
         if frames > MAX_FRAMES {
             return Ok(()); // Safety check
         }
 
-        // Get master fader gain for this device
-        let master_gain = output_faders.get(&dev_id_str.to_string()).copied().unwrap_or(1.0);
+        // Initialize output buffer to silence using vDSP (hardware accelerated)
+        VDsp::clear(buffer);
 
-        // Stack-allocated temp buffers (for single channel read)
-        let mut mono_buf = [0.0f32; MAX_FRAMES];
-        
-        // Cache for read audio pairs to avoid reading the same pair multiple times
-        // This is important because read_channel_audio advances the read position
-        // Key: (source_device, pair_idx), Value: (left_data, right_data, read_count)
-        let mut pair_cache: std::collections::HashMap<(u32, usize), ([f32; MAX_FRAMES], [f32; MAX_FRAMES], usize)> = 
-            std::collections::HashMap::new();
+        // Get mixer state - use compact sends for fast iteration
+        // Use try_read to avoid blocking - if locked, skip this callback (better than glitch)
+        let mixer_state = get_mixer_state();
+        let sends = match mixer_state.sends_compact.try_read() {
+            Some(s) => s,
+            None => return Ok(()), // Skip if locked
+        };
+        let faders = match mixer_state.source_faders.try_read() {
+            Some(f) => *f,
+            None => return Ok(()),
+        };
+        let mutes = match mixer_state.source_mutes.try_read() {
+            Some(m) => *m,
+            None => return Ok(()),
+        };
+
+        // Reset cache for this callback
+        let mut cache_count = 0usize;
+        for i in 0..MAX_CACHED_PAIRS {
+            cache_valid[i] = false;
+        }
 
         // Mix audio from sends targeting this device (1ch unit)
         for send in sends.iter() {
-            if send.muted || send.level <= 0.0 {
+            if !send.active {
                 continue;
             }
 
-            // Check if this send targets this device
-            if send.target_device != dev_id_str {
+            // Check if this send targets this device (use hash for fast comparison)
+            if send.target_device_hash != dev_id_hash {
                 continue;
             }
 
             // Get source device and channel (1ch unit)
             let source_dev = send.source_device;
             let source_ch = send.source_channel as usize;
+
+            // Check if source pair is muted
+            let pair_idx = source_ch / 2;
+            if pair_idx < mutes.len() && mutes[pair_idx] {
+                continue;
+            }
+
+            // Get source fader
+            let source_gain = if pair_idx < faders.len() { faders[pair_idx] } else { 1.0 };
+            let total_gain = send.level * source_gain;
+
+            if total_gain < 0.0001 {
+                continue;
+            }
 
             // Get target channel (1ch unit)
             let target_ch = send.target_channel as usize;
@@ -257,67 +284,67 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                 continue;
             }
 
-            // For Prism (source_dev == 0): source_ch includes channelOffset (e.g., ch 6, 7 for pair 3)
-            // For real input devices: source_ch is the direct channel index (0, 1, 2, ...)
-            
-            // Calculate pair index and whether it's the right channel
-            let pair_idx = source_ch / 2;
+            // Calculate whether it's the right channel
             let is_right = source_ch % 2 == 1;
             
-            // Get or read the pair data (only read once per source device + pair)
-            let cache_key = (source_dev, pair_idx);
-            let (left_temp, right_temp, read_count) = pair_cache.entry(cache_key).or_insert_with(|| {
-                let mut left = [0.0f32; MAX_FRAMES];
-                let mut right = [0.0f32; MAX_FRAMES];
+            // Find or create cache entry (linear search is fine for small N)
+            let (cache_idx, read_count) = {
+                let mut found_idx: Option<usize> = None;
+                for i in 0..cache_count {
+                    if cache_valid[i] && cache_keys[i].0 == source_dev && cache_keys[i].1 == pair_idx {
+                        found_idx = Some(i);
+                        break;
+                    }
+                }
                 
-                // Use different read function based on source device
-                // source_dev == 0 means Prism (virtual device), otherwise it's a real input device
-                let count = if source_dev == 0 {
-                    // Prism: read from broadcast buffer using pair channels
-                    crate::audio_capture::read_channel_audio(
-                        dev_id_for_callback,  // Output device ID for position tracking
-                        pair_idx * 2,
-                        pair_idx * 2 + 1,
-                        &mut left[..frames],
-                        &mut right[..frames],
-                    )
+                if let Some(idx) = found_idx {
+                    (idx, cache_keys[idx].2)
+                } else if cache_count < MAX_CACHED_PAIRS {
+                    // Read audio data into pre-allocated buffers
+                    let idx = cache_count;
+                    let count = if source_dev == 0 {
+                        crate::audio_capture::read_channel_audio(
+                            dev_id_for_callback,
+                            pair_idx * 2,
+                            pair_idx * 2 + 1,
+                            &mut left_bufs[idx][..frames],
+                            &mut right_bufs[idx][..frames],
+                        )
+                    } else {
+                        crate::audio_capture::read_input_audio(
+                            source_dev,
+                            dev_id_for_callback,
+                            pair_idx * 2,
+                            pair_idx * 2 + 1,
+                            &mut left_bufs[idx][..frames],
+                            &mut right_bufs[idx][..frames],
+                        )
+                    };
+                    
+                    cache_keys[idx] = (source_dev, pair_idx, count);
+                    cache_valid[idx] = true;
+                    cache_count += 1;
+                    (idx, count)
                 } else {
-                    // Real input device: read using device's local channel indices
-                    // For a stereo pair at pair_idx, channels are pair_idx*2 and pair_idx*2+1
-                    let left_ch = pair_idx * 2;
-                    let right_ch = pair_idx * 2 + 1;
-                    crate::audio_capture::read_input_audio(
-                        source_dev,           // Input device ID
-                        dev_id_for_callback,  // Output device ID for position tracking
-                        left_ch,
-                        right_ch,
-                        &mut left[..frames],
-                        &mut right[..frames],
-                    )
-                };
-                (left, right, count)
-            });
+                    continue; // Cache full, skip
+                }
+            };
 
-            if *read_count == 0 {
+            if read_count == 0 {
                 continue;
             }
 
-            // Copy the correct channel to mono_buf
-            let source_data = if is_right { right_temp } else { left_temp };
-            mono_buf[..*read_count].copy_from_slice(&source_data[..*read_count]);
-
-            // Apply send level AND master fader
-            let gain = send.level * master_gain;
+            // Get the correct channel data
+            let source_data = if is_right { &right_bufs[cache_idx] } else { &left_bufs[cache_idx] };
 
             // DAW-style mixing: use vDSP with stride for interleaved output
-            // Mix single channel to interleaved buffer at offset target_ch, stride out_ch
             VDsp::mix_to_interleaved(
-                &mono_buf[..*read_count],
-                gain,
+                &source_data[..read_count],
+                total_gain,
                 buffer,
                 target_ch,
                 out_ch,
-                *read_count,
+                read_count,
             );
         }
 

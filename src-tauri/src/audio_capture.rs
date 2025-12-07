@@ -65,6 +65,37 @@ static PRISM_DEVICE_ID: AtomicU32 = AtomicU32::new(0);
 // Per-Device Capture State
 // ============================================================================
 
+/// Read positions for one output device (lock-free)
+struct OutputReadPositions {
+    /// Read position per channel (atomic for lock-free access)
+    positions: Vec<AtomicUsize>,
+}
+
+impl OutputReadPositions {
+    fn new(num_channels: usize) -> Self {
+        let positions = (0..num_channels)
+            .map(|_| AtomicUsize::new(0))
+            .collect();
+        Self { positions }
+    }
+
+    #[inline]
+    fn get(&self, channel: usize) -> usize {
+        if channel < self.positions.len() {
+            self.positions[channel].load(Ordering::Acquire)
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn set(&self, channel: usize, pos: usize) {
+        if channel < self.positions.len() {
+            self.positions[channel].store(pos, Ordering::Release);
+        }
+    }
+}
+
 /// State for a single input device capture
 struct InputDeviceState {
     device_id: u32,
@@ -74,8 +105,8 @@ struct InputDeviceState {
     running: Arc<AtomicBool>,
     buffers: Arc<RwLock<DeviceBuffers>>,
     levels: Arc<RwLock<Vec<ChannelLevels>>>,
-    /// Read positions per output device: output_device_id -> Vec<read_pos per channel>
-    read_positions: Arc<RwLock<HashMap<u32, Vec<usize>>>>,
+    /// Read positions per output device: output_device_id -> positions (RwLock only for adding new devices)
+    read_positions: Arc<RwLock<HashMap<u32, Arc<OutputReadPositions>>>>,
 }
 
 impl InputDeviceState {
@@ -91,6 +122,27 @@ impl InputDeviceState {
             buffers: Arc::new(RwLock::new(DeviceBuffers::new(channel_count))),
             levels: Arc::new(RwLock::new(vec![ChannelLevels::default(); level_slots.max(1)])),
             read_positions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Get or create read positions for an output device (lock-free after first access)
+    fn get_read_positions(&self, output_device_id: u32) -> Option<Arc<OutputReadPositions>> {
+        // Fast path: try read lock first
+        if let Some(positions) = self.read_positions.read().get(&output_device_id) {
+            return Some(Arc::clone(positions));
+        }
+        // Slow path: need to create entry
+        None
+    }
+
+    /// Register an output device (called from non-realtime context)
+    fn register_output(&self, output_device_id: u32) {
+        let mut positions = self.read_positions.write();
+        if !positions.contains_key(&output_device_id) {
+            positions.insert(
+                output_device_id,
+                Arc::new(OutputReadPositions::new(self.channel_count)),
+            );
         }
     }
 }
@@ -211,8 +263,8 @@ impl AudioBuffers {
 /// Legacy: Global audio buffer storage
 static AUDIO_BUFFERS: RwLock<Option<AudioBuffers>> = RwLock::new(None);
 
-/// Legacy: Read positions for each output device (device_id -> Vec<read_pos per channel>)
-static DEVICE_READ_POSITIONS: LazyLock<RwLock<HashMap<u32, Vec<usize>>>> = 
+/// Legacy: Read positions for each output device (lock-free after registration)
+static DEVICE_READ_POSITIONS: LazyLock<RwLock<HashMap<u32, Arc<OutputReadPositions>>>> = 
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Legacy: Global write frame counter (monotonic)
@@ -455,6 +507,9 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
     let running_callback = running.clone();
     let channel_count = channels as usize;
 
+    // Pre-allocated deinterleave buffer (per-channel)
+    const MAX_FRAMES: usize = 4096;
+
     // Set input callback
     type Args = render_callback::Args<data::Interleaved<f32>>;
     
@@ -470,20 +525,20 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
         let num_channels = channel_count;
         let stereo_pairs = num_channels / 2;
         
-        if buffer.len() < frames * num_channels {
+        if buffer.len() < frames * num_channels || frames > MAX_FRAMES {
             return Ok(());
         }
+
+        // Stack-allocated deinterleave buffer
+        let mut deinterleaved = [0.0f32; MAX_FRAMES];
 
         // Write to broadcast buffers
         if let Some(audio_buffers) = AUDIO_BUFFERS.try_read() {
             if let Some(ref buffers) = *audio_buffers {
-                // Deinterleave and write each channel
+                // Deinterleave and write each channel using vDSP
                 for ch in 0..num_channels.min(buffers.channels.len()) {
-                    let mut channel_samples = Vec::with_capacity(frames);
-                    for frame in 0..frames {
-                        channel_samples.push(buffer[frame * num_channels + ch]);
-                    }
-                    buffers.channels[ch].write(&channel_samples);
+                    VDsp::deinterleave(buffer, ch, num_channels, &mut deinterleaved[..frames]);
+                    buffers.channels[ch].write(&deinterleaved[..frames]);
                 }
                 
                 // Update frame counter
@@ -491,39 +546,27 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
             }
         }
 
-        // Calculate levels for each stereo pair (with lock for UI)
+        // Calculate levels for each stereo pair using vDSP strided operations (no Vec allocation)
         if let Some(mut levels) = LEVEL_DATA.try_write() {
             for pair in 0..stereo_pairs.min(STEREO_PAIRS) {
                 let left_ch = pair * 2;
                 let right_ch = pair * 2 + 1;
 
-                let mut left_data: Vec<f32> = Vec::with_capacity(frames);
-                let mut right_data: Vec<f32> = Vec::with_capacity(frames);
+                // Use vDSP strided operations directly on interleaved buffer
+                let left_rms = VDsp::rms_strided(buffer, left_ch, num_channels, frames);
+                let right_rms = VDsp::rms_strided(buffer, right_ch, num_channels, frames);
+                let left_peak = VDsp::peak_strided(buffer, left_ch, num_channels, frames);
+                let right_peak = VDsp::peak_strided(buffer, right_ch, num_channels, frames);
+
+                let old = levels[pair];
+                let smooth = 0.3;
                 
-                for frame in 0..frames {
-                    let base = frame * num_channels;
-                    if base + right_ch < buffer.len() {
-                        left_data.push(buffer[base + left_ch]);
-                        right_data.push(buffer[base + right_ch]);
-                    }
-                }
-
-                if !left_data.is_empty() && !right_data.is_empty() {
-                    let left_rms = VDsp::rms(&left_data);
-                    let right_rms = VDsp::rms(&right_data);
-                    let left_peak = VDsp::peak(&left_data);
-                    let right_peak = VDsp::peak(&right_data);
-
-                    let old = levels[pair];
-                    let smooth = 0.3;
-                    
-                    levels[pair] = ChannelLevels {
-                        left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
-                        right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
-                        left_peak: left_peak.max(old.left_peak * 0.95),
-                        right_peak: right_peak.max(old.right_peak * 0.95),
-                    };
-                }
+                levels[pair] = ChannelLevels {
+                    left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
+                    right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
+                    left_peak: left_peak.max(old.left_peak * 0.95),
+                    right_peak: right_peak.max(old.right_peak * 0.95),
+                };
             }
         }
 
@@ -669,12 +712,9 @@ pub fn register_output_device(device_id: u32) {
     if let Some(ref audio_buffers) = *buffers {
         let mut positions = DEVICE_READ_POSITIONS.write();
         if !positions.contains_key(&device_id) {
-            // Initialize read positions to current write position (start fresh)
-            let initial_positions: Vec<usize> = audio_buffers.channels
-                .iter()
-                .map(|ch| ch.get_write_pos())
-                .collect();
-            positions.insert(device_id, initial_positions);
+            // Create lock-free position storage
+            let num_channels = audio_buffers.channels.len();
+            positions.insert(device_id, Arc::new(OutputReadPositions::new(num_channels)));
             println!("[AudioCapture] Registered output device {} for reading", device_id);
         }
     }
@@ -719,43 +759,34 @@ pub fn read_channel_audio(
         return 0;
     }
     
-    // Get and update read positions for this device
-    let mut positions = match DEVICE_READ_POSITIONS.try_write() {
-        Some(p) => p,
-        None => return 0,
-    };
-    
-    let device_positions = match positions.get_mut(&device_id) {
-        Some(p) => p,
-        None => {
-            // Device not registered, register now with current write positions
-            drop(positions);
-            register_output_device(device_id);
-            // Try again
-            positions = match DEVICE_READ_POSITIONS.try_write() {
-                Some(p) => p,
-                None => return 0,
-            };
-            match positions.get_mut(&device_id) {
-                Some(p) => p,
-                None => return 0,
+    // Get read positions - lock-free after initial registration
+    let read_pos = {
+        // Fast path: try read lock
+        let positions = match DEVICE_READ_POSITIONS.try_read() {
+            Some(p) => p,
+            None => return 0,
+        };
+        match positions.get(&device_id) {
+            Some(p) => Arc::clone(p),
+            None => {
+                // Slow path: need to register
+                drop(positions);
+                drop(buffers);
+                register_output_device(device_id);
+                return 0; // Will work on next call
             }
         }
     };
     
-    // Read from left channel
-    let left_read_pos = device_positions.get(left_ch).copied().unwrap_or(0);
+    // Read from left channel - fully lock-free!
+    let left_read_pos = read_pos.get(left_ch);
     let new_left_pos = audio_buffers.channels[left_ch].read(left_read_pos, left_out);
-    if left_ch < device_positions.len() {
-        device_positions[left_ch] = new_left_pos;
-    }
+    read_pos.set(left_ch, new_left_pos);
     
-    // Read from right channel
-    let right_read_pos = device_positions.get(right_ch).copied().unwrap_or(0);
+    // Read from right channel - fully lock-free!
+    let right_read_pos = read_pos.get(right_ch);
     let new_right_pos = audio_buffers.channels[right_ch].read(right_read_pos, right_out);
-    if right_ch < device_positions.len() {
-        device_positions[right_ch] = new_right_pos;
-    }
+    read_pos.set(right_ch, new_right_pos);
     
     num_frames
 }
@@ -918,6 +949,9 @@ fn generic_capture_thread(state: Arc<InputDeviceState>) {
     let channel_count = channels as usize;
     let is_prism = state.is_prism;
 
+    // Pre-allocated deinterleave buffer
+    const MAX_FRAMES: usize = 4096;
+
     // Set input callback
     type Args = render_callback::Args<data::Interleaved<f32>>;
 
@@ -936,48 +970,40 @@ fn generic_capture_thread(state: Arc<InputDeviceState>) {
         // Calculate number of level slots: for stereo pairs, plus one more if odd channel count
         let level_slots = (num_channels + 1) / 2;
 
-        if buffer.len() < frames * num_channels {
+        if buffer.len() < frames * num_channels || frames > MAX_FRAMES {
             return Ok(());
         }
 
-        // Write to broadcast buffers
+        // Stack-allocated deinterleave buffer
+        let mut deinterleaved = [0.0f32; MAX_FRAMES];
+
+        // Write to broadcast buffers using vDSP deinterleave
         if let Some(device_buffers) = buffers.try_read() {
-            // Deinterleave and write each channel
             for ch in 0..num_channels.min(device_buffers.channels.len()) {
-                let mut channel_samples = Vec::with_capacity(frames);
-                for frame in 0..frames {
-                    channel_samples.push(buffer[frame * num_channels + ch]);
-                }
-                device_buffers.channels[ch].write(&channel_samples);
+                VDsp::deinterleave(buffer, ch, num_channels, &mut deinterleaved[..frames]);
+                device_buffers.channels[ch].write(&deinterleaved[..frames]);
             }
         }
 
-        // Calculate levels for each channel (or stereo pair)
-        // For odd channel counts (e.g., 1ch mono), we still compute levels using left_rms/left_peak
+        // Calculate levels using vDSP strided operations (no Vec allocation)
         if let Some(mut device_levels) = levels.try_write() {
             for slot in 0..level_slots.min(device_levels.len()) {
                 let left_ch = slot * 2;
                 let right_ch = slot * 2 + 1;
 
-                let mut left_data: Vec<f32> = Vec::with_capacity(frames);
-                let mut right_data: Vec<f32> = Vec::with_capacity(frames);
-
-                for frame in 0..frames {
-                    let base = frame * num_channels;
-                    // Left channel (always exists for this slot)
-                    if left_ch < num_channels {
-                        left_data.push(buffer[base + left_ch]);
-                    }
-                    // Right channel (may not exist for mono devices)
-                    if right_ch < num_channels {
-                        right_data.push(buffer[base + right_ch]);
-                    }
-                }
-
-                let left_rms = if !left_data.is_empty() { VDsp::rms(&left_data) } else { 0.0 };
-                let left_peak = if !left_data.is_empty() { VDsp::peak(&left_data) } else { 0.0 };
-                let right_rms = if !right_data.is_empty() { VDsp::rms(&right_data) } else { left_rms };
-                let right_peak = if !right_data.is_empty() { VDsp::peak(&right_data) } else { left_peak };
+                // Use vDSP strided operations directly on interleaved buffer
+                let left_rms = if left_ch < num_channels {
+                    VDsp::rms_strided(buffer, left_ch, num_channels, frames)
+                } else { 0.0 };
+                let left_peak = if left_ch < num_channels {
+                    VDsp::peak_strided(buffer, left_ch, num_channels, frames)
+                } else { 0.0 };
+                let right_rms = if right_ch < num_channels {
+                    VDsp::rms_strided(buffer, right_ch, num_channels, frames)
+                } else { left_rms };
+                let right_peak = if right_ch < num_channels {
+                    VDsp::peak_strided(buffer, right_ch, num_channels, frames)
+                } else { left_peak };
 
                 let old = device_levels[slot];
                 let smooth = 0.3;
@@ -1176,20 +1202,11 @@ pub fn get_input_device_levels(device_id: u32) -> Vec<ChannelLevels> {
 pub fn register_output_for_input(input_device_id: u32, output_device_id: u32) {
     let devices = INPUT_DEVICES.read();
     if let Some(state) = devices.get(&input_device_id) {
-        let buffers = state.buffers.read();
-        let mut positions = state.read_positions.write();
-        if !positions.contains_key(&output_device_id) {
-            let initial_positions: Vec<usize> = buffers
-                .channels
-                .iter()
-                .map(|ch| ch.get_write_pos())
-                .collect();
-            positions.insert(output_device_id, initial_positions);
-            println!(
-                "[AudioCapture] Registered output {} for input {}",
-                output_device_id, input_device_id
-            );
-        }
+        state.register_output(output_device_id);
+        println!(
+            "[AudioCapture] Registered output {} for input {}",
+            output_device_id, input_device_id
+        );
     }
 }
 
@@ -1208,6 +1225,7 @@ pub fn unregister_output_for_input(input_device_id: u32, output_device_id: u32) 
 }
 
 /// Read audio samples from a specific input device for a specific output device
+/// This function is LOCK-FREE in the hot path (after initial registration)
 pub fn read_input_audio(
     input_device_id: u32,
     output_device_id: u32,
@@ -1228,9 +1246,10 @@ pub fn read_input_audio(
     };
 
     let state = match devices.get(&input_device_id) {
-        Some(s) => s,
+        Some(s) => Arc::clone(s),
         None => return 0,
     };
+    drop(devices); // Release lock early
 
     let buffers = match state.buffers.try_read() {
         Some(b) => b,
@@ -1242,37 +1261,27 @@ pub fn read_input_audio(
         return 0;
     }
 
-    let mut positions = match state.read_positions.try_write() {
-        Some(p) => p,
-        None => return 0,
-    };
-
-    let device_positions = match positions.get_mut(&output_device_id) {
+    // Get read positions - lock-free after first access
+    let read_pos = match state.get_read_positions(output_device_id) {
         Some(p) => p,
         None => {
-            // Auto-register
-            drop(positions);
+            // Auto-register (slow path, only happens once per device pair)
             drop(buffers);
-            drop(devices);
-            register_output_for_input(input_device_id, output_device_id);
+            state.register_output(output_device_id);
             return 0; // Will work on next call
         }
     };
 
-    // Read from left channel
-    let left_read_pos = device_positions.get(left_ch).copied().unwrap_or(0);
+    // Read from left channel - fully lock-free!
+    let left_read_pos = read_pos.get(left_ch);
     let new_left_pos = buffers.channels[left_ch].read(left_read_pos, left_out);
-    if left_ch < device_positions.len() {
-        device_positions[left_ch] = new_left_pos;
-    }
+    read_pos.set(left_ch, new_left_pos);
 
     // Read from right channel, or copy left to right if device is mono
     if right_ch < buffers.channels.len() {
-        let right_read_pos = device_positions.get(right_ch).copied().unwrap_or(0);
+        let right_read_pos = read_pos.get(right_ch);
         let new_right_pos = buffers.channels[right_ch].read(right_read_pos, right_out);
-        if right_ch < device_positions.len() {
-            device_positions[right_ch] = new_right_pos;
-        }
+        read_pos.set(right_ch, new_right_pos);
     } else {
         // Mono device: copy left channel to right
         right_out[..num_frames].copy_from_slice(&left_out[..num_frames]);

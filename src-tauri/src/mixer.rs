@@ -6,6 +6,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum number of Prism channels (32 stereo pairs = 64 mono channels)
 pub const PRISM_CHANNELS: usize = 64;
@@ -13,6 +14,8 @@ pub const PRISM_CHANNELS: usize = 64;
 pub const MAX_OUTPUTS: usize = 16;
 /// Maximum stereo pairs per output (e.g., 32 for a 64ch device)
 pub const MAX_OUTPUT_PAIRS: usize = 32;
+/// Maximum number of sends
+pub const MAX_SENDS: usize = 1024;
 
 /// A send connection from a source channel to an output device channel (1ch unit)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +34,17 @@ pub struct Send {
     pub muted: bool,
 }
 
+/// Optimized send for audio callback (no String allocation)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendCompact {
+    pub source_device: u32,
+    pub source_channel: u32,
+    pub target_device_hash: u64,
+    pub target_channel: u32,
+    pub level: f32,
+    pub active: bool, // true if not muted and level > 0
+}
+
 /// Level meters for a channel pair
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ChannelLevels {
@@ -40,10 +54,87 @@ pub struct ChannelLevels {
     pub right_peak: f32,
 }
 
+/// Compact sends array for lock-free audio callback access
+/// Uses double-buffering for lock-free reads in audio thread
+pub struct SendsArray {
+    /// Active sends (read by audio thread)
+    sends: RwLock<Vec<SendCompact>>,
+    /// Version counter for cache invalidation
+    version: AtomicU64,
+}
+
+impl SendsArray {
+    pub fn new() -> Self {
+        Self {
+            sends: RwLock::new(Vec::with_capacity(MAX_SENDS)),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    /// Get current version
+    #[inline]
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// Read sends (for audio callback - fast path)
+    #[inline]
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<SendCompact>> {
+        self.sends.read()
+    }
+
+    /// Try to read sends without blocking (for audio callback - non-blocking)
+    #[inline]
+    pub fn try_read(&self) -> Option<parking_lot::RwLockReadGuard<'_, Vec<SendCompact>>> {
+        self.sends.try_read()
+    }
+
+    /// Update sends from main thread
+    pub fn update(&self, sends: &[Send], output_faders: &HashMap<String, f32>) {
+        let mut compact = self.sends.write();
+        compact.clear();
+        
+        for send in sends {
+            if send.muted || send.level <= 0.0001 {
+                continue;
+            }
+            
+            let output_gain = output_faders.get(&send.target_device).copied().unwrap_or(1.0);
+            let total_level = send.level * output_gain;
+            
+            if total_level <= 0.0001 {
+                continue;
+            }
+            
+            compact.push(SendCompact {
+                source_device: send.source_device,
+                source_channel: send.source_channel,
+                target_device_hash: hash_device_id(&send.target_device),
+                target_channel: send.target_channel,
+                level: total_level,
+                active: true,
+            });
+        }
+        
+        self.version.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Fast hash for device ID string (for audio callback comparison)
+#[inline]
+pub fn hash_device_id(device_id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    device_id.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Global mixer state shared between audio thread and UI
 pub struct MixerState {
-    /// Send connections (source -> target mappings)
+    /// Send connections (source -> target mappings) - for UI
     pub sends: RwLock<Vec<Send>>,
+    /// Compact sends for audio callback (lock-free read)
+    pub sends_compact: SendsArray,
     /// Master fader for each Prism channel pair (0.0 to 1.0)
     pub source_faders: RwLock<[f32; PRISM_CHANNELS / 2]>,
     /// Mute state for each source channel pair
@@ -70,6 +161,7 @@ impl MixerState {
     pub fn new() -> Self {
         Self {
             sends: RwLock::new(Vec::new()),
+            sends_compact: SendsArray::new(),
             source_faders: RwLock::new([1.0; PRISM_CHANNELS / 2]),
             source_mutes: RwLock::new([false; PRISM_CHANNELS / 2]),
             output_faders: RwLock::new(HashMap::new()),
@@ -80,37 +172,51 @@ impl MixerState {
         }
     }
 
+    /// Rebuild compact sends array (call after any send/fader change)
+    fn rebuild_compact_sends(&self) {
+        let sends = self.sends.read();
+        let output_faders = self.output_faders.read();
+        self.sends_compact.update(&sends, &output_faders);
+    }
+
     /// Add or update a send (1ch unit)
     pub fn set_send(&self, send: Send) {
-        let mut sends = self.sends.write();
-        // Find existing send with same source device/channel and target device/channel
-        if let Some(existing) = sends.iter_mut().find(|s| {
-            s.source_device == send.source_device
-                && s.source_channel == send.source_channel
-                && s.target_device == send.target_device
-                && s.target_channel == send.target_channel
-        }) {
-            println!("[Mixer] Updated send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
-                send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
-            existing.level = send.level;
-            existing.muted = send.muted;
-        } else {
-            println!("[Mixer] New send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
-                send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
-            sends.push(send);
+        {
+            let mut sends = self.sends.write();
+            // Find existing send with same source device/channel and target device/channel
+            if let Some(existing) = sends.iter_mut().find(|s| {
+                s.source_device == send.source_device
+                    && s.source_channel == send.source_channel
+                    && s.target_device == send.target_device
+                    && s.target_channel == send.target_channel
+            }) {
+                println!("[Mixer] Updated send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                    send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
+                existing.level = send.level;
+                existing.muted = send.muted;
+            } else {
+                println!("[Mixer] New send: src_dev={} src_ch={} -> dev={} tgt_ch={} level={} muted={}", 
+                    send.source_device, send.source_channel, send.target_device, send.target_channel, send.level, send.muted);
+                sends.push(send);
+            }
+            println!("[Mixer] Total sends: {}", sends.len());
         }
-        println!("[Mixer] Total sends: {}", sends.len());
+        // Rebuild compact sends for audio callback
+        self.rebuild_compact_sends();
     }
 
     /// Remove a send (1ch unit)
     pub fn remove_send(&self, source_device: u32, source_channel: u32, target_device: &str, target_channel: u32) {
-        let mut sends = self.sends.write();
-        sends.retain(|s| {
-            !(s.source_device == source_device
-                && s.source_channel == source_channel
-                && s.target_device == target_device
-                && s.target_channel == target_channel)
-        });
+        {
+            let mut sends = self.sends.write();
+            sends.retain(|s| {
+                !(s.source_device == source_device
+                    && s.source_channel == source_channel
+                    && s.target_device == target_device
+                    && s.target_channel == target_channel)
+            });
+        }
+        self.rebuild_compact_sends();
     }
 
     /// Set source fader level (0-100 -> 0.0-1.0)
@@ -135,9 +241,13 @@ impl MixerState {
         } else {
             10.0_f32.powf(db / 20.0).clamp(0.0, 2.0) // +6dB = ~2.0 linear
         };
-        self.output_faders
-            .write()
-            .insert(device_id.to_string(), gain);
+        {
+            self.output_faders
+                .write()
+                .insert(device_id.to_string(), gain);
+        }
+        // Rebuild compact sends to include new fader value
+        self.rebuild_compact_sends();
     }
 
     /// Get all sends
