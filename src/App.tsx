@@ -57,13 +57,22 @@ import {
 
 // --- Types ---
 
-type NodeType = 'source' | 'target';
+type NodeType = 'source' | 'target' | 'bus';
 
 // ソースノードの種類
 type SourceType = 'prism-channel' | 'device';
 
 // チャンネルモード
 type ChannelMode = 'mono' | 'stereo';
+
+// AudioUnit Plugin info
+interface AudioUnitPlugin {
+  id: string;
+  name: string;
+  manufacturer: string;
+  type: string; // 'effect', 'instrument', etc.
+  enabled: boolean;
+}
 
 interface NodeData {
   id: string;
@@ -87,6 +96,9 @@ interface NodeData {
   channelMode: ChannelMode;
   // Device availability - false when device is disconnected
   available?: boolean;
+  // Bus-specific fields
+  busId?: string;             // Unique bus identifier (bus_1, bus_2, etc.)
+  plugins?: AudioUnitPlugin[]; // AudioUnit plugin chain for buses
 }
 
 interface Connection {
@@ -392,6 +404,15 @@ export default function App() {
   const [nodes, setNodes] = useState<NodeData[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
 
+  // Optimized node lookup map
+  const nodesById = useMemo(() => {
+    const map = new Map<string, NodeData>();
+    for (const node of nodes) {
+      map.set(node.id, node);
+    }
+    return map;
+  }, [nodes]);
+
   // Selection State
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
@@ -454,6 +475,10 @@ export default function App() {
   // Settings modal state
   const [showSettings, setShowSettings] = useState(false);
   const [bufferSize, setBufferSizeState] = useState<number>(4096);
+
+  // Bus node counter and selected bus for detail view
+  const [busCounter, setBusCounter] = useState(1);
+  const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
 
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -664,6 +689,12 @@ export default function App() {
               const targetNode = restoredNodes.find(n => n.id === conn.toNodeId);
 
               console.log(`[Spectrum] Connection: ${sourceNode?.label} -> ${targetNode?.label}, available: ${sourceNode?.available}, ${targetNode?.available}`);
+
+              // Skip Bus connections - they're UI only for now (backend Bus routing not yet implemented)
+              if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') {
+                console.log(`[Spectrum] Skipping Bus connection: ${sourceNode?.label} -> ${targetNode?.label}`);
+                return;
+              }
 
               // Only set up routing for available nodes
               if (sourceNode?.available && targetNode?.available) {
@@ -1011,7 +1042,39 @@ export default function App() {
 
   // --- Helpers ---
 
+  // Bus color palette
+  const BUS_COLORS = [
+    'text-purple-400', 'text-violet-400', 'text-indigo-400', 'text-blue-400',
+    'text-teal-400', 'text-emerald-400', 'text-lime-400', 'text-yellow-400',
+  ];
+
   const createNode = useCallback((libraryId: string, type: NodeType, x: number, y: number): NodeData => {
+    // Bus nodes
+    if (type === 'bus') {
+      const busNum = busCounter;
+      setBusCounter(prev => prev + 1);
+      const busId = `bus_${busNum}`;
+      const colorIndex = (busNum - 1) % BUS_COLORS.length;
+
+      return {
+        id: `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        libraryId: busId,
+        type: 'bus',
+        label: `Bus ${busNum}`,
+        subLabel: 'Stereo',
+        icon: Workflow,
+        color: BUS_COLORS[colorIndex],
+        x, y,
+        volume: dbToFader(0),
+        muted: false,
+        channelCount: 2, // Start with stereo
+        channelMode: 'stereo',
+        available: true,
+        busId,
+        plugins: [],
+      };
+    }
+
     if (type === 'source') {
       // Check if this is a device node (non-Prism)
       if (libraryId.startsWith('dev_')) {
@@ -1327,11 +1390,18 @@ export default function App() {
     if (focusedOutputId === id) setFocusedOutputId(null);
   };
 
-  // Toggle channel mode for output nodes (stereo <-> mono)
+  // Toggle channel mode for output nodes and bus nodes (stereo <-> mono)
   const toggleChannelMode = (nodeId: string) => {
     setNodes(prev => prev.map(n => {
-      if (n.id === nodeId && n.type === 'target') {
-        return { ...n, channelMode: n.channelMode === 'stereo' ? 'mono' : 'stereo' };
+      if (n.id === nodeId && (n.type === 'target' || n.type === 'bus')) {
+        const newMode = n.channelMode === 'stereo' ? 'mono' : 'stereo';
+        const newChannelCount = newMode === 'stereo' ? 2 : 1;
+        return {
+          ...n,
+          channelMode: newMode,
+          channelCount: n.type === 'bus' ? newChannelCount : n.channelCount, // Only change channelCount for bus
+          subLabel: n.type === 'bus' ? (newMode === 'stereo' ? 'Stereo' : 'Mono') : n.subLabel,
+        };
       }
       return n;
     }));
@@ -1341,9 +1411,11 @@ export default function App() {
     // Find the connection to get source and target info for backend cleanup
     const conn = connections.find(c => c.id === id);
     if (conn) {
-      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
-      const targetNode = nodes.find(n => n.id === conn.toNodeId);
-      if (sourceNode && targetNode) {
+      const sourceNode = nodesById.get(conn.fromNodeId);
+      const targetNode = nodesById.get(conn.toNodeId);
+
+      // Skip Bus connections for backend cleanup - backend Bus routing not yet implemented
+      if (sourceNode?.type !== 'bus' && targetNode?.type !== 'bus' && sourceNode && targetNode) {
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
           // Get source device ID and channel indices
@@ -1368,13 +1440,17 @@ export default function App() {
       return c;
     }));
 
-    // Update backend for all connections
+    // Update backend for all connections (skip Bus connections)
     for (const connId of connIds) {
       const conn = connections.find(c => c.id === connId);
       if (!conn) continue;
 
-      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
-      const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      const sourceNode = nodesById.get(conn.fromNodeId);
+      const targetNode = nodesById.get(conn.toNodeId);
+
+      // Skip Bus connections - backend Bus routing not yet implemented
+      if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') continue;
+
       if (sourceNode && targetNode) {
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
@@ -1398,13 +1474,17 @@ export default function App() {
       return c;
     }));
 
-    // Update backend for all connections
+    // Update backend for all connections (skip Bus connections)
     for (const connId of connIds) {
       const conn = connections.find(c => c.id === connId);
       if (!conn) continue;
 
-      const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
-      const targetNode = nodes.find(n => n.id === conn.toNodeId);
+      const sourceNode = nodesById.get(conn.fromNodeId);
+      const targetNode = nodesById.get(conn.toNodeId);
+
+      // Skip Bus connections - backend Bus routing not yet implemented
+      if (sourceNode?.type === 'bus' || targetNode?.type === 'bus') continue;
+
       if (sourceNode && targetNode) {
         const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
         if (targetData) {
@@ -1540,7 +1620,15 @@ export default function App() {
     if (!node) return;
 
     setSelectedNodeId(nodeId);
-    if (node.type === 'target') setFocusedOutputId(node.id);
+    // Exclusive selection: Bus and Output are mutually exclusive for mixer view
+    if (node.type === 'target') {
+      setFocusedOutputId(node.id);
+      setSelectedBusId(null); // Clear bus selection when selecting output
+    }
+    if (node.type === 'bus') {
+      setSelectedBusId(node.id);
+      // Don't clear focusedOutputId - keep it for reference but show bus mixer
+    }
 
     dragRef.current = {
       nodeId,
@@ -1742,19 +1830,20 @@ export default function App() {
     if (drawingWire) {
       // Find the source node to get channel offset
       const sourceNode = nodes.find(n => n.id === drawingWire.fromNode);
-
-      // Check if target is Prism device - prevent Prism→Prism routing (causes feedback loop)
       const targetNode = nodes.find(n => n.id === nodeId);
-      const targetData = targetNode ? outputTargets.find(t => t.id === targetNode.libraryId) : null;
-      const targetDeviceInfo = targetData ? audioDevices.find(d => d.id === targetData.deviceId) : null;
 
-      if (targetDeviceInfo?.device_type === 'prism') {
-        console.warn('Cannot route to Prism device - would cause feedback loop');
+      if (!sourceNode || !targetNode || drawingWire.fromNode === nodeId) {
         setDrawingWire(null);
         return;
       }
 
-      if (!sourceNode || !targetNode || drawingWire.fromNode === nodeId) {
+      // Check if target is a real output device or a bus
+      const targetData = targetNode.type === 'target' ? outputTargets.find(t => t.id === targetNode.libraryId) : null;
+      const targetDeviceInfo = targetData ? audioDevices.find(d => d.id === targetData.deviceId) : null;
+
+      // Prevent Prism→Prism routing (causes feedback loop)
+      if (targetDeviceInfo?.device_type === 'prism') {
+        console.warn('Cannot route to Prism device - would cause feedback loop');
         setDrawingWire(null);
         return;
       }
@@ -1803,8 +1892,9 @@ export default function App() {
         const srcCh = getChannelIndexForPort(sourceNode, srcPort);
         const tgtCh = getChannelIndexForPort(targetNode, tgtPort);
 
-        // Start audio output to this device
-        if (targetData) {
+        // Only update backend mixer for real source/output devices (not buses)
+        // Bus routing is UI-only for now - backend support pending
+        if (sourceNode.type !== 'bus' && targetNode.type === 'target' && targetData) {
           const deviceIdNum = parseInt(targetData.deviceId);
           if (!isNaN(deviceIdNum)) {
             startAudioOutput(deviceIdNum).catch(console.error);
@@ -1814,9 +1904,11 @@ export default function App() {
 
           // Update mixer send (1ch unit)
           updateMixerSend(srcDevId, srcCh, targetData.deviceId, tgtCh, defaultLevel, false);
+          console.log(`Route device ${srcDevId} channel ${srcCh} → device ${targetData.deviceId} ch ${tgtCh}${isStereoPair ? ' (stereo pair)' : ''}`);
+        } else if (sourceNode.type === 'bus' || targetNode.type === 'bus') {
+          // Bus connection - currently UI-only, backend support pending
+          console.log(`Bus connection: ${sourceNode.label} → ${targetNode.label} ch ${tgtCh} (UI only)`);
         }
-
-        console.log(`Route device ${srcDevId} channel ${srcCh} → device ${targetData?.deviceId} ch ${tgtCh}${isStereoPair ? ' (stereo pair)' : ''}`);
 
         newConnections.push({
           id: `c_${Date.now()}_${srcPort}_${tgtPort}`,
@@ -1846,8 +1938,8 @@ export default function App() {
   // Check if focused target is in stereo mode
   const isStereoMode = focusedTarget?.channelMode === 'stereo';
 
-  // Build mixer sources: each connection to the focused output port becomes a mixer channel
-  // For device nodes, this allows per-channel-pair control
+  // Build mixer sources: each direct connection to the focused target becomes a mixer channel
+  // Sources are Input nodes or Bus nodes - no recursive tracing
   type MixerSource = {
     nodeId: string;
     node: NodeData;
@@ -1859,105 +1951,195 @@ export default function App() {
     isMonoToStereo?: boolean; // True if mono source is connected to both L and R
   };
 
+  // Helper: Get direct connections to a target (no bus tracing)
+  const getDirectConnections = useCallback((targetNodeId: string, targetChannel: number): { node: NodeData; fromChannel: number; connectionId: string }[] => {
+    return connections
+      .filter(c => c.toNodeId === targetNodeId && c.toChannel === targetChannel)
+      .map(conn => {
+        const sourceNode = nodesById.get(conn.fromNodeId);
+        return sourceNode ? { node: sourceNode, fromChannel: conn.fromChannel, connectionId: conn.id } : null;
+      })
+      .filter((x): x is { node: NodeData; fromChannel: number; connectionId: string } => x !== null);
+  }, [connections, nodesById]);
+
+  // Mixer sources for Output selection (shows Inputs and Buses directly connected)
   const mixerSources = useMemo((): MixerSource[] => {
     if (!focusedOutputId) return [];
 
-    if (isStereoMode && focusedTarget) {
-      // Stereo mode: get connections to both L and R of the current stereo pair
-      const leftCh = focusedPairIndex * 2;      // e.g., pair 0 → ch 0
-      const rightCh = focusedPairIndex * 2 + 1; // e.g., pair 0 → ch 1
+    const buildSourcesForChannels = (leftCh: number, rightCh?: number): MixerSource[] => {
+      const leftConns = getDirectConnections(focusedOutputId, leftCh);
+      const rightConns = rightCh !== undefined ? getDirectConnections(focusedOutputId, rightCh) : [];
 
-      // Get all connections to L and R
-      const leftConns = connections.filter(c => c.toNodeId === focusedOutputId && c.toChannel === leftCh);
-      const rightConns = connections.filter(c => c.toNodeId === focusedOutputId && c.toChannel === rightCh);
-
-      // Match L and R connections from the same source node
-      // Case 1: Stereo source - srcCh (L) and srcCh+1 (R)
-      // Case 2: Mono source to stereo output - same srcCh to both L and R
       const sources: MixerSource[] = [];
-      const usedRightConnIds = new Set<string>();
+      const usedRightIndices = new Set<number>();
 
-      for (const lc of leftConns) {
-        const node = nodes.find(n => n.id === lc.fromNodeId);
-        if (!node) continue;
-
-        // First, look for stereo pair: same source node, source channel + 1
-        let matchingRight = rightConns.find(rc =>
-          rc.fromNodeId === lc.fromNodeId &&
-          rc.fromChannel === lc.fromChannel + 1 &&
-          !usedRightConnIds.has(rc.id)
-        );
+      for (const lt of leftConns) {
+        let matchingRightIdx = -1;
         let isMonoToStereo = false;
 
-        // If not found, look for mono-to-stereo: same source node, same source channel
-        if (!matchingRight) {
-          matchingRight = rightConns.find(rc =>
-            rc.fromNodeId === lc.fromNodeId &&
-            rc.fromChannel === lc.fromChannel &&
-            !usedRightConnIds.has(rc.id)
+        if (rightCh !== undefined) {
+          // Look for stereo pair: same source node, source channel + 1
+          matchingRightIdx = rightConns.findIndex((rt, idx) =>
+            rt.node.id === lt.node.id &&
+            rt.fromChannel === lt.fromChannel + 1 &&
+            !usedRightIndices.has(idx)
           );
-          if (matchingRight) {
-            isMonoToStereo = true;
+
+          // If not found, look for mono-to-stereo: same source node, same source channel
+          if (matchingRightIdx === -1) {
+            matchingRightIdx = rightConns.findIndex((rt, idx) =>
+              rt.node.id === lt.node.id &&
+              rt.fromChannel === lt.fromChannel &&
+              !usedRightIndices.has(idx)
+            );
+            if (matchingRightIdx !== -1) {
+              isMonoToStereo = true;
+            }
           }
         }
 
-        if (matchingRight) {
-          usedRightConnIds.add(matchingRight.id);
+        if (matchingRightIdx !== -1) {
+          usedRightIndices.add(matchingRightIdx);
+          const rt = rightConns[matchingRightIdx];
           sources.push({
-            nodeId: lc.fromNodeId,
-            node,
-            fromChannel: lc.fromChannel, // L channel (or mono channel)
-            connectionId: lc.id,
-            linkedConnectionId: matchingRight.id,
+            nodeId: lt.node.id,
+            node: lt.node,
+            fromChannel: lt.fromChannel,
+            connectionId: lt.connectionId,
+            linkedConnectionId: rt.connectionId,
             isStereoLinked: true,
             isMonoToStereo,
           });
         } else {
-          // No matching R, show as mono on L side
           sources.push({
-            nodeId: lc.fromNodeId,
-            node,
-            fromChannel: lc.fromChannel,
-            connectionId: lc.id,
+            nodeId: lt.node.id,
+            node: lt.node,
+            fromChannel: lt.fromChannel,
+            connectionId: lt.connectionId,
             isStereoLinked: false,
           });
         }
       }
 
-      // Add any unmatched R connections as standalone mono
-      for (const rc of rightConns) {
-        if (!usedRightConnIds.has(rc.id)) {
-          const node = nodes.find(n => n.id === rc.fromNodeId);
-          if (!node) continue;
-          sources.push({
-            nodeId: rc.fromNodeId,
-            node,
-            fromChannel: rc.fromChannel,
-            connectionId: rc.id,
-            isStereoLinked: false,
-          });
+      // Add unmatched R connections as standalone mono
+      if (rightCh !== undefined) {
+        for (let idx = 0; idx < rightConns.length; idx++) {
+          if (!usedRightIndices.has(idx)) {
+            const rt = rightConns[idx];
+            sources.push({
+              nodeId: rt.node.id,
+              node: rt.node,
+              fromChannel: rt.fromChannel,
+              connectionId: rt.connectionId,
+              isStereoLinked: false,
+            });
+          }
         }
       }
 
-      return sources;
+      // Sort: Inputs first, then Buses, alphabetically within each
+      return sources.sort((a, b) => {
+        if (a.node.type !== b.node.type) {
+          return a.node.type === 'source' ? -1 : 1;
+        }
+        return a.node.label.localeCompare(b.node.label);
+      });
+    };
+
+    if (isStereoMode && focusedTarget) {
+      const leftCh = focusedPairIndex * 2;
+      const rightCh = focusedPairIndex * 2 + 1;
+      return buildSourcesForChannels(leftCh, rightCh);
     } else {
-      // Mono mode: single channel view (original behavior)
-      const monoSources: MixerSource[] = [];
-      for (const c of connections) {
-        if (c.toNodeId !== focusedOutputId || c.toChannel !== focusedPairIndex) continue;
-        const node = nodes.find(n => n.id === c.fromNodeId);
-        if (!node) continue;
-        monoSources.push({
-          nodeId: c.fromNodeId,
-          node,
-          fromChannel: c.fromChannel,
-          connectionId: c.id,
-          isStereoLinked: false,
-        });
-      }
-      return monoSources;
+      return buildSourcesForChannels(focusedPairIndex);
     }
-  }, [connections, focusedOutputId, focusedPairIndex, nodes, isStereoMode, focusedTarget]);
+  }, [focusedOutputId, focusedPairIndex, isStereoMode, focusedTarget, getDirectConnections]);
+
+  // Mixer sources for Bus selection (shows Inputs connected to the selected bus)
+  const selectedBus = nodes.find(n => n.id === selectedBusId);
+  const busMixerSources = useMemo((): MixerSource[] => {
+    if (!selectedBusId || !selectedBus) return [];
+
+    const isBusStereo = selectedBus.channelMode === 'stereo';
+
+    const buildSourcesForChannels = (leftCh: number, rightCh?: number): MixerSource[] => {
+      const leftConns = getDirectConnections(selectedBusId, leftCh);
+      const rightConns = rightCh !== undefined ? getDirectConnections(selectedBusId, rightCh) : [];
+
+      const sources: MixerSource[] = [];
+      const usedRightIndices = new Set<number>();
+
+      for (const lt of leftConns) {
+        let matchingRightIdx = -1;
+        let isMonoToStereo = false;
+
+        if (rightCh !== undefined) {
+          matchingRightIdx = rightConns.findIndex((rt, idx) =>
+            rt.node.id === lt.node.id &&
+            rt.fromChannel === lt.fromChannel + 1 &&
+            !usedRightIndices.has(idx)
+          );
+
+          if (matchingRightIdx === -1) {
+            matchingRightIdx = rightConns.findIndex((rt, idx) =>
+              rt.node.id === lt.node.id &&
+              rt.fromChannel === lt.fromChannel &&
+              !usedRightIndices.has(idx)
+            );
+            if (matchingRightIdx !== -1) {
+              isMonoToStereo = true;
+            }
+          }
+        }
+
+        if (matchingRightIdx !== -1) {
+          usedRightIndices.add(matchingRightIdx);
+          const rt = rightConns[matchingRightIdx];
+          sources.push({
+            nodeId: lt.node.id,
+            node: lt.node,
+            fromChannel: lt.fromChannel,
+            connectionId: lt.connectionId,
+            linkedConnectionId: rt.connectionId,
+            isStereoLinked: true,
+            isMonoToStereo,
+          });
+        } else {
+          sources.push({
+            nodeId: lt.node.id,
+            node: lt.node,
+            fromChannel: lt.fromChannel,
+            connectionId: lt.connectionId,
+            isStereoLinked: false,
+          });
+        }
+      }
+
+      if (rightCh !== undefined) {
+        for (let idx = 0; idx < rightConns.length; idx++) {
+          if (!usedRightIndices.has(idx)) {
+            const rt = rightConns[idx];
+            sources.push({
+              nodeId: rt.node.id,
+              node: rt.node,
+              fromChannel: rt.fromChannel,
+              connectionId: rt.connectionId,
+              isStereoLinked: false,
+            });
+          }
+        }
+      }
+
+      return sources.sort((a, b) => a.node.label.localeCompare(b.node.label));
+    };
+
+    // For now, show all connections to bus channel 0 (or 0-1 for stereo)
+    if (isBusStereo) {
+      return buildSourcesForChannels(0, 1);
+    } else {
+      return buildSourcesForChannels(0);
+    }
+  }, [selectedBusId, selectedBus, getDirectConnections]);
 
   // getPairLabel is now inline where needed (stereo mode uses different logic)
 
@@ -2232,8 +2414,8 @@ export default function App() {
             <svg className="absolute pointer-events-none z-0" style={{ width: '4000px', height: '4000px', left: '-2000px', top: '-2000px', overflow: 'visible' }}>
               <g transform="translate(2000, 2000)">
                 {connections.map(conn => {
-                  const start = nodes.find(n => n.id === conn.fromNodeId);
-                  const end = nodes.find(n => n.id === conn.toNodeId);
+                  const start = nodesById.get(conn.fromNodeId);
+                  const end = nodesById.get(conn.toNodeId);
                   if (!start || !end) return null;
 
                   const startPos = getPortPosition(start, conn.fromChannel, false);
@@ -2241,8 +2423,22 @@ export default function App() {
 
                   // Check if either node is unavailable
                   const isDisconnected = start.available === false || end.available === false;
-                  const isActive = !isDisconnected && end.id === focusedOutputId;
-                  const strokeColor = isDisconnected ? '#64748b' : (isActive ? (end.color.includes('cyan') ? '#22d3ee' : '#f472b6') : '#475569');
+                  const isBusConnection = start.type === 'bus' || end.type === 'bus';
+                  const isActive = !isDisconnected && (end.id === focusedOutputId || (isBusConnection && selectedBusId && (start.id === selectedBusId || end.id === selectedBusId)));
+
+                  // Determine stroke color based on connection type
+                  let strokeColor = '#475569'; // default inactive
+                  if (isDisconnected) {
+                    strokeColor = '#64748b';
+                  } else if (isActive) {
+                    if (isBusConnection) {
+                      strokeColor = '#a855f7'; // purple for bus
+                    } else if (end.color.includes('cyan')) {
+                      strokeColor = '#22d3ee';
+                    } else {
+                      strokeColor = '#f472b6';
+                    }
+                  }
 
                   const path = `M ${startPos.x} ${startPos.y} C ${startPos.x + 50} ${startPos.y}, ${endPos.x - 50} ${endPos.y}, ${endPos.x} ${endPos.y}`;
 
@@ -2374,6 +2570,9 @@ export default function App() {
                 } else {
                   borderClass = 'border-cyan-500/30 hover:border-cyan-500';
                 }
+              } else if (node.type === 'bus') {
+                const isBusSelected = selectedBusId === node.id;
+                borderClass = isBusSelected ? 'border-purple-500 ring-2 ring-purple-500/20' : 'border-purple-500/30 hover:border-purple-500';
               }
               if (node.type === 'target' && !isUnavailable) borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
               if (isSelected && !isUnavailable) borderClass = 'border-white ring-2 ring-white/20';
@@ -2431,6 +2630,14 @@ export default function App() {
                         <span className="text-xs font-bold text-slate-200 truncate block">{dynamicSubLabel}</span>
                         <span className="text-[9px] text-slate-500 truncate block">{dynamicLabel}</span>
                       </>
+                    ) : node.type === 'bus' ? (
+                      // Bus node: show bus name and mode
+                      <>
+                        <span className="text-xs font-bold text-purple-200 truncate block">{node.label}</span>
+                        <span className="text-[9px] text-slate-500 truncate block">
+                          {node.channelMode === 'stereo' ? 'Stereo' : 'Mono'} • {node.plugins?.length || 0} FX
+                        </span>
+                      </>
                     ) : (
                       // Target node: show device name
                       <span className="text-xs font-bold text-slate-200 truncate block">{node.label}</span>
@@ -2447,11 +2654,11 @@ export default function App() {
 
                         return (
                             <div key={portIdx} className="flex items-center justify-between h-5 relative">
-                                {/* Input Port (Target Only) */}
+                                {/* Input Port (Target and Bus) */}
                                 <div className="w-3 relative h-full flex items-center">
-                                    {node.type === 'target' && (
+                                    {(node.type === 'target' || node.type === 'bus') && (
                                         <div
-                                            className={`absolute -left-[15px] w-3 h-3 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20 top-[4px] ${isMono ? 'bg-slate-500' : 'bg-slate-600'}`}
+                                            className={`absolute -left-[15px] w-3 h-3 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20 top-[4px] ${isMono ? 'bg-slate-500' : 'bg-slate-600'} ${node.type === 'bus' ? 'border-purple-400' : ''}`}
                                             onMouseUp={(e) => endWire(e, node.id, portIdx)}
                                         ></div>
                                     )}
@@ -2459,11 +2666,11 @@ export default function App() {
 
                                 <div className={`text-[9px] font-mono flex-1 text-center ${isMono ? 'text-slate-400' : 'text-slate-500'}`}>{label}</div>
 
-                                {/* Output Port (Source Only) */}
+                                {/* Output Port (Source and Bus) */}
                                 <div className="w-3 relative h-full flex items-center">
-                                    {node.type === 'source' && (
+                                    {(node.type === 'source' || node.type === 'bus') && (
                                         <div
-                                            className={`absolute -right-[15px] w-3 h-3 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20 top-[4px] ${isMono ? 'bg-slate-500' : 'bg-slate-600'}`}
+                                            className={`absolute -right-[15px] w-3 h-3 rounded-full border border-slate-400 hover:bg-white cursor-crosshair z-20 top-[4px] ${isMono ? 'bg-slate-500' : 'bg-slate-600'} ${node.type === 'bus' ? 'border-purple-400' : ''}`}
                                             onMouseDown={(e) => startWire(e, node.id, portIdx)}
                                         ></div>
                                     )}
@@ -2490,6 +2697,45 @@ export default function App() {
           style={{ width: rightSidebarWidth }}
           onClick={e => e.stopPropagation()}
         >
+          {/* Bus Section */}
+          <div className="p-4 border-b border-slate-800 bg-slate-900/50">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2 mb-3">
+              <Workflow className="w-3 h-3" /> Buses / Aux
+            </div>
+            <button
+              onClick={() => {
+                // Create a new bus at center of canvas
+                const centerX = 400;
+                const centerY = 250;
+                const busNode = createNode('new_bus', 'bus', centerX, centerY);
+                setNodes(prev => [...prev, busNode]);
+              }}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-dashed border-purple-500/50 bg-purple-500/10 hover:bg-purple-500/20 hover:border-purple-400 text-purple-400 hover:text-purple-300 transition-all text-xs font-medium"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Add Bus
+            </button>
+            {/* List existing buses */}
+            <div className="mt-2 space-y-1">
+              {nodes.filter(n => n.type === 'bus').map(bus => (
+                <div
+                  key={bus.id}
+                  onClick={() => setSelectedBusId(bus.id)}
+                  className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${
+                    selectedBusId === bus.id
+                      ? 'bg-purple-500/20 border border-purple-500/50'
+                      : 'bg-slate-800/50 border border-transparent hover:bg-slate-800'
+                  }`}
+                >
+                  <Workflow className={`w-4 h-4 ${bus.color}`} />
+                  <span className="text-xs text-slate-200 flex-1">{bus.label}</span>
+                  <span className="text-[9px] text-slate-500 uppercase">{bus.channelMode}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Output Devices Section */}
           <div className="p-4 border-b border-slate-800 bg-slate-900/50">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
               <LinkIcon className="w-3 h-3" /> Output Devices
@@ -2542,13 +2788,151 @@ export default function App() {
         style={{ height: mixerHeight }}
       >
 
+        {/* BUS DETAIL VIEW (Shows when a bus is selected) */}
+        {selectedBusId && (() => {
+          const selectedBus = nodes.find(n => n.id === selectedBusId);
+          if (!selectedBus || selectedBus.type !== 'bus') return null;
+
+          return (
+            <div className="w-64 bg-[#1a1f2e] border-r border-slate-700 flex flex-col shrink-0">
+              {/* Bus Header */}
+              <div className="h-8 bg-purple-900/30 border-b border-purple-500/30 flex items-center px-4 justify-between shrink-0">
+                <div className="flex items-center gap-2">
+                  <Workflow className="w-3 h-3 text-purple-400" />
+                  <span className="text-[10px] font-bold text-purple-300 uppercase tracking-widest">
+                    {selectedBus.label}
+                  </span>
+                  <span className="text-[9px] text-slate-500 uppercase ml-1">
+                    {selectedBus.channelMode}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setSelectedBusId(null)}
+                  className="text-slate-500 hover:text-white transition-colors"
+                >
+                  ×
+                </button>
+              </div>
+
+              {/* Effect Chain (Logic-style) */}
+              <div className="flex-1 overflow-y-auto p-3">
+                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+                  Effect Chain
+                </div>
+
+                {/* Plugin Slots */}
+                <div className="space-y-1">
+                  {(selectedBus.plugins || []).length === 0 ? (
+                    <div className="text-[10px] text-slate-600 text-center py-4">
+                      No effects loaded
+                    </div>
+                  ) : (
+                    selectedBus.plugins?.map((plugin, idx) => (
+                      <div
+                        key={plugin.id}
+                        className={`flex items-center gap-2 p-2 rounded-lg border transition-all ${
+                          plugin.enabled
+                            ? 'bg-purple-500/10 border-purple-500/30'
+                            : 'bg-slate-800/50 border-slate-700 opacity-50'
+                        }`}
+                      >
+                        <div className="w-4 text-[9px] text-slate-500 text-center">{idx + 1}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[10px] font-medium text-slate-200 truncate">{plugin.name}</div>
+                          <div className="text-[8px] text-slate-500 truncate">{plugin.manufacturer}</div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            // Toggle plugin enabled state
+                            setNodes(prev => prev.map(n => {
+                              if (n.id === selectedBusId && n.plugins) {
+                                return {
+                                  ...n,
+                                  plugins: n.plugins.map(p =>
+                                    p.id === plugin.id ? { ...p, enabled: !p.enabled } : p
+                                  ),
+                                };
+                              }
+                              return n;
+                            }));
+                          }}
+                          className={`w-6 h-6 rounded flex items-center justify-center text-[9px] font-bold transition-colors ${
+                            plugin.enabled
+                              ? 'bg-purple-500 text-white'
+                              : 'bg-slate-700 text-slate-400'
+                          }`}
+                        >
+                          {plugin.enabled ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Add Plugin Button */}
+                <button
+                  onClick={() => {
+                    // TODO: Open AudioUnit plugin browser
+                    // For now, add a placeholder plugin
+                    const newPlugin: AudioUnitPlugin = {
+                      id: `plugin_${Date.now()}`,
+                      name: 'Placeholder Effect',
+                      manufacturer: 'System',
+                      type: 'effect',
+                      enabled: true,
+                    };
+                    setNodes(prev => prev.map(n => {
+                      if (n.id === selectedBusId) {
+                        return {
+                          ...n,
+                          plugins: [...(n.plugins || []), newPlugin],
+                        };
+                      }
+                      return n;
+                    }));
+                  }}
+                  className="w-full mt-3 py-2 px-3 rounded-lg border border-dashed border-purple-500/30 bg-purple-500/5 hover:bg-purple-500/10 text-purple-400 hover:text-purple-300 transition-all text-[10px] font-medium flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-3 h-3" />
+                  Add AudioUnit
+                </button>
+              </div>
+
+              {/* Bus Controls */}
+              <div className="p-3 border-t border-slate-700 bg-slate-900/50">
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => toggleChannelMode(selectedBusId)}
+                    className="px-3 py-1.5 rounded text-[10px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                  >
+                    {selectedBus.channelMode === 'stereo' ? 'Switch to Mono' : 'Switch to Stereo'}
+                  </button>
+                  <button
+                    onClick={() => deleteNode(selectedBusId)}
+                    className="p-1.5 rounded text-red-400 hover:bg-red-500/20 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* MIXER AREA (LEFT) */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#162032]">
           <div className="h-8 bg-slate-900/50 border-b border-slate-800 flex items-center px-4 justify-between shrink-0">
             <div className="flex items-center gap-3">
               <Maximize2 className="w-3 h-3 text-slate-500" />
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                {focusedTarget ? (
+                {/* Bus selected: show bus mixing header */}
+                {selectedBus ? (
+                  <>Mixing for <span className="text-purple-400 ml-1">{selectedBus.label}</span>
+                    <span className={`ml-2 px-1.5 py-0.5 rounded text-[8px] ${selectedBus.channelMode === 'stereo' ? 'bg-purple-500/20 text-purple-400' : 'bg-slate-600/50 text-slate-400'}`}>
+                      {selectedBus.channelMode === 'stereo' ? 'STEREO' : 'MONO'}
+                    </span>
+                  </>
+                ) : focusedTarget ? (
                   <>Mixing for <span className={`text-white ${focusedTarget.available === false ? 'text-slate-500' : focusedTarget.color} ml-1`}>{focusedTarget.label}</span>
                     {focusedTarget.available === false && (
                       <span className="ml-2 px-1.5 py-0.5 rounded text-[8px] bg-red-500/20 text-red-400">
@@ -2569,15 +2953,17 @@ export default function App() {
                     )}
                   </>
                 ) : (
-                  'Select Output on Canvas to Mix'
+                  'Select Output or Bus on Canvas to Mix'
                 )}
               </span>
             </div>
           </div>
 
           <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
-            {mixerSources.map(ms => {
+            {/* Use busMixerSources when bus is selected, otherwise mixerSources */}
+            {(selectedBus ? busMixerSources : mixerSources).map(ms => {
                 const { node, fromChannel, connectionId, linkedConnectionId, isStereoLinked, isMonoToStereo } = ms;
+                const isBusNode = node.type === 'bus';
                 const conn = connections.find(c => c.id === connectionId);
                 const level = conn ? conn.sendLevel : 0;
                 const isMuted = conn ? conn.muted : false;
@@ -2613,23 +2999,32 @@ export default function App() {
                 const dynamicLabel = isDeviceNode
                   ? `Ch ${sourcePortLabel}`  // Show specific channel for device
                   : (channelData ? `Ch ${prismChLabel}` : node.label);
-                const dynamicSubLabel = isDeviceNode
+
+                // Add bus routing info to sublabel if routed via bus
+                const baseSubLabel = isDeviceNode
                   ? node.deviceName  // Show device name as sub label
                   : (channelData
                       ? (channelData.isMain
                           ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
                           : (channelData.apps.map(a => a.name).join(', ') || 'Empty'))
                       : node.subLabel);
-                const dynamicIcon = isDeviceNode
-                  ? getDeviceNodeIcon(node)
-                  : (channelData
-                      ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
-                      : node.icon);
-                const dynamicColor = isDeviceNode
-                  ? getDeviceNodeColor(node)
-                  : (channelData
-                      ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
-                      : node.color);
+                const dynamicSubLabel = isBusNode
+                  ? `${node.channelMode} • ${node.plugins?.length || 0} FX`
+                  : baseSubLabel;
+                const dynamicIcon = isBusNode
+                  ? Workflow
+                  : isDeviceNode
+                    ? getDeviceNodeIcon(node)
+                    : (channelData
+                        ? (channelData.isMain ? Volume2 : (channelData.apps[0]?.icon || Music))
+                        : node.icon);
+                const dynamicColor = isBusNode
+                  ? 'text-purple-400'
+                  : isDeviceNode
+                    ? getDeviceNodeColor(node)
+                    : (channelData
+                        ? (channelData.isMain ? 'text-cyan-400' : (channelData.apps[0]?.color || 'text-slate-500'))
+                        : node.color);
                 const NodeIcon = dynamicIcon;
 
                 // Get real input levels for this specific channel pair (dB conversion)
@@ -3347,12 +3742,12 @@ export default function App() {
 
               {/* Node info */}
               <div className="px-3 py-1.5 text-[10px] text-slate-400">
-                {node.channelCount}ch • {node.type === 'source' ? 'Input' : 'Output'}
-                {node.type === 'target' && ` • ${node.channelMode === 'stereo' ? 'Stereo' : 'Mono'}`}
+                {node.channelCount}ch • {node.type === 'source' ? 'Input' : node.type === 'bus' ? 'Bus' : 'Output'}
+                {(node.type === 'target' || node.type === 'bus') && ` • ${node.channelMode === 'stereo' ? 'Stereo' : 'Mono'}`}
               </div>
 
-              {/* Channel Mode Toggle (only for output nodes with 2+ channels) */}
-              {node.type === 'target' && node.channelCount >= 2 && (
+              {/* Channel Mode Toggle (for output nodes and bus nodes with 2+ channels) */}
+              {(node.type === 'target' || node.type === 'bus') && node.channelCount >= 1 && (
                 <>
                   <div className="border-t border-slate-700 my-1" />
                   <button
