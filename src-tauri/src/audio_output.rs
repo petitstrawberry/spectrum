@@ -19,8 +19,11 @@ use coreaudio::sys::{
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
+
+// Stable master output device id (u32::MAX == none)
+static MASTER_DEVICE: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Sample rate for audio output
 const SAMPLE_RATE: f64 = 48000.0;
@@ -139,6 +142,9 @@ pub fn start_output(device_id: u32) -> Result<(), String> {
         let mut outputs = ACTIVE_OUTPUTS.write();
         outputs.insert(device_id, running.clone());
     }
+
+    // Try to become master if none exists
+    let _ = MASTER_DEVICE.compare_exchange(u32::MAX, device_id, Ordering::AcqRel, Ordering::Acquire);
 
     // Start output thread
     let channels = output_channels;
@@ -290,9 +296,24 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         if let Some(ref mut bus_buffers) = bus_buffers.as_mut() {
             if !buses.is_empty() {
 
-            // Always get a new sample counter for this callback
-            // Each output device processes independently, but caches within the same callback
-            let sample_counter = mixer_state.bus_processing.next_cycle().0;
+            // Decide which output thread should advance the global sample counter.
+            // We use a stable atomic `MASTER_DEVICE` elected at start/stop time to
+            // avoid churn when devices are added/removed. The master calls
+            // `next_cycle()`, others call `get_sample_counter()`.
+            let master_device = MASTER_DEVICE.load(Ordering::Acquire);
+            let did_advance = master_device == dev_id_for_callback;
+            let sample_counter = if did_advance {
+                mixer_state.bus_processing.next_cycle().0
+            } else {
+                mixer_state.bus_processing.get_sample_counter()
+            };
+
+            // Occasional lightweight RT log to observe master and advancement
+            if total % 500 == 0 {
+                let master_disp = if master_device == u32::MAX { 0 } else { master_device };
+                println!("[AudioOutput] device={} master={} advanced={} sample_counter={}",
+                    dev_id_for_callback, master_disp, did_advance, sample_counter);
+            }
 
             let au_manager = get_au_manager();
             let bus_count = buses.len().min(64);
@@ -339,6 +360,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     }
 
                     if bus_buffers[bus_idx].is_valid(sample_counter) {
+                        // Occasional cache-hit log to help diagnose multi-output reprocessing
+                        if total % 200 == 0 {
+                            println!("[AudioOutput] device={} cache hit bus {} sample_counter={}",
+                                dev_id_for_callback, bus_idx, sample_counter);
+                        }
                         continue; // Already cached this cycle
                     }
 
@@ -472,6 +498,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     // Apply plugins
                     if !bus.plugin_ids.is_empty() {
                         let bus_buf = &mut bus_buffers[bus_idx];
+                        // Throttle debug logging to avoid spamming the real-time callback
+                        if total % 1000 == 0 {
+                            println!("[AudioOutput] device={} processing bus {} (plugins={:?}) sample_counter={}",
+                                dev_id_for_callback, bus_idx, bus.plugin_ids, sample_counter);
+                        }
                         au_manager.process_chain(
                             &bus.plugin_ids,
                             &mut bus_buf.left[..frames],
@@ -694,6 +725,19 @@ pub fn stop_output(device_id: u32) {
         running.store(false, Ordering::SeqCst);
         // Unregister from audio capture
         crate::audio_capture::unregister_output_device(device_id);
+
+        // If this device was master, pick a new master (smallest id) or clear
+        let current_master = MASTER_DEVICE.load(Ordering::Acquire);
+        if current_master == device_id {
+            let new_master = outputs.keys().copied().min();
+            if let Some(id) = new_master {
+                MASTER_DEVICE.store(id, Ordering::Release);
+                println!("[AudioOutput] New master elected: {}", id);
+            } else {
+                MASTER_DEVICE.store(u32::MAX, Ordering::Release);
+                println!("[AudioOutput] No master present");
+            }
+        }
     }
 }
 
@@ -705,6 +749,7 @@ pub fn stop_all_outputs() {
         running.store(false, Ordering::SeqCst);
         crate::audio_capture::unregister_output_device(device_id);
     }
+    MASTER_DEVICE.store(u32::MAX, Ordering::Release);
 }
 
 /// Start output to default device
