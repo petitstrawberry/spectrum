@@ -128,7 +128,7 @@ extern "C" {
         n: vDSP_Length,
         flag: u32, // 0 = power, 1 = amplitude
     );
-    
+
     // Gather from interleaved: extract every stride-th element
     // C[i] = A[i * stride_a]
     pub fn vDSP_vgathr(

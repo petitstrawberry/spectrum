@@ -49,8 +49,6 @@ static IO_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_SIZE);
 /// Shared level data - updated from audio thread (legacy Prism support)
 static LEVEL_DATA: RwLock<[ChannelLevels; STEREO_PAIRS]> =
     RwLock::new([ChannelLevels {
-        left_rms: 0.0,
-        right_rms: 0.0,
         left_peak: 0.0,
         right_peak: 0.0,
     }; STEREO_PAIRS]);
@@ -553,17 +551,12 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
                 let right_ch = pair * 2 + 1;
 
                 // Use vDSP strided operations directly on interleaved buffer
-                let left_rms = VDsp::rms_strided(buffer, left_ch, num_channels, frames);
-                let right_rms = VDsp::rms_strided(buffer, right_ch, num_channels, frames);
                 let left_peak = VDsp::peak_strided(buffer, left_ch, num_channels, frames);
                 let right_peak = VDsp::peak_strided(buffer, right_ch, num_channels, frames);
 
                 let old = levels[pair];
-                let smooth = 0.3;
 
                 levels[pair] = ChannelLevels {
-                    left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
-                    right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
                     left_peak: left_peak.max(old.left_peak * 0.95),
                     right_peak: right_peak.max(old.right_peak * 0.95),
                 };
@@ -1004,25 +997,16 @@ fn generic_capture_thread(state: Arc<InputDeviceState>) {
                 let right_ch = slot * 2 + 1;
 
                 // Use vDSP strided operations directly on interleaved buffer
-                let left_rms = if left_ch < num_channels {
-                    VDsp::rms_strided(buffer, left_ch, num_channels, frames)
-                } else { 0.0 };
                 let left_peak = if left_ch < num_channels {
                     VDsp::peak_strided(buffer, left_ch, num_channels, frames)
                 } else { 0.0 };
-                let right_rms = if right_ch < num_channels {
-                    VDsp::rms_strided(buffer, right_ch, num_channels, frames)
-                } else { left_rms };
                 let right_peak = if right_ch < num_channels {
                     VDsp::peak_strided(buffer, right_ch, num_channels, frames)
                 } else { left_peak };
 
                 let old = device_levels[slot];
-                let smooth = 0.3;
 
                 device_levels[slot] = ChannelLevels {
-                    left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
-                    right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
                     left_peak: left_peak.max(old.left_peak * 0.95),
                     right_peak: right_peak.max(old.right_peak * 0.95),
                 };

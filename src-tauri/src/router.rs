@@ -99,21 +99,20 @@ pub fn is_prism_available() -> bool {
     find_prism_device().is_some()
 }
 
-/// Get output levels for a specific device
-/// Returns (left_rms, right_rms, left_peak, right_peak) for each stereo pair
-pub fn get_output_levels(device_id: &str) -> Vec<(f32, f32, f32, f32)> {
+/// Get output peak levels for a specific device
+/// Returns (left_peak, right_peak) for each stereo pair
+pub fn get_output_levels(device_id: &str) -> Vec<(f32, f32)> {
     let mixer_state = get_mixer_state();
     let levels = mixer_state.get_output_levels(device_id);
 
     levels.iter()
-        .map(|l| (l.left_rms, l.right_rms, l.left_peak, l.right_peak))
+        .map(|l| (l.left_peak, l.right_peak))
         .collect()
 }
 
-/// Get output levels for multiple devices in a single call (batch API)
-/// device_ids is a list of device keys like "deviceId_pairIdx"
-/// Returns a HashMap of device_id -> Vec of (left_rms, right_rms, left_peak, right_peak)
-pub fn get_output_levels_batch(device_ids: &[String]) -> std::collections::HashMap<String, Vec<(f32, f32, f32, f32)>> {
+/// Get output peak levels for multiple devices in a single call (batch API)
+/// Returns a HashMap of device_id -> Vec of (left_peak, right_peak)
+pub fn get_output_levels_batch(device_ids: &[String]) -> std::collections::HashMap<String, Vec<(f32, f32)>> {
     let mixer_state = get_mixer_state();
     let mut result = std::collections::HashMap::new();
 
@@ -121,9 +120,7 @@ pub fn get_output_levels_batch(device_ids: &[String]) -> std::collections::HashM
         let levels = mixer_state.get_output_levels(device_id);
         result.insert(
             device_id.clone(),
-            levels.iter()
-                .map(|l| (l.left_rms, l.right_rms, l.left_peak, l.right_peak))
-                .collect()
+            levels.iter().map(|l| (l.left_peak, l.right_peak)).collect()
         );
     }
 
@@ -220,6 +217,7 @@ pub fn set_source_mute(pair_index: usize, muted: bool) {
 
 /// Set output master fader (dB)
 pub fn set_output_fader(device_id: &str, level: f32) {
+    println!("[Spectrum] router::set_output_fader called: device_id={}, level={}", device_id, level);
     let mixer_state = get_mixer_state();
     mixer_state.set_output_fader(device_id, level);
 }
@@ -239,8 +237,6 @@ pub fn simulate_levels() {
 
     // DEBUG: Always max level (RMS = 1.0 = 0dBFS) for testing meter display
     for i in 0..stereo_pairs {
-        input_levels[i].left_rms = 1.0;
-        input_levels[i].right_rms = 1.0;
         input_levels[i].left_peak = 1.0;
         input_levels[i].right_peak = 1.0;
     }

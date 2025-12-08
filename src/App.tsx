@@ -40,7 +40,8 @@ import {
   startInputCapture,
   stopInputCapture,
   getActiveInputCaptures,
-  getAllLevels,
+  getPrismLevelsBinary,
+  getMixerLevelsBinary,
   reserveBusId,
   openPrismApp,
   startAudioOutput,
@@ -52,9 +53,11 @@ import {
   removeBusSend,
   // AudioUnit API
   getEffectAudioUnits,
+  listAudioUnitInstances,
   createAudioUnitInstance,
   removeAudioUnitInstance,
   openAudioUnitUI,
+  isAudioUnitUIOpen,
   getAudioUnitState,
   setAudioUnitState,
   setBusPlugins,
@@ -62,12 +65,10 @@ import {
   type AppSource,
   type DriverStatus,
   type AudioDevice,
-  type LevelData,
   type AppState,
   type InputDeviceInfo,
   type ActiveCaptureInfo,
   type AudioUnitPluginInfo,
-  type BusLevelInfo,
 } from './lib/prismd';
 
 // --- Types ---
@@ -356,6 +357,31 @@ function dbToFader(db: number): number {
   return Math.max(0, 8.2 * (1 + (db + 40) / 60));
 }
 
+// Convert UI fader position (0-100) to linear gain (1.0 = 0dB)
+function faderToGain(faderValue: number): number {
+  if (!isFinite(faderValue) || faderValue <= 0) return 0;
+  // Convert fader (0-100) -> dB using existing scale, then to linear gain
+  const db = faderToDb(faderValue);
+  if (!isFinite(db) || db <= -100) return 0;
+  return Math.pow(10, db / 20);
+}
+
+// Convert fader percent (0-100) to linear gain (0.0-1.0)
+function faderPercentToLinear(percent: number): number {
+  const db = faderToDb(percent);
+  if (!isFinite(db) || db <= -100) return 0;
+  return Math.pow(10, db / 20);
+}
+
+// Convert UI fader percent (0-100) and muted flag to dB for backend.
+// Returns clamped dB (<= -100 used to represent silent/muted).
+function getSendDb(faderPercent: number, muted: boolean): number {
+  if (muted) return -100;
+  const db = faderToDb(faderPercent);
+  if (!isFinite(db) || db <= -100) return -100;
+  return db;
+}
+
 // Convert dB to percentage (0-100%) for meter display
 // Logic Pro X meter scale (normalized: 0dB=100%, -60dB=0%)
 // Measured from meter.png via x=0 scan
@@ -390,19 +416,6 @@ function dbToMeterPercent(db: number): number {
 // Simply use dbToMeterPercent with negated value
 function dbToMeterPosition(meterValue: number): number {
   return dbToMeterPercent(-meterValue);
-}
-
-// Get gradient stops for level meter
-function getMeterGradient(_level: number, db: number): string {
-  // Create a multi-stop gradient based on the level
-  if (db > 0) {
-    return 'linear-gradient(to top, #22c55e 0%, #22c55e 60%, #eab308 70%, #f59e0b 85%, #ef4444 95%, #ef4444 100%)';
-  } else if (db > -6) {
-    return 'linear-gradient(to top, #22c55e 0%, #22c55e 65%, #eab308 80%, #f59e0b 100%)';
-  } else if (db > -12) {
-    return 'linear-gradient(to top, #22c55e 0%, #22c55e 70%, #eab308 100%)';
-  }
-  return 'linear-gradient(to top, #22c55e 0%, #22c55e 100%)';
 }
 
 // --- Icon helpers ---
@@ -456,6 +469,9 @@ export default function App() {
 
   // Canvas pan and zoom state
   const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
+  // Stable ref to access latest canvasTransform from event handlers
+  const canvasTransformRef = useRef(canvasTransform);
+  useEffect(() => { canvasTransformRef.current = canvasTransform; }, [canvasTransform]);
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
 
@@ -473,15 +489,6 @@ export default function App() {
   const [activeCaptures, setActiveCaptures] = useState<ActiveCaptureInfo[]>([]);
   const [selectedInputDeviceId, setSelectedInputDeviceId] = useState<number | null>(null);
   const [inputSourceMode, setInputSourceMode] = useState<'prism' | 'devices'>('prism'); // Tab mode
-
-  // Real-time level meters (32 stereo pairs for Prism)
-  const [inputLevels, setInputLevels] = useState<LevelData[]>([]);
-  // Per-device level meters (device_id -> levels)
-  const [deviceLevelsMap, setDeviceLevelsMap] = useState<Map<number, LevelData[]>>(new Map());
-  // Per-bus level meters (bus_id -> levels)
-  const [busLevelsMap, setBusLevelsMap] = useState<Map<string, BusLevelInfo>>(new Map());
-  // Per-output level meters (device_key -> levels, key format: "{device_id}_{pair_idx}")
-  const [outputLevelsMap, setOutputLevelsMap] = useState<Map<string, LevelData[]>>(new Map());
 
   // dB input editing state
   const [editingDbNodeId, setEditingDbNodeId] = useState<string | null>(null);
@@ -509,6 +516,27 @@ export default function App() {
   const [availablePlugins, setAvailablePlugins] = useState<AudioUnitPluginInfo[]>([]);
   const [pluginSearchQuery, setPluginSearchQuery] = useState('');
   const [pluginBrowserTargetBusId, setPluginBrowserTargetBusId] = useState<string | null>(null);
+  // Debug: track plugin UI opens in dev
+  useEffect(() => {
+    const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env && (import.meta as any).env.MODE === 'development';
+    if (!isDev) return;
+
+    let running = true;
+    const poll = async () => {
+      try {
+        const instances = await listAudioUnitInstances();
+        console.debug(`[Spectrum][DEBUG] AudioUnit instances: ${instances.length}`, instances.map(i => i.instance_id));
+      } catch (e) {
+        console.debug('[Spectrum][DEBUG] Failed to list AudioUnit instances', e);
+      }
+    };
+
+    // Poll every 10s in dev to help trace leaking instances
+    const id = setInterval(() => { if (running) poll(); }, 10000);
+    // Run once immediately
+    poll();
+    return () => { running = false; clearInterval(id); };
+  }, []);
 
   // Refs for performant drag
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -520,6 +548,150 @@ export default function App() {
     nodeStartY: number;
   } | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Refs for node line meters (thin horizontal bar at bottom of header)
+  const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Refs for node header numeric readouts (container div containing L/R spans)
+  const nodeHeaderNumberRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Refs for mixer meters (per-mixer channel canvases)
+  const mixerMeterRefs = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  // Refs for master meters (L/R canvases in master section)
+  const masterMeterRefs = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  // Refs for master numeric DOM readouts
+  const masterNumberRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Cached canvas contexts and size/gradient info to avoid clientWidth reads in the hot loop
+  const mixerCanvasCache = useRef<Map<string, { ctx: CanvasRenderingContext2D; cssW: number; cssH: number; dpr: number; gradient?: CanvasGradient }>>(new Map());
+  const masterCanvasCache = useRef<Map<string, { ctx: CanvasRenderingContext2D; cssW: number; cssH: number; dpr: number }>>(new Map());
+
+  // Keep ResizeObservers so we can disconnect if element removed
+  const mixerROs = useRef<Map<string, ResizeObserver>>(new Map());
+  const masterROs = useRef<Map<string, ResizeObserver>>(new Map());
+
+  // Callback ref for mixer meters
+  const setMixerCanvasRef = useCallback((el: HTMLCanvasElement | null, key: string) => {
+    const existingRO = mixerROs.current.get(key);
+    if (!el) {
+      mixerMeterRefs.current.delete(key);
+      mixerCanvasCache.current.delete(key);
+      if (existingRO) {
+        existingRO.disconnect();
+        mixerROs.current.delete(key);
+      }
+      return;
+    }
+    mixerMeterRefs.current.set(key, el);
+    const updateSize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = Math.max(1, el.clientWidth);
+      const cssH = Math.max(1, el.clientHeight);
+      const backingW = Math.max(1, Math.floor(cssW * dpr));
+      const backingH = Math.max(1, Math.floor(cssH * dpr));
+      if (el.width !== backingW || el.height !== backingH) {
+        el.width = backingW;
+        el.height = backingH;
+      }
+      const ctx = el.getContext('2d', { alpha: false });
+      if (!ctx) return;
+      const gradient = ctx.createLinearGradient(0, 0, cssW, 0);
+      gradient.addColorStop(0, '#22c55e');
+      gradient.addColorStop(0.6, '#22c55e');
+      gradient.addColorStop(0.8, '#eab308');
+      gradient.addColorStop(1, '#ef4444');
+      mixerCanvasCache.current.set(key, { ctx, cssW, cssH, dpr, gradient });
+    };
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    if (existingRO) existingRO.disconnect();
+    mixerROs.current.set(key, ro);
+  }, []);
+
+  // Callback ref for node header numeric elements
+  const setNodeHeaderNumberRef = useCallback((el: HTMLDivElement | null, key: string) => {
+    if (!el) {
+      nodeHeaderNumberRefs.current.delete(key);
+      return;
+    }
+    nodeHeaderNumberRefs.current.set(key, el);
+  }, []);
+
+  // Callback ref for master numeric DOM elements
+  const setMasterNumberRef = useCallback((el: HTMLDivElement | null, key: string) => {
+    if (!el) {
+      masterNumberRefs.current.delete(key);
+      return;
+    }
+    masterNumberRefs.current.set(key, el);
+  }, []);
+
+  // Callback ref for master meters
+  const setMasterCanvasRef = useCallback((el: HTMLCanvasElement | null, key: string) => {
+    const existingRO = masterROs.current.get(key);
+    if (!el) {
+      masterMeterRefs.current.delete(key);
+      masterCanvasCache.current.delete(key);
+      if (existingRO) {
+        existingRO.disconnect();
+        masterROs.current.delete(key);
+      }
+      return;
+    }
+    masterMeterRefs.current.set(key, el);
+    const updateSize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = Math.max(1, el.clientWidth);
+      const cssH = Math.max(1, el.clientHeight);
+      const backingW = Math.max(1, Math.floor(cssW * dpr));
+      const backingH = Math.max(1, Math.floor(cssH * dpr));
+      if (el.width !== backingW || el.height !== backingH) {
+        el.width = backingW;
+        el.height = backingH;
+      }
+      const ctx = el.getContext('2d', { alpha: false });
+      if (!ctx) return;
+      masterCanvasCache.current.set(key, { ctx, cssW, cssH, dpr });
+    };
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    if (existingRO) existingRO.disconnect();
+    masterROs.current.set(key, ro);
+  }, []);
+
+  // Smoothed master levels for animation (key -> smoothedPct)
+  const smoothedMasterLevels = useRef<Map<string, number>>(new Map());
+
+  // Smoothed node levels for line meters (nodeId -> smoothedPct)
+  const smoothedNodeLevels = useRef<Map<string, number>>(new Map());
+
+  // Helper to draw rounded rect path (does not fill/stroke)
+  const roundRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
+    const radius = Math.max(0, Math.min(r, Math.min(w / 2, h / 2)));
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + w, y, x + w, y + h, radius);
+    ctx.arcTo(x + w, y + h, x, y + h, radius);
+    ctx.arcTo(x, y + h, x, y, radius);
+    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.closePath();
+  };
+
+  // Smoothed meter values for animation (key -> smoothedPct)
+  const smoothedMixerLevels = useRef<Map<string, number>>(new Map());
+
+  // Create dB-based vertical gradient for meter
+  const createMeterVerticalGradient = (ctx: CanvasRenderingContext2D, cssH: number): CanvasGradient => {
+    // Bottom (0 dB at 100%) to top (0 dB at 0%)
+    // Mapping: -60 dB = 0%, -18 dB = ~40%, -6 dB = ~80%, 0 dB = 100%
+    const gradient = ctx.createLinearGradient(0, cssH, 0, 0);
+    gradient.addColorStop(0, '#22c55e');    // green at bottom (low level)
+    gradient.addColorStop(0.5, '#22c55e');  // still green up to ~-18dB region
+    gradient.addColorStop(0.75, '#eab308'); // yellow around -6dB region
+    gradient.addColorStop(0.92, '#f59e0b'); // orange
+    gradient.addColorStop(1, '#ef4444');    // red at top (0dB)
+    return gradient;
+  };
+  // Guard to prevent overlapping async polling calls
+  const isFetchingRef = useRef<boolean>(false);
 
   // --- Prism Daemon & Audio Device Communication ---
   const fetchPrismData = async () => {
@@ -616,6 +788,15 @@ export default function App() {
               available = !!prismDevice || driverStatus?.connected || false;
             }
 
+            // For target nodes, extract deviceId from libraryId if not provided
+            let parsedDeviceId = sn.device_id;
+            if (sn.node_type === 'target' && parsedDeviceId === undefined) {
+              const voutMatch = sn.library_id?.match(/^vout_(\d+)_(\d+)$/);
+              if (voutMatch) {
+                parsedDeviceId = parseInt(voutMatch[1], 10);
+              }
+            }
+
             return {
               id: sn.id,
               libraryId: currentLibraryId,
@@ -631,7 +812,7 @@ export default function App() {
               channelCount: sn.channel_count,
               channelOffset: sn.channel_offset,
               sourceType: sn.source_type as SourceType | undefined,
-              deviceId: sn.device_id,
+              deviceId: parsedDeviceId,
               deviceName: sn.device_name,
               channelMode: sn.channel_mode as ChannelMode,
               available,
@@ -844,8 +1025,8 @@ export default function App() {
                     ? sourceNode.deviceId : 0;
                   const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
                   const tgtCh = (targetNode.channelOffset ?? 0) + conn.toChannel;
-                  const level = conn.muted ? 0 : conn.sendLevel / 100;
-                  updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, level, conn.muted)
+                  const sendDb = getSendDb(conn.sendLevel, conn.muted);
+                  updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, sendDb, conn.muted)
                     .then(() => console.log(`[Spectrum] Bus send restored: Input -> ${busId}`))
                     .catch(console.error);
                 }
@@ -859,8 +1040,8 @@ export default function App() {
                 if (srcBusId && tgtBusId) {
                   const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
                   const tgtCh = (targetNode.channelOffset ?? 0) + conn.toChannel;
-                  const level = conn.muted ? 0 : conn.sendLevel / 100;
-                  updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, level, conn.muted)
+                  const sendDb = getSendDb(conn.sendLevel, conn.muted);
+                  updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, sendDb, conn.muted)
                     .then(() => console.log(`[Spectrum] Bus chain restored: ${srcBusId} -> ${tgtBusId}`))
                     .catch(console.error);
                 }
@@ -877,8 +1058,8 @@ export default function App() {
                   const targetChannelOffset = parseInt(voutMatch[2], 10);
                   const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
                   const tgtCh = targetChannelOffset + conn.toChannel;
-                  const level = conn.muted ? 0 : conn.sendLevel / 100;
-                  updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetDeviceId, tgtCh, level, conn.muted)
+                  const sendDb = getSendDb(conn.sendLevel, conn.muted);
+                  updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetDeviceId, tgtCh, sendDb, conn.muted)
                     .then(() => console.log(`[Spectrum] Bus to output restored: ${srcBusId} -> ${targetDeviceId}:${tgtCh}`))
                     .catch(console.error);
                 }
@@ -1118,123 +1299,385 @@ export default function App() {
   };
 
   // High-frequency level meter polling - Optimized: single IPC call at 30fps
+  // Store latest levels in a ref so drawing can happen every frame
+  const latestLevelsRef = useRef<{ prism: any[]; devices: Record<string, any>; buses: any[]; outputs: Record<string, any> }>({
+    prism: [],
+    devices: {},
+    buses: [],
+    outputs: {},
+  });
+
   useEffect(() => {
     let animationFrame: number;
-    let lastTime = 0;
+    let lastFetchTime = 0;
+    const POLL_INTERVAL_MS = 33; // ~30fps for data fetching
 
-    const updateLevels = async (currentTime: number) => {
-      // Throttle to ~30fps (33ms interval)
-      if (currentTime - lastTime >= 33) {
-        try {
-          // Collect device IDs to query (convert to string for IPC)
-          const activeDeviceIds = activeCaptures
-            .filter(c => !c.is_prism)
-            .map(c => String(c.device_id));
+    const loop = (currentTime: number) => {
+      // 1. Fetch new data (throttled)
+      if (currentTime - lastFetchTime >= POLL_INTERVAL_MS && !isFetchingRef.current) {
+        lastFetchTime = currentTime;
+        isFetchingRef.current = true;
 
-          // Collect output keys from target nodes on canvas
-          const outputKeys: string[] = [];
-          const targetNodes = nodes.filter(n => n.type === 'target');
-          const deviceKeySet = new Set<string>();
-          for (const node of targetNodes) {
-            const voutMatch = node.libraryId?.match(/^vout_(\d+)_(\d+)$/);
-            if (voutMatch) {
-              const pairIdx = Math.floor(parseInt(voutMatch[2]) / 2);
-              const key = `${voutMatch[1]}_${pairIdx}`;
-              if (!deviceKeySet.has(key)) {
-                deviceKeySet.add(key);
-                outputKeys.push(key);
+        // Collect device IDs to query
+        const activeDeviceIds = activeCaptures
+          .filter(c => !c.is_prism)
+          .map(c => String(c.device_id));
+
+        // Collect output keys from target nodes
+        const outputKeys: string[] = [];
+        const deviceKeySet = new Set<string>();
+        for (const node of nodes) {
+          if (node.type === 'target') {
+            // Get deviceId from node or parse from libraryId
+            let devId = node.deviceId;
+            if (devId == null && node.libraryId) {
+              const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
+              if (match) {
+                devId = parseInt(match[1], 10);
+              }
+            }
+            if (devId != null) {
+              const numPairs = Math.max(1, Math.floor(node.channelCount / 2));
+              for (let pairIdx = 0; pairIdx < numPairs; pairIdx++) {
+                const key = `${devId}_${pairIdx}`;
+                if (!deviceKeySet.has(key)) {
+                  deviceKeySet.add(key);
+                  outputKeys.push(key);
+                }
               }
             }
           }
+        }
 
-          // Single IPC call for ALL levels
-          const allLevels = await getAllLevels(activeDeviceIds, outputKeys);
+        // Debug: log output keys collection (remove after debugging)
+        if (Math.random() < 0.01) {
+          const targetNodes = nodes.filter(n => n.type === 'target');
+          console.log('[Output Keys Debug]', {
+            nodesCount: nodes.length,
+            targetNodesCount: targetNodes.length,
+            targetNodes: targetNodes.map(n => ({ id: n.id, type: n.type, deviceId: n.deviceId, libraryId: n.libraryId, channelCount: n.channelCount })),
+            outputKeys,
+          });
+        }
 
-          // Update Prism levels
-          if (allLevels.prism && allLevels.prism.length > 0) {
-            setInputLevels(allLevels.prism);
-          }
-
-          // Update device levels (only if changed)
-          if (Object.keys(allLevels.devices).length > 0) {
-            setDeviceLevelsMap(prev => {
-              let changed = false;
-              for (const [deviceIdStr, levels] of Object.entries(allLevels.devices)) {
-                if (levels && levels.length > 0) {
-                  const deviceId = parseInt(deviceIdStr, 10);
-                  const existing = prev.get(deviceId);
-                  if (!existing || JSON.stringify(existing) !== JSON.stringify(levels)) {
-                    changed = true;
-                    break;
-                  }
-                }
-              }
-              if (!changed) return prev;
-              const newMap = new Map(prev);
-              for (const [deviceIdStr, levels] of Object.entries(allLevels.devices)) {
-                if (levels && levels.length > 0) {
-                  const deviceId = parseInt(deviceIdStr, 10);
-                  newMap.set(deviceId, levels);
-                }
-              }
-              return newMap;
+        // Fetch levels asynchronously
+        Promise.all([
+          getPrismLevelsBinary(),
+          getMixerLevelsBinary(activeDeviceIds, outputKeys),
+        ]).then(([prismFloats, mixerLevels]) => {
+          const prismArr: any[] = [];
+          for (let i = 0; i < prismFloats.length; i += 2) {
+            prismArr.push({
+              left_peak: prismFloats[i],
+              right_peak: prismFloats[i + 1],
             });
           }
-
-          // Update bus levels (only if changed)
-          if (allLevels.buses && allLevels.buses.length > 0) {
-            setBusLevelsMap(prev => {
-              let changed = false;
-              for (const bl of allLevels.buses) {
-                const existing = prev.get(bl.id);
-                if (!existing || existing.left_rms !== bl.left_rms || existing.right_rms !== bl.right_rms) {
-                  changed = true;
-                  break;
-                }
-              }
-              if (!changed) return prev;
-              const m = new Map(prev);
-              for (const bl of allLevels.buses) {
-                m.set(bl.id, bl);
-              }
-              return m;
-            });
+          latestLevelsRef.current = {
+            prism: prismArr,
+            devices: mixerLevels.devices || {},
+            buses: mixerLevels.buses || [],
+            outputs: mixerLevels.outputs || {},
+          };
+        // Log parsed levels for debugging alignment with backend MeterDebug
+        }).then(() => {
+          try {
+            // Print recent parsed mixer buses to renderer console for quick verification
+            // (only in development; this will be removed after debugging)
+            // eslint-disable-next-line no-console
+            console.debug('[Levels Debug] prism:', latestLevelsRef.current.prism);
+          } catch (e) {
+            // ignore
           }
+        }).catch(() => {
+          // ignore fetch errors
+        }).finally(() => {
+          isFetchingRef.current = false;
+        });
+      }
 
-          // Update output levels (only if changed)
-          if (Object.keys(allLevels.outputs).length > 0) {
-            setOutputLevelsMap(prev => {
-              let changed = false;
-              for (const [deviceKey, levels] of Object.entries(allLevels.outputs)) {
-                if (levels && levels.length > 0) {
-                  const existing = prev.get(deviceKey);
-                  if (!existing || JSON.stringify(existing) !== JSON.stringify(levels)) {
-                    changed = true;
-                    break;
-                  }
-                }
+      // 2. Draw every frame using latest data
+      const allLevels = latestLevelsRef.current;
+      const SMOOTH_FACTOR = 0.3;
+
+      // Draw mixer meters
+      for (const [key, cached] of mixerCanvasCache.current.entries()) {
+        if (!cached) continue;
+
+        const m = key.match(/^(.+)_ch(\d+)(_stereo)?(_L|_R)?$/);
+        if (!m) continue;
+        const nodeId = m[1];
+        const fromChannel = parseInt(m[2], 10);
+        const side = m[4]?.replace('_', '');
+
+        const node = nodesById.get(nodeId);
+        const { ctx, cssW, cssH, dpr } = cached;
+
+        // Reset transform and clear
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, cssW, cssH);
+
+        // Draw background
+        ctx.fillStyle = 'rgba(2,6,23,1)';
+        roundRect(ctx, 0, 0, cssW, cssH, Math.max(2, Math.min(4, cssW * 0.2)));
+        ctx.fill();
+
+        if (!node) {
+          // Fade out if node not found
+          const prevPct = smoothedMixerLevels.current.get(key) ?? 0;
+          smoothedMixerLevels.current.set(key, prevPct * 0.9);
+          continue;
+        }
+
+        const targetId = selectedBusId || focusedOutputId;
+        if (!targetId) continue;
+
+        const conn = connections.find(c =>
+          c.fromNodeId === nodeId &&
+          c.fromChannel === fromChannel &&
+          c.toNodeId === targetId
+        );
+
+        const level = conn?.sendLevel ?? 0;
+        const isMuted = conn?.muted ?? false;
+
+        // Get input levels
+        let leftDb = -60, rightDb = -60;
+        if (node.type === 'source') {
+          if (node.sourceType === 'device' && node.deviceId !== undefined) {
+            const dev = allLevels.devices[String(node.deviceId)];
+            if (Array.isArray(dev) && dev.length > 0) {
+              const pairIdx = Math.floor(fromChannel / 2);
+              const ld = dev[pairIdx];
+              if (ld) {
+                leftDb = rmsToDb(ld.left_peak);
+                rightDb = rmsToDb(ld.right_peak);
               }
-              if (!changed) return prev;
-              const newMap = new Map(prev);
-              for (const [deviceKey, levels] of Object.entries(allLevels.outputs)) {
-                if (levels && levels.length > 0) {
-                  newMap.set(deviceKey, levels);
-                }
-              }
-              return newMap;
-            });
+            }
+          } else {
+            const pairIndex = Math.floor(((node.channelOffset ?? 0) + fromChannel) / 2);
+            const ld = allLevels.prism[pairIndex];
+            if (ld) {
+              leftDb = rmsToDb(ld.left_peak ?? 0);
+              rightDb = rmsToDb(ld.right_peak ?? 0);
+            }
           }
-        } catch (error) {
+        } else if (node.type === 'bus') {
+          const bl = allLevels.buses.find((b: any) => b.id === node.busId);
+          if (bl) {
+            // Use post-fader levels for mixer meters
+            leftDb = rmsToDb(bl.post_left_peak);
+            rightDb = rmsToDb(bl.post_right_peak);
+          }
+        }
+
+        // Apply fader only for source nodes (bus levels are already post-processing)
+        let targetDb: number;
+        if (node.type === 'source') {
+          const faderDb = faderToDb(level);
+          // Debug: log fader values (remove after debugging)
+          if (Math.random() < 0.005) {
+            console.log('[Mixer Meter Debug]', { nodeId, nodeType: node.type, level, faderDb, leftDb, rightDb });
+          }
+          const postLeft = faderDb <= -100 ? -Infinity : leftDb + faderDb;
+          const postRight = faderDb <= -100 ? -Infinity : rightDb + faderDb;
+          targetDb = side === 'R' ? postRight : postLeft;
+        } else {
+          // Bus nodes: use bus output level directly (already processed)
+          targetDb = side === 'R' ? rightDb : leftDb;
+        }
+        const rawPct = Math.min(100, Math.max(0, dbToMeterPercent(targetDb)));
+        const clip = targetDb > 0 && !isMuted;
+
+        const prevPct = smoothedMixerLevels.current.get(key) ?? 0;
+        const smoothedPct = isMuted ? 0 : prevPct + SMOOTH_FACTOR * (rawPct - prevPct);
+        smoothedMixerLevels.current.set(key, smoothedPct);
+
+        // Draw meter bar
+        if (smoothedPct > 0.5) {
+          const barH = (cssH * smoothedPct) / 100;
+          ctx.beginPath();
+          roundRect(ctx, 0, cssH - barH, cssW, barH, Math.min(4, cssW * 0.15));
+          ctx.fillStyle = createMeterVerticalGradient(ctx, cssH);
+          ctx.fill();
+        }
+
+        // Clip indicator
+        if (clip) {
+          ctx.beginPath();
+          roundRect(ctx, 0, 0, cssW, 3, 1);
+          ctx.fillStyle = '#ef4444';
+          ctx.fill();
+        }
+        // numeric dB label removed (display handled elsewhere or by user request)
+      }
+
+      // Draw master meters (L and R)
+      const focusedTargetNode = focusedOutputId ? nodes.find(n => n.id === focusedOutputId && n.type === 'target') : null;
+
+      // Get deviceId from focused target node (parse from libraryId if needed)
+      let masterDeviceId: number | null = null;
+      if (focusedTargetNode) {
+        if (focusedTargetNode.deviceId != null) {
+          masterDeviceId = focusedTargetNode.deviceId;
+        } else if (focusedTargetNode.libraryId) {
+          const match = focusedTargetNode.libraryId.match(/^vout_(\d+)_(\d+)$/);
+          if (match) {
+            masterDeviceId = parseInt(match[1], 10);
+          }
+        }
+      }
+
+      // Debug: log master meter data (remove after debugging)
+      if (masterCanvasCache.current.size > 0 && Math.random() < 0.01) {
+        console.log('[Master Meter Debug]', {
+          focusedOutputId,
+          focusedTargetNode: focusedTargetNode ? { id: focusedTargetNode.id, deviceId: focusedTargetNode.deviceId, libraryId: focusedTargetNode.libraryId } : null,
+          masterDeviceId,
+          focusedPairIndex,
+          outputKeys: Object.keys(allLevels.outputs),
+          outputs: allLevels.outputs,
+        });
+      }
+
+      for (const [key, cached] of masterCanvasCache.current.entries()) {
+        if (!cached) continue;
+        const { ctx, cssW, cssH, dpr } = cached;
+        const isRight = key === 'master_R';
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, cssW, cssH);
+
+        // Draw background
+        ctx.fillStyle = 'rgba(2,6,23,1)';
+        roundRect(ctx, 0, 0, cssW, cssH, Math.max(2, Math.min(4, cssW * 0.2)));
+        ctx.fill();
+
+        let targetDb = -60;
+        if (masterDeviceId != null) {
+          const deviceKey = `${masterDeviceId}_${focusedPairIndex}`;
+          const levels = allLevels.outputs[deviceKey];
+          if (Array.isArray(levels) && levels.length > 0) {
+            const ld = levels[0];
+            targetDb = isRight ? rmsToDb(ld?.right_peak ?? 0) : rmsToDb(ld?.left_peak ?? 0);
+          }
+        }
+
+        const rawPct = Math.min(100, Math.max(0, dbToMeterPercent(targetDb)));
+        const clip = targetDb > 0;
+
+        const prevPct = smoothedMasterLevels.current.get(key) ?? 0;
+        const smoothedPct = prevPct + SMOOTH_FACTOR * (rawPct - prevPct);
+        smoothedMasterLevels.current.set(key, smoothedPct);
+
+        // Draw meter bar
+        if (smoothedPct > 0.5) {
+          const barH = (cssH * smoothedPct) / 100;
+          ctx.beginPath();
+          roundRect(ctx, 0, cssH - barH, cssW, barH, Math.min(4, cssW * 0.15));
+          ctx.fillStyle = createMeterVerticalGradient(ctx, cssH);
+          ctx.fill();
+        }
+
+        // Clip indicator
+        if (clip) {
+          ctx.beginPath();
+          roundRect(ctx, 0, 0, cssW, 3, 1);
+          ctx.fillStyle = '#ef4444';
+          ctx.fill();
+        }
+        // master numeric readout removed per user request
+      }
+
+      // Update node line meters (thin horizontal bar via DOM style)
+      for (const [nodeId, el] of nodeLineMeterRefs.current.entries()) {
+        const node = nodesById.get(nodeId);
+        if (!node) {
+          el.style.width = '0%';
+          continue;
+        }
+
+        // Get peak level for this node
+        let peakDb = -60;
+        if (node.type === 'source') {
+          if (node.sourceType === 'device' && node.deviceId !== undefined) {
+            const dev = allLevels.devices[String(node.deviceId)];
+            if (Array.isArray(dev) && dev.length > 0) {
+              // Find max peak across all pairs
+              for (const ld of dev) {
+                const leftDb = rmsToDb(ld?.left_peak ?? 0);
+                const rightDb = rmsToDb(ld?.right_peak ?? 0);
+                peakDb = Math.max(peakDb, leftDb, rightDb);
+              }
+            }
+          } else {
+            // Prism channel
+            const channelOffset = node.channelOffset ?? 0;
+            const numPairs = Math.max(1, Math.floor((node.channelCount ?? 2) / 2));
+            for (let i = 0; i < numPairs; i++) {
+              const pairIndex = Math.floor(channelOffset / 2) + i;
+              const ld = allLevels.prism[pairIndex];
+              if (ld) {
+                const leftDb = rmsToDb(ld.left_peak ?? 0);
+                const rightDb = rmsToDb(ld.right_peak ?? 0);
+                peakDb = Math.max(peakDb, leftDb, rightDb);
+              }
+            }
+          }
+        } else if (node.type === 'bus') {
+          const bl = allLevels.buses.find((b: any) => b.id === node.busId);
+          if (bl) {
+            // Use pre-fader levels for patch view node meters
+            peakDb = Math.max(rmsToDb(bl.pre_left_peak), rmsToDb(bl.pre_right_peak));
+          }
+        } else if (node.type === 'target') {
+          // Target node: use output levels - get deviceId from node or libraryId
+          let devId = node.deviceId;
+          if (devId == null && node.libraryId) {
+            const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
+            if (match) {
+              devId = parseInt(match[1], 10);
+            }
+          }
+          if (devId != null) {
+            const numPairs = Math.max(1, Math.floor((node.channelCount ?? 2) / 2));
+            for (let pairIdx = 0; pairIdx < numPairs; pairIdx++) {
+              const deviceKey = `${devId}_${pairIdx}`;
+              const levels = allLevels.outputs[deviceKey];
+              if (Array.isArray(levels) && levels.length > 0) {
+                const ld = levels[0];
+                const leftDb = rmsToDb(ld?.left_peak ?? 0);
+                const rightDb = rmsToDb(ld?.right_peak ?? 0);
+                peakDb = Math.max(peakDb, leftDb, rightDb);
+              }
+            }
+          }
+        }
+
+        const rawPct = Math.min(100, Math.max(0, dbToMeterPercent(peakDb)));
+        const prevPct = smoothedNodeLevels.current.get(nodeId) ?? 0;
+        const smoothedPct = prevPct + SMOOTH_FACTOR * (rawPct - prevPct);
+        smoothedNodeLevels.current.set(nodeId, smoothedPct);
+
+        el.style.width = `${smoothedPct}%`;
+        // Update numeric readout inside node line meter (create if missing)
+          // node numeric readout removed per user request
+        // Update header L/R numeric readout
+        try {
+          const headerEl = nodeHeaderNumberRefs.current.get(nodeId);
+            // header numeric L/R readouts removed per user request
+        } catch (e) {
           // ignore
         }
-        lastTime = currentTime;
       }
-      animationFrame = requestAnimationFrame(updateLevels);
+
+      animationFrame = requestAnimationFrame(loop);
     };
 
-    animationFrame = requestAnimationFrame(updateLevels);
+    animationFrame = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrame);
-  }, [activeCaptures, nodes]);
+  }, [activeCaptures, nodes, nodesById, connections, focusedOutputId, selectedBusId, focusedPairIndex]);
 
   // Channel-based source type for UI (32 stereo pairs = 64 channels)
   type ChannelSource = {
@@ -1550,6 +1993,7 @@ export default function App() {
       muted: false,
       channelCount: targetChannels,
       channelOffset: targetData?.channelOffset ?? 0, // Channel offset within the actual device
+      deviceId: targetData?.deviceId ? parseInt(targetData.deviceId, 10) : undefined, // Audio device ID for level metering
       channelMode: (targetChannels >= 2 && targetChannels % 2 === 0) ? 'stereo' : 'mono', // Stereo for even channels >= 2
       available: true,
     };
@@ -1795,6 +2239,16 @@ export default function App() {
 
     // Remove bus from backend if deleting a bus node
     if (nodeToDelete?.type === 'bus' && nodeToDelete.busId) {
+      // First, remove any AudioUnit plugin instances belonging to this bus
+      if (nodeToDelete.plugins && nodeToDelete.plugins.length > 0) {
+        for (const p of nodeToDelete.plugins) {
+          // Best-effort removal of plugin instance
+          removeAudioUnitInstance(p.id).catch(err => {
+            console.warn('[Spectrum] Failed to remove AudioUnit instance during bus delete:', p.id, err);
+          });
+        }
+      }
+
       removeBusApi(nodeToDelete.busId).catch(console.error);
     }
 
@@ -1920,19 +2374,19 @@ export default function App() {
         } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
           const busId = targetNode.busId;
           if (busId) {
-            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, level / 100, conn.muted).catch(console.error);
+            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, getSendDb(level * 100, conn.muted), conn.muted).catch(console.error);
           }
         } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
           const srcBusId = sourceNode.busId;
           const tgtBusId = targetNode.busId;
           if (srcBusId && tgtBusId) {
-            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, level / 100, conn.muted).catch(console.error);
+            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, getSendDb(level * 100, conn.muted), conn.muted).catch(console.error);
           }
         } else if (sourceNode.type === 'bus' && targetNode.type === 'target') {
           const srcBusId = sourceNode.busId;
           const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
           if (srcBusId && targetData) {
-            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, level / 100, conn.muted).catch(console.error);
+            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, getSendDb(level * 100, conn.muted), conn.muted).catch(console.error);
           }
         }
       }
@@ -1972,19 +2426,19 @@ export default function App() {
         } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
           const busId = targetNode.busId;
           if (busId) {
-            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, conn.sendLevel / 100, newMuted).catch(console.error);
+            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, getSendDb(conn.sendLevel, newMuted), newMuted).catch(console.error);
           }
         } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
           const srcBusId = sourceNode.busId;
           const tgtBusId = targetNode.busId;
           if (srcBusId && tgtBusId) {
-            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, conn.sendLevel / 100, newMuted).catch(console.error);
+            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, getSendDb(conn.sendLevel, newMuted), newMuted).catch(console.error);
           }
         } else if (sourceNode.type === 'bus' && targetNode.type === 'target') {
           const srcBusId = sourceNode.busId;
           const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
           if (srcBusId && targetData) {
-            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, conn.sendLevel / 100, newMuted).catch(console.error);
+            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, getSendDb(conn.sendLevel, newMuted), newMuted).catch(console.error);
           }
         }
       }
@@ -2061,8 +2515,9 @@ export default function App() {
 
     const { nodeId, startX, startY } = dragRef.current;
     // Convert screen delta to canvas delta (accounting for zoom)
-    const dx = (e.clientX - startX) / canvasTransform.scale;
-    const dy = (e.clientY - startY) / canvasTransform.scale;
+    const scale = canvasTransformRef.current.scale;
+    const dx = (e.clientX - startX) / scale;
+    const dy = (e.clientY - startY) / scale;
 
     const nodeEl = nodeRefs.current.get(nodeId);
     if (nodeEl) {
@@ -2071,15 +2526,16 @@ export default function App() {
 
     // Update drag offset for cable rendering
     setDragOffset({ nodeId, dx, dy });
-  }, [canvasTransform.scale]);
+  }, []);
 
   const handleDragEnd = useCallback((e: MouseEvent) => {
     if (!dragRef.current) return;
 
     const { nodeId, startX, startY, nodeStartX, nodeStartY } = dragRef.current;
     // Convert screen delta to canvas delta (accounting for zoom)
-    const dx = (e.clientX - startX) / canvasTransform.scale;
-    const dy = (e.clientY - startY) / canvasTransform.scale;
+    const scale = canvasTransformRef.current.scale;
+    const dx = (e.clientX - startX) / scale;
+    const dy = (e.clientY - startY) / scale;
 
     // Reset transform and update state once
     const nodeEl = nodeRefs.current.get(nodeId);
@@ -2099,7 +2555,7 @@ export default function App() {
     dragRef.current = null;
     document.removeEventListener('mousemove', handleDragMove);
     document.removeEventListener('mouseup', handleDragEnd);
-  }, [handleDragMove, canvasTransform.scale]);
+  }, []);
 
   const handleNodeMouseDown = useCallback((e: React.MouseEvent, nodeId: string) => {
     // Don't interfere with native drag events from library items
@@ -2403,7 +2859,7 @@ export default function App() {
           // Input -> Bus
           const busId = targetNode.busId;
           if (busId) {
-            const defaultLevel = 1.0; // 0dB unity
+            const defaultDb = 0; // 0dB unity
             updateBusSend(
               'input',
               sourceNode.deviceId?.toString() ?? '0',
@@ -2412,7 +2868,7 @@ export default function App() {
               'bus',
               busId,
               tgtCh,
-              defaultLevel,
+              defaultDb,
               false
             ).catch(console.error);
             console.log(`Bus route: Input ${srcDevId}:${srcCh} → Bus ${busId}:${tgtCh}`);
@@ -2422,7 +2878,7 @@ export default function App() {
           const srcBusId = sourceNode.busId;
           const tgtBusId = targetNode.busId;
           if (srcBusId && tgtBusId) {
-            const defaultLevel = 1.0;
+            const defaultDb = 0;
             updateBusSend(
               'bus',
               srcBusId,
@@ -2431,7 +2887,7 @@ export default function App() {
               'bus',
               tgtBusId,
               tgtCh,
-              defaultLevel,
+              defaultDb,
               false
             ).catch(console.error);
             console.log(`Bus chain: Bus ${srcBusId}:${srcCh} → Bus ${tgtBusId}:${tgtCh}`);
@@ -2445,7 +2901,7 @@ export default function App() {
               startAudioOutput(deviceIdNum).catch(console.error);
             }
 
-            const defaultLevel = 1.0;
+            const defaultDb = 0;
             updateBusSend(
               'bus',
               srcBusId,
@@ -2454,7 +2910,7 @@ export default function App() {
               'output',
               targetData.deviceId,
               tgtCh,
-              defaultLevel,
+              defaultDb,
               false
             ).catch(console.error);
             console.log(`Bus to output: Bus ${srcBusId}:${srcCh} → device ${targetData.deviceId}:${tgtCh}`);
@@ -2804,21 +3260,6 @@ export default function App() {
                 const hasApps = channel.hasApps;
                 const FirstIcon = channel.apps[0]?.icon || Music;
 
-                // Get real level data for this channel
-                const pairIndex = channel.channelOffset / 2;
-                const levelData = inputLevels[pairIndex];
-                // Convert RMS to dB using helper functions
-                const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
-                const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
-                const maxDb = Math.max(leftDb, rightDb);
-                const avgLevel = dbToMeterPercent(maxDb);
-
-                // Get color based on level
-                const meterColorClass = maxDb > 0 ? 'from-red-500/30' :
-                                        maxDb > -6 ? 'from-amber-500/25' :
-                                        maxDb > -12 ? 'from-yellow-500/20' :
-                                        'from-green-500/20';
-
                 return (
                   <div
                     key={channel.id}
@@ -2832,21 +3273,15 @@ export default function App() {
                           : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 cursor-grab active:cursor-grabbing'}
                     `}
                   >
-                    {/* Level meter bar (background) with color based on level */}
-                    <div
-                      className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${meterColorClass} to-transparent rounded-lg transition-all duration-75 pointer-events-none`}
-                      style={{ width: `${Math.min(avgLevel, 100)}%` }}
-                    />
-
                     {/* Channel number */}
-                    <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'} relative z-10`}>
+                    <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'}`}>
                       {channel.channelLabel}
                     </div>
 
                     {/* App info */}
                     {channel.isMain ? (
                       // MAIN channel - show icon and app count
-                      <div className="flex-1 flex items-center gap-2 min-w-0 relative z-10">
+                      <div className="flex-1 flex items-center gap-2 min-w-0">
                         <div className="w-5 h-5 rounded flex items-center justify-center bg-cyan-900/50 text-cyan-400">
                           <Volume2 className="w-3 h-3" />
                         </div>
@@ -2858,7 +3293,7 @@ export default function App() {
                         </div>
                       </div>
                     ) : hasApps ? (
-                      <div className="flex-1 flex items-center gap-2 min-w-0 relative z-10">
+                      <div className="flex-1 flex items-center gap-2 min-w-0">
                         <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${channel.apps[0].color}`}>
                           <FirstIcon className="w-3 h-3" />
                         </div>
@@ -2872,7 +3307,7 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex-1 text-[10px] text-slate-600 italic relative z-10">Empty</div>
+                      <div className="flex-1 text-[10px] text-slate-600 italic">Empty</div>
                     )}
 
                     {!isUsed && <Plus className="w-3 h-3 text-slate-700 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />}
@@ -3070,59 +3505,54 @@ export default function App() {
                     : node.color);
               const NodeIcon = dynamicIcon;
 
-              // Get level data for source nodes
-              let avgLevel = 0;
-              let meterColorClass = 'from-green-500/20';
-
-              if (node.type === 'source') {
-                if (isDeviceNode && node.deviceId !== undefined) {
-                  // Device node: aggregate all channel levels from deviceLevelsMap
-                  const numPairs = Math.floor(node.channelCount / 2);
-                  const deviceLevels = deviceLevelsMap.get(node.deviceId);
-                  if (deviceLevels) {
-                    const maxDb = deviceLevels.slice(0, numPairs).reduce((max, l) => {
-                      if (!l) return max;
-                      return Math.max(max, rmsToDb(l.left_rms), rmsToDb(l.right_rms));
-                    }, -60);
-                    avgLevel = dbToMeterPercent(maxDb);
-                    meterColorClass = maxDb > 0 ? 'from-red-500/30' :
-                                      maxDb > -6 ? 'from-amber-500/25' :
-                                      maxDb > -12 ? 'from-yellow-500/20' :
-                                      'from-green-500/20';
+              // header meters are drawn on canvas via updateLevels
+              // Compute L/R peak dB for this node to show under the name (temporary)
+              let hdrLeftDb = -60;
+              let hdrRightDb = -60;
+              try {
+                const lv = latestLevelsRef.current;
+                if (node.type === 'source') {
+                  if (isDeviceNode && node.deviceId != null) {
+                    const devLevels = lv.devices[String(node.deviceId)];
+                    if (Array.isArray(devLevels) && devLevels.length > 0) {
+                      for (const ld of devLevels) {
+                        hdrLeftDb = Math.max(hdrLeftDb, rmsToDb(ld.left_peak ?? 0));
+                        hdrRightDb = Math.max(hdrRightDb, rmsToDb(ld.right_peak ?? 0));
+                      }
+                    }
+                  } else {
+                    const channelOffset = node.channelOffset ?? 0;
+                    const pairIndex = Math.floor(channelOffset / 2);
+                    const ld = lv.prism[pairIndex];
+                    if (ld) {
+                      hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
+                      hdrRightDb = rmsToDb(ld.right_peak ?? 0);
+                    }
                   }
-                } else if (channelData) {
-                  // Prism channel node: single pair level
-                  const pairIndex = channelData.channelOffset / 2;
-                  const levelData = inputLevels[pairIndex];
-                  const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
-                  const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
-                  const maxDb = Math.max(leftDb, rightDb);
-                  avgLevel = dbToMeterPercent(maxDb);
-                  meterColorClass = maxDb > 0 ? 'from-red-500/30' :
-                                    maxDb > -6 ? 'from-amber-500/25' :
-                                    maxDb > -12 ? 'from-yellow-500/20' :
-                                    'from-green-500/20';
-                }
-              } else if (node.type === 'target') {
-                // Target node: get output levels from outputLevelsMap
-                const targetData = outputTargets.find(t => t.id === node.libraryId);
-                if (targetData) {
-                  // Calculate pair index from channelOffset (channels are 0-indexed, pairs are 2ch each)
-                  const pairIndex = Math.floor(targetData.channelOffset / 2);
-                  const deviceKey = `${targetData.deviceId}_${pairIndex}`;
-                  const levels = outputLevelsMap.get(deviceKey);
-                  if (levels && levels.length > 0) {
-                    const levelData = levels[0];
-                    const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
-                    const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
-                    const maxDb = Math.max(leftDb, rightDb);
-                    avgLevel = dbToMeterPercent(maxDb);
-                    meterColorClass = maxDb > 0 ? 'from-red-500/30' :
-                                      maxDb > -6 ? 'from-amber-500/25' :
-                                      maxDb > -12 ? 'from-yellow-500/20' :
-                                      'from-green-500/20';
+                } else if (node.type === 'bus') {
+                  const bl = lv.buses.find((b: any) => b.id === node.busId);
+                  if (bl) {
+                    hdrLeftDb = rmsToDb(bl.pre_left_peak ?? 0);
+                    hdrRightDb = rmsToDb(bl.pre_right_peak ?? 0);
+                  }
+                } else if (node.type === 'target') {
+                  let devId = node.deviceId;
+                  if (devId == null && node.libraryId) {
+                    const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
+                    if (match) devId = parseInt(match[1], 10);
+                  }
+                  if (devId != null) {
+                    const deviceKey = `${devId}_0`;
+                    const levels = lv.outputs[deviceKey];
+                    if (Array.isArray(levels) && levels.length > 0) {
+                      const ld = levels[0];
+                      hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
+                      hdrRightDb = rmsToDb(ld.right_peak ?? 0);
+                    }
                   }
                 }
+              } catch (e) {
+                hdrLeftDb = -60; hdrRightDb = -60;
               }
 
               const isSelected = selectedNodeId === node.id;
@@ -3164,25 +3594,18 @@ export default function App() {
                   className={`canvas-node absolute w-[180px] ${bgClass} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${isUnavailable ? 'opacity-50' : ''}`}
                   style={{ left: node.x, top: node.y, height: nodeHeight }}
                 >
-                {/* Header with level meter for source and target nodes */}
-                <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing relative overflow-hidden">
-                  {/* Level meter background for source and target nodes */}
-                  {(node.type === 'source' || node.type === 'target') && (
-                    <div
-                      className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${meterColorClass} to-transparent transition-all duration-75 pointer-events-none`}
-                      style={{ width: `${Math.min(avgLevel, 100)}%` }}
-                    />
-                  )}
+                {/* Header */}
+                <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing">
                   {/* Fixed width container for link icon or colored dot */}
-                  <div className="w-3 h-3 flex items-center justify-center relative z-10 shrink-0">
+                  <div className="w-3 h-3 flex items-center justify-center shrink-0">
                     {node.type === 'target' && node.channelMode === 'stereo' ? (
                       <LinkIcon className="w-3 h-3 text-cyan-400" />
                     ) : (
                       <div className={`w-2 h-2 rounded-full ${dynamicColor} shadow-[0_0_8px_currentColor]`}></div>
                     )}
                   </div>
-                  <NodeIcon className={`w-4 h-4 ${isUnavailable ? 'text-slate-500' : dynamicColor} relative z-10`} />
-                  <div className="flex-1 min-w-0 relative z-10">
+                  <NodeIcon className={`w-4 h-4 ${isUnavailable ? 'text-slate-500' : dynamicColor}`} />
+                  <div className="flex-1 min-w-0">
                     {isUnavailable ? (
                       // Unavailable device: show disconnected status
                       <>
@@ -3213,8 +3636,20 @@ export default function App() {
                       // Target node: show device name
                       <span className="text-xs font-bold text-slate-200 truncate block">{node.label}</span>
                     )}
+                      {/* L/R numeric readout removed */}
                   </div>
-                  <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity relative z-10"><Trash2 className="w-3 h-3"/></button>
+                  <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
+                </div>
+                {/* Line meter at bottom of header */}
+                <div className="h-[2px] bg-slate-800 relative overflow-hidden">
+                  <div
+                    ref={(el) => {
+                      if (el) nodeLineMeterRefs.current.set(node.id, el);
+                      else nodeLineMeterRefs.current.delete(node.id);
+                    }}
+                    className="absolute left-0 top-0 h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-red-500"
+                    style={{ width: '0%' }}
+                  />
                 </div>
 
                 {/* Ports Body - Channel Ports (based on channelMode) */}
@@ -3522,7 +3957,38 @@ export default function App() {
                           onClick={async () => {
                             // Open AudioUnit UI when clicking on the plugin slot
                             try {
-                              await openAudioUnitUI(plugin.id);
+                              console.debug('[Spectrum] openAudioUnitUI()', plugin.id);
+                                await openAudioUnitUI(plugin.id);
+                                console.debug('[Spectrum] openAudioUnitUI() returned', plugin.id);
+
+                                // Dev: watch for UI close and dump instance list when closed
+                                const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env && (import.meta as any).env.MODE === 'development';
+                                if (isDev) {
+                                  (async () => {
+                                    try {
+                                      let open = true;
+                                      while (open) {
+                                        // Poll every 500ms
+                                        await new Promise(r => setTimeout(r, 500));
+                                        try {
+                                          open = await isAudioUnitUIOpen(plugin.id);
+                                        } catch (err) {
+                                          console.debug('[Spectrum][DEBUG] isAudioUnitUIOpen() failed', err);
+                                          break;
+                                        }
+                                      }
+                                      console.debug('[Spectrum][DEBUG] AudioUnit UI closed for', plugin.id);
+                                      try {
+                                        const instances = await listAudioUnitInstances();
+                                        console.debug('[Spectrum][DEBUG] AudioUnit instances after UI close:', instances.length, instances.map(i => i.instance_id));
+                                      } catch (err) {
+                                        console.debug('[Spectrum][DEBUG] Failed to list AudioUnit instances after UI close', err);
+                                      }
+                                    } catch (err) {
+                                      // ignore
+                                    }
+                                  })();
+                                }
                             } catch (error) {
                               console.error('Failed to open AudioUnit UI:', error);
                             }
@@ -3573,7 +4039,9 @@ export default function App() {
                               e.stopPropagation(); // Prevent opening UI
                               // Remove plugin
                               try {
+                                console.debug('[Spectrum] removeAudioUnitInstance()', plugin.id);
                                 await removeAudioUnitInstance(plugin.id);
+                                console.debug('[Spectrum] removeAudioUnitInstance() returned', plugin.id);
 
                                 // Update local state and get updated plugin list
                                 const targetBus = nodes.find(n => n.id === selectedBusId);
@@ -3758,6 +4226,56 @@ export default function App() {
                           ? (channelData.apps.length > 0 ? `MAIN (${channelData.apps.length} apps)` : 'MAIN')
                           : (channelData.apps.map(a => a.name).join(', ') || 'Empty'))
                       : node.subLabel);
+
+                // Compute L/R peak dB for this node to show under the name
+                let hdrLeftDb = -60;
+                let hdrRightDb = -60;
+                try {
+                  const lv = latestLevelsRef.current;
+                  if (node.type === 'source') {
+                    if (isDeviceNode && node.deviceId != null) {
+                      const devLevels = lv.devices[String(node.deviceId)];
+                      if (Array.isArray(devLevels) && devLevels.length > 0) {
+                        for (const ld of devLevels) {
+                          hdrLeftDb = Math.max(hdrLeftDb, rmsToDb(ld.left_peak ?? 0));
+                          hdrRightDb = Math.max(hdrRightDb, rmsToDb(ld.right_peak ?? 0));
+                        }
+                      }
+                    } else {
+                      const channelOffset = node.channelOffset ?? 0;
+                      const pairIndex = Math.floor(channelOffset / 2);
+                      const ld = lv.prism[pairIndex];
+                      if (ld) {
+                        hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
+                        hdrRightDb = rmsToDb(ld.right_peak ?? 0);
+                      }
+                    }
+                  } else if (node.type === 'bus') {
+                    const bl = lv.buses.find((b: any) => b.id === node.busId);
+                    if (bl) {
+                      hdrLeftDb = rmsToDb(bl.pre_left_peak ?? 0);
+                      hdrRightDb = rmsToDb(bl.pre_right_peak ?? 0);
+                    }
+                  } else if (node.type === 'target') {
+                    let devId = node.deviceId;
+                    if (devId == null && node.libraryId) {
+                      const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
+                      if (match) devId = parseInt(match[1], 10);
+                    }
+                    if (devId != null) {
+                      const deviceKey = `${devId}_0`;
+                      const levels = lv.outputs[deviceKey];
+                      if (Array.isArray(levels) && levels.length > 0) {
+                        const ld = levels[0];
+                        hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
+                        hdrRightDb = rmsToDb(ld.right_peak ?? 0);
+                      }
+                    }
+                  }
+                } catch (e) {
+                  hdrLeftDb = -60; hdrRightDb = -60;
+                }
+
                 const dynamicSubLabel = isBusNode
                   ? `${node.channelMode} • ${node.plugins?.length || 0} FX`
                   : baseSubLabel;
@@ -3777,72 +4295,8 @@ export default function App() {
                         : node.color);
                 const NodeIcon = dynamicIcon;
 
-                // Get real input levels for this specific channel pair (dB conversion)
-                let leftDb = -60;
-                let rightDb = -60;
-
-                if (isDeviceNode) {
-                  // Device node: get level from deviceLevelsMap for the specific device
-                  const deviceId = node.deviceId;
-                  const deviceLevels = deviceId !== undefined ? deviceLevelsMap.get(deviceId) : undefined;
-                  if (isStereoLinked) {
-                    if (isMonoToStereo) {
-                      // Mono source to stereo output: use same channel level for both L and R
-                      const levelData = deviceLevels?.[Math.floor(fromChannel / 2)];
-                      leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
-                      rightDb = leftDb; // Same level for both (mono source)
-                    } else {
-                      // True stereo linked: L from fromChannel, R from fromChannel+1
-                      const leftLevelData = deviceLevels?.[Math.floor(fromChannel / 2)];
-                      const rightLevelData = deviceLevels?.[Math.floor((fromChannel + 1) / 2)];
-                      leftDb = leftLevelData ? rmsToDb(leftLevelData.left_peak) : -60;
-                      rightDb = rightLevelData ? rmsToDb(rightLevelData.right_peak) : -60;
-                    }
-                  } else {
-                    const levelData = deviceLevels?.[Math.floor(fromChannel / 2)];
-                    const isRightCh = fromChannel % 2 === 1;
-                    leftDb = levelData ? rmsToDb(isRightCh ? levelData.right_peak : levelData.left_peak) : -60;
-                    rightDb = leftDb; // Mono display
-                  }
-                } else if (isBusNode) {
-                  // Bus node: use busLevelsMap fetched from backend
-                  const busId = node.busId;
-                  const busLevel = busId ? busLevelsMap.get(busId) : undefined;
-                  if (busLevel) {
-                    // busLevel contains RMS/peak per bus (stereo) - use peak for consistency
-                    leftDb = rmsToDb(busLevel.left_peak);
-                    rightDb = rmsToDb(busLevel.right_peak);
-                  } else {
-                    leftDb = -60;
-                    rightDb = -60;
-                  }
-                  // If mono display expected, mirror L->R
-                  if (!isStereoLinked) {
-                    rightDb = leftDb;
-                  }
-                } else {
-                  const channelOffset = node.channelOffset ?? 0;
-                  // For Prism, channelOffset is already the stereo pair index * 2
-                  // fromChannel 0 = L, fromChannel 1 = R of that pair
-                  const pairIndex = Math.floor((channelOffset + fromChannel) / 2);
-                  const levelData = inputLevels[pairIndex];
-                  if (isStereoLinked) {
-                    // Stereo linked: use L and R from the same pair
-                    leftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
-                    rightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
-                  } else {
-                    // Mono: use appropriate channel based on odd/even
-                    const isRightChannel = (channelOffset + fromChannel) % 2 === 1;
-                    const peakVal = levelData ? (isRightChannel ? levelData.right_peak : levelData.left_peak) : 0;
-                    leftDb = rmsToDb(peakVal);
-                    rightDb = leftDb; // Same for mono display
-                  }
-                }
-
-                // Calculate post-fader level (input dB + fader gain dB)
-                const faderDb = faderToDb(level);
-                const postFaderLeftDb = faderDb <= -100 ? -Infinity : leftDb + faderDb;
-                const postFaderRightDb = faderDb <= -100 ? -Infinity : rightDb + faderDb;
+                // fader value available as `level` for UI; high-frequency meter drawing
+                // is handled via canvases in the animation loop (updateLevels).
 
                 // Unique key for mixer channel (node + source channel)
                 const mixerKey = `${node.id}_ch${fromChannel}${isStereoLinked ? '_stereo' : ''}`;
@@ -3932,54 +4386,22 @@ export default function App() {
                     {/* Level Meters on right */}
                     <div className="flex gap-0.5 relative">
                       {sourceIsMono ? (
-                        /* Mono meter - single wider meter */
-                        <div className="w-3 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                          {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                          <div
-                            className="absolute bottom-0 w-full transition-all duration-75"
-                            style={{
-                              height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
-                              background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
-                            }}
-                          />
-                          {/* Clip indicator - shows red at top if clipping */}
-                          {postFaderLeftDb > 0 && !isMuted && (
-                            <div className="absolute top-0 w-full h-1 bg-red-500" />
-                          )}
-                        </div>
+                        /* Mono meter - single wider meter (canvas) */
+                        <canvas
+                          ref={(el) => setMixerCanvasRef(el, mixerKey)}
+                          className="w-3 h-full bg-slate-950 rounded-sm overflow-hidden border border-slate-800"
+                        />
                       ) : (
-                        /* Stereo meters - Left and Right */
+                        /* Stereo meters - Left and Right (canvases) */
                         <>
-                          {/* Left meter */}
-                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                            {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                            <div
-                              className="absolute bottom-0 w-full transition-all duration-75"
-                              style={{
-                                height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderLeftDb)))}%`,
-                                background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderLeftDb)), postFaderLeftDb),
-                              }}
-                            />
-                            {/* Clip indicator - shows red at top if clipping */}
-                            {postFaderLeftDb > 0 && !isMuted && (
-                              <div className="absolute top-0 w-full h-1 bg-red-500" />
-                            )}
-                          </div>
-                          {/* Right meter */}
-                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                            {/* Meter fill - post-fader level, capped at 0dB (100%) */}
-                            <div
-                              className="absolute bottom-0 w-full transition-all duration-75"
-                              style={{
-                                height: isMuted ? '0%' : `${Math.min(100, Math.max(0, dbToMeterPercent(postFaderRightDb)))}%`,
-                                background: getMeterGradient(Math.min(100, dbToMeterPercent(postFaderRightDb)), postFaderRightDb),
-                              }}
-                            />
-                            {/* Clip indicator - shows red at top if clipping */}
-                            {postFaderRightDb > 0 && !isMuted && (
-                              <div className="absolute top-0 w-full h-1 bg-red-500" />
-                            )}
-                          </div>
+                          <canvas
+                            ref={(el) => setMixerCanvasRef(el, `${mixerKey}_L`)}
+                            className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden border border-slate-800"
+                          />
+                          <canvas
+                            ref={(el) => setMixerCanvasRef(el, `${mixerKey}_R`)}
+                            className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden border border-slate-800"
+                          />
                         </>
                       )}
                       {/* Right: Meter Scale - independent from fader scale */}
@@ -4133,27 +4555,7 @@ export default function App() {
                     const isSelected = focusedOutputId === node.id;
                     const Icon = node.icon;
 
-                    // Get output levels for this target
-                    let outputLevel = 0;
-                    let outputMeterColor = 'from-pink-500/20';
-                    const targetData = outputTargets.find(t => t.id === node.libraryId);
-                    if (targetData) {
-                      // Calculate pair index from channelOffset (channels are 0-indexed, pairs are 2ch each)
-                      const pairIndex = Math.floor(targetData.channelOffset / 2);
-                      const deviceKey = `${targetData.deviceId}_${pairIndex}`;
-                      const levels = outputLevelsMap.get(deviceKey);
-                      if (levels && levels.length > 0) {
-                        const levelData = levels[0];
-                        const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
-                        const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
-                        const maxDb = Math.max(leftDb, rightDb);
-                        outputLevel = dbToMeterPercent(maxDb);
-                        outputMeterColor = maxDb > 0 ? 'from-red-500/30' :
-                                          maxDb > -6 ? 'from-amber-500/25' :
-                                          maxDb > -12 ? 'from-yellow-500/20' :
-                                          'from-pink-500/20';
-                      }
-                    }
+                    // output levels are drawn on canvas via updateLevels
 
                     return (
                         <div
@@ -4163,7 +4565,7 @@ export default function App() {
                                 setFocusedPairIndex(0);
                             }}
                             className={`
-                                relative flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0 overflow-hidden
+                                flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0
                                 ${node.available === false
                                   ? 'opacity-40 grayscale border-slate-800'
                                   : isSelected
@@ -4171,21 +4573,14 @@ export default function App() {
                                     : 'border-slate-800 hover:border-slate-600'}
                             `}
                         >
-                            {/* Level meter background */}
-                            {node.available !== false && (
-                              <div
-                                className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${outputMeterColor} to-transparent transition-all duration-75 pointer-events-none`}
-                                style={{ width: `${Math.min(outputLevel, 100)}%` }}
-                              />
-                            )}
-                            <div className={`relative z-10 w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.available === false ? 'text-slate-500' : node.color}`}>
+                            <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.available === false ? 'text-slate-500' : node.color}`}>
                                 <Icon className="w-3 h-3" />
                             </div>
-                            <div className="relative z-10 flex-1 min-w-0">
+                            <div className="flex-1 min-w-0">
                                 <div className={`text-[10px] font-bold truncate ${node.available === false ? 'text-slate-500' : isSelected ? 'text-white' : 'text-slate-400'}`}>{node.label}</div>
                                 {node.available === false && <div className="text-[8px] text-red-400">Disconnected</div>}
                             </div>
-                            {isSelected && node.available !== false && <div className={`relative z-10 w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
+                            {isSelected && node.available !== false && <div className={`w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
                         </div>
                     );
                 })}
@@ -4193,26 +4588,6 @@ export default function App() {
 
              {/* 3. Master Fader (Right) */}
              {focusedTarget && (() => {
-                 // Get master levels from outputLevelsMap (calculated in audio callback)
-                 const targetData = outputTargets.find(t => t.id === focusedTarget.libraryId);
-                 let masterLeftDb = -60;
-                 let masterRightDb = -60;
-
-                 if (targetData) {
-                   // focusedPairIndex is the pair within the sub-device (0 = ch 1-2, 1 = ch 3-4, etc.)
-                   // channelOffset is the offset within the aggregate device
-                   // So the total pair index is: base offset in pairs + selected pair
-                   const basePairIndex = Math.floor(targetData.channelOffset / 2);
-                   const pairIndex = basePairIndex + focusedPairIndex;
-                   const deviceKey = `${targetData.deviceId}_${pairIndex}`;
-                   const levels = outputLevelsMap.get(deviceKey);
-                   if (levels && levels.length > 0) {
-                     const levelData = levels[0];
-                     masterLeftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
-                     masterRightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
-                   }
-                 }
-
                  // Helper to update master volume from dB
                  const updateMasterFromDb = (db: number) => {
                    const newLevel = dbToFader(db);
@@ -4296,31 +4671,15 @@ export default function App() {
                         {/* Level Meters on right */}
                         <div className="flex gap-0.5 relative">
                           {/* Left meter */}
-                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                            <div
-                              className="absolute bottom-0 w-full transition-all duration-75"
-                              style={{
-                                height: `${Math.min(100, Math.max(0, dbToMeterPercent(masterLeftDb)))}%`,
-                                background: getMeterGradient(Math.min(100, dbToMeterPercent(masterLeftDb)), masterLeftDb),
-                              }}
-                            />
-                            {masterLeftDb > 0 && (
-                              <div className="absolute top-0 w-full h-1 bg-red-500" />
-                            )}
-                          </div>
+                          <canvas
+                            ref={(el) => setMasterCanvasRef(el, 'master_L')}
+                            className="w-2 h-full rounded-sm border border-slate-800"
+                          />
                           {/* Right meter */}
-                          <div className="w-2 h-full bg-slate-950 rounded-sm overflow-hidden relative border border-slate-800">
-                            <div
-                              className="absolute bottom-0 w-full transition-all duration-75"
-                              style={{
-                                height: `${Math.min(100, Math.max(0, dbToMeterPercent(masterRightDb)))}%`,
-                                background: getMeterGradient(Math.min(100, dbToMeterPercent(masterRightDb)), masterRightDb),
-                              }}
-                            />
-                            {masterRightDb > 0 && (
-                              <div className="absolute top-0 w-full h-1 bg-red-500" />
-                            )}
-                          </div>
+                          <canvas
+                            ref={(el) => setMasterCanvasRef(el, 'master_R')}
+                            className="w-2 h-full rounded-sm border border-slate-800"
+                          />
                           {/* Right: Meter Scale */}
                           <div className="absolute -right-6 top-0 bottom-0 w-6 flex flex-col text-[7px] text-slate-400 font-mono pointer-events-none select-none">
                             <div className="absolute left-0 flex items-center" style={{ top: '0', transform: 'translateY(-50%)' }}>
@@ -4347,6 +4706,11 @@ export default function App() {
                               <div className="w-1.5 h-px bg-slate-500"></div>
                               <span className="ml-0.5 text-[6px]">60</span>
                             </div>
+                          </div>
+                          {/* DOM numeric overlays for master meters (temporary) */}
+                          <div className="absolute inset-0 pointer-events-none">
+                            <div ref={(el) => setMasterNumberRef(el, 'master_L')} className="absolute left-0 top-1/2 -translate-y-1/2 text-[10px] font-mono text-slate-200 ml-1" />
+                            <div ref={(el) => setMasterNumberRef(el, 'master_R')} className="absolute right-0 top-1/2 -translate-y-1/2 text-[10px] font-mono text-slate-200 mr-1" />
                           </div>
                         </div>
                     </div>
@@ -4662,7 +5026,9 @@ export default function App() {
 
                                 try {
                                   // Create AudioUnit instance
+                                  console.debug('[Spectrum] createAudioUnitInstance()', plugin.id);
                                   const instanceId = await createAudioUnitInstance(plugin.id);
+                                  console.debug('[Spectrum] createAudioUnitInstance() returned', instanceId, 'for', plugin.id);
 
                                   // Add to bus plugins
                                   const newPlugin: AudioUnitPlugin = {

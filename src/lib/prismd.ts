@@ -206,8 +206,6 @@ export async function getAudioLevels(deviceId: string): Promise<number[]> {
 // --- Mixer/Router Types ---
 
 export interface LevelData {
-  left_rms: number;
-  right_rms: number;
   left_peak: number;
   right_peak: number;
 }
@@ -240,10 +238,10 @@ export async function getOutputDeviceLevelsBatch(deviceIds: string[]): Promise<R
  */
 export interface BusLevelData {
   id: string;
-  left_rms: number;
-  right_rms: number;
-  left_peak: number;
-  right_peak: number;
+  pre_left_peak: number;
+  pre_right_peak: number;
+  post_left_peak: number;
+  post_right_peak: number;
 }
 
 /**
@@ -261,6 +259,85 @@ export interface AllLevelsData {
  */
 export async function getAllLevels(deviceIds: string[], outputKeys: string[]): Promise<AllLevelsData> {
   return invoke<AllLevelsData>('get_all_levels', { deviceIds, outputKeys });
+}
+
+/**
+ * Get Prism input levels as a binary Float32Array (zero-copy when possible).
+ * The backend returns a byte sequence of little-endian f32 values in the order:
+ * [left_peak, right_peak] repeated for each stereo pair.
+ */
+export async function getPrismLevelsBinary(): Promise<Float32Array> {
+  try {
+    const buffer = await invoke<ArrayBuffer>('get_prism_levels_binary');
+    if (!buffer || buffer.byteLength === 0) return new Float32Array(0);
+    return new Float32Array(buffer);
+  } catch (e) {
+    console.error('getPrismLevelsBinary error', e);
+    return new Float32Array(0);
+  }
+}
+
+/**
+ * Get mixer/device/bus/output levels as a compact binary blob and parse to AllLevelsData.
+ */
+export async function getMixerLevelsBinary(deviceIds: string[], outputKeys: string[]): Promise<AllLevelsData> {
+  try {
+    const buffer = await invoke<ArrayBuffer>('get_mixer_levels_binary', { deviceIds, outputKeys });
+    if (!buffer || buffer.byteLength === 0) return { prism: [], devices: {}, buses: [], outputs: {} };
+
+    const bytes = new Uint8Array(buffer);
+    const dv = new DataView(buffer);
+    let offset = 0;
+    const readU32 = () => { const v = dv.getUint32(offset, true); offset += 4; return v; };
+    const readF32 = () => { const v = dv.getFloat32(offset, true); offset += 4; return v; };
+    const readString = () => {
+      const len = readU32();
+      const slice = bytes.subarray(offset, offset + len);
+      const s = new TextDecoder().decode(slice);
+      offset += len;
+      return s;
+    };
+
+    const devices: Record<string, LevelData[]> = {};
+    const numDevices = readU32();
+    for (let i = 0; i < numDevices; i++) {
+      const key = readString();
+      const count = readU32();
+      const arr: LevelData[] = [];
+      for (let j = 0; j < count; j++) {
+        arr.push({ left_peak: readF32(), right_peak: readF32() });
+      }
+      devices[key] = arr;
+    }
+
+    const buses: BusLevelData[] = [];
+    const numBuses = readU32();
+    for (let i = 0; i < numBuses; i++) {
+      const id = readString();
+      const pre_left_peak = readF32();
+      const pre_right_peak = readF32();
+      const post_left_peak = readF32();
+      const post_right_peak = readF32();
+      buses.push({ id, pre_left_peak, pre_right_peak, post_left_peak, post_right_peak });
+    }
+
+    const outputs: Record<string, LevelData[]> = {};
+    const numOutputs = readU32();
+    for (let i = 0; i < numOutputs; i++) {
+      const key = readString();
+      const count = readU32();
+      const arr: LevelData[] = [];
+      for (let j = 0; j < count; j++) {
+        arr.push({ left_peak: readF32(), right_peak: readF32() });
+      }
+      outputs[key] = arr;
+    }
+
+    return { prism: [], devices, buses, outputs };
+  } catch (e) {
+    console.error('getMixerLevelsBinary error', e);
+    return { prism: [], devices: {}, buses: [], outputs: {} };
+  }
 }
 
 /**
@@ -553,10 +630,10 @@ export interface BusInfo {
 
 export interface BusLevelInfo {
   id: string;
-  left_rms: number;
-  right_rms: number;
-  left_peak: number;
-  right_peak: number;
+  pre_left_peak: number;
+  pre_right_peak: number;
+  post_left_peak: number;
+  post_right_peak: number;
 }
 
 // --- Bus API Functions ---
@@ -626,7 +703,7 @@ export async function reserveBusId(): Promise<string | null> {
  * @param targetType - "bus" or "output"
  * @param targetId - bus ID (for bus) or device ID string (for output)
  * @param targetChannel - target channel index
- * @param level - send level (0.0-1.0)
+ * @param level - send level in dB (0 = unity, negative values for attenuation, -100 = silent)
  * @param muted - mute state
  */
 export async function updateBusSend(
@@ -773,4 +850,24 @@ export async function getAudioUnitState(instanceId: string): Promise<string | nu
  */
 export async function setAudioUnitState(instanceId: string, state: string): Promise<boolean> {
   return invoke<boolean>('set_audio_unit_state', { instanceId, state });
+}
+
+// --- Dev helper: expose debug invoke to renderer console ---
+// Use only in development so users can't accidentally call in production.
+if (import.meta.env && import.meta.env.MODE === 'development') {
+  (window as any).debug_list_mixer_sends = async (): Promise<any> => {
+    try {
+      // @ts-ignore - dynamic import used only in renderer dev-console helper
+      const { invoke } = await import('@tauri-apps/api/core');
+      const res = await invoke('debug_list_mixer_sends');
+      // log for convenience
+      // eslint-disable-next-line no-console
+      console.log('debug_list_mixer_sends ->', res);
+      return res;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('debug_list_mixer_sends error', e);
+      throw e;
+    }
+  };
 }

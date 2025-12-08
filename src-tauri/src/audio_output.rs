@@ -486,14 +486,10 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                     // Update output metering for this channel pair (non-blocking)
                     // Use pre-computed meter key to avoid heap allocation
                     if let Some(meter_key) = meter_keys.get(pair_idx) {
-                        let left_rms = VDsp::rms(&buf.left[..valid]);
                         let left_peak = VDsp::peak(&buf.left[..valid]);
-                        let right_rms = VDsp::rms(&buf.right[..valid]);
                         let right_peak = VDsp::peak(&buf.right[..valid]);
 
                         mixer_state.try_update_output_levels(meter_key, crate::mixer::ChannelLevels {
-                            left_rms,
-                            right_rms,
                             left_peak,
                             right_peak,
                         });
@@ -511,11 +507,24 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             if let Some(buf) = processor.get_buffer(node_id) {
                 if buf.valid_frames > 0 {
                     let fader = bus.fader;
-                    let left_rms = VDsp::rms(&buf.left[..frames]) * fader;
-                    let left_peak = VDsp::peak(&buf.left[..frames]) * fader;
-                    let right_rms = VDsp::rms(&buf.right[..frames]) * fader;
-                    let right_peak = VDsp::peak(&buf.right[..frames]) * fader;
-                    mixer_state.update_bus_level(bus_idx, left_rms, right_rms, left_peak, right_peak);
+                    // Use only the valid frames available in the buffer when computing meters
+                    let valid = buf.valid_frames.min(frames);
+                    // Pre-fader levels (for patch view node meters)
+                    let pre_left_peak = VDsp::peak(&buf.left[..valid]);
+                    let pre_right_peak = VDsp::peak(&buf.right[..valid]);
+                    // Post-fader levels (for mixer meters)
+                    let post_left_peak = pre_left_peak * fader;
+                    let post_right_peak = pre_right_peak * fader;
+                    // Update bus levels (pre/post peaks)
+                    mixer_state.update_bus_level(bus_idx, pre_left_peak, pre_right_peak, post_left_peak, post_right_peak);
+
+                    // Occasional debug log (throttled) to inspect pre/post/fader values for tracing
+                    // Avoid noisy logs by printing only every N callbacks and only for low-numbered buses
+                    const LOG_EVERY: usize = 512;
+                    if (CALLBACK_COUNT.load(Ordering::Relaxed) as usize) % LOG_EVERY == 0 && bus_idx < 8 {
+                        println!("[AudioOutput][MeterDebug] bus={} preL={:.6} preR={:.6} postL={:.6} postR={:.6} fader={:.3}",
+                            bus_idx, pre_left_peak, pre_right_peak, post_left_peak, post_right_peak, fader);
+                    }
                 }
             }
         }

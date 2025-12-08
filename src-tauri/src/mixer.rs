@@ -541,10 +541,31 @@ impl GraphProcessor {
                         }
                     }
 
-                    // Apply plugins
+                    // Apply plugins. Compute pre/post-fader peaks around plugin processing
                     let buffer = self.get_or_create_buffer(node_id);
                     if buffer.valid_frames > 0 {
-                        process_bus_plugins(bus_idx, &mut buffer.left[..frames], &mut buffer.right[..frames]);
+                        // Use the actual valid frame count from the buffer
+                        let frames_avail = buffer.valid_frames.min(frames);
+                        // Pre-plugin (raw bus) peaks
+                        let pre_left_peak = crate::vdsp::VDsp::peak(&buffer.left[..frames_avail]);
+                        let pre_right_peak = crate::vdsp::VDsp::peak(&buffer.right[..frames_avail]);
+
+                        // Run plugin chain (in-place)
+                        process_bus_plugins(bus_idx, &mut buffer.left[..frames_avail], &mut buffer.right[..frames_avail]);
+
+                        // Post-plugin peaks
+                        let post_left_peak = crate::vdsp::VDsp::peak(&buffer.left[..frames_avail]);
+                        let post_right_peak = crate::vdsp::VDsp::peak(&buffer.right[..frames_avail]);
+
+                        // Apply bus fader to post-plugin peaks for mixer (post-fader)
+                        let fader = graph.buses.get(bus_idx as usize).map(|b| b.fader).unwrap_or(1.0);
+                        let post_left_scaled = post_left_peak * fader;
+                        let post_right_scaled = post_right_peak * fader;
+
+                        // Update bus levels (pre = before plugins, post = after plugins * fader)
+                        let mixer_state = crate::mixer::get_mixer_state();
+                        mixer_state.update_bus_level(bus_idx as usize, pre_left_peak, pre_right_peak, post_left_scaled, post_right_scaled);
+
                         buffer.processed_at = sample_counter;
                     }
                 }
@@ -1142,175 +1163,9 @@ pub fn wait_for_processing(expected_cycle: u64, max_spins: u32) -> bool {
     false // Timed out
 }
 
-/// Start the audio processing thread
-pub fn start_processing_thread() {
-    use std::sync::atomic::Ordering;
-
-    if PROCESSING_RUNNING.swap(true, Ordering::SeqCst) {
-        // Already running
-        return;
-    }
-
-    std::thread::spawn(move || {
-        println!("[Mixer] Processing thread started");
-
-        // Base processing parameters
-        let base_interval = std::time::Duration::from_micros(2000); // ~2ms base
-        let base_frames = 512usize;
-        let min_buffer_target = 2048usize; // Target minimum samples in buffer
-        let max_frames_per_tick = 2048usize; // Max frames to process at once
-
-        let mut frames_per_tick = base_frames;
-        let mut interval = base_interval;
-
-        while PROCESSING_RUNNING.load(Ordering::Relaxed) {
-            let start = std::time::Instant::now();
-
-            // Increment sample counter
-            let sample_counter = PROCESSING_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-            // Get mixer state
-            let mixer_state = get_mixer_state();
-            let snapshot = mixer_state.load_snapshot();
-            let graph = &snapshot.audio_graph;
-
-            if graph.processing_order.is_empty() {
-                std::thread::sleep(interval);
-                continue;
-            }
-
-            // Get processor
-            let processor_arc = get_graph_processor();
-            let mut processor = match processor_arc.try_write() {
-                Some(p) => p,
-                None => {
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                    continue;
-                }
-            };
-
-            // Define input reader
-            let read_input = |device_id: u32, pair_idx: u8, left: &mut [f32], right: &mut [f32]| -> usize {
-                // Read from the primary output device's perspective (device 0 = any)
-                crate::audio_capture::read_channel_audio_any(
-                    pair_idx as usize * 2,
-                    pair_idx as usize * 2 + 1,
-                    left,
-                    right,
-                )
-            };
-
-            // Define plugin processor
-            let au_manager = crate::audio_unit::get_au_manager();
-            let buses = &graph.buses;
-            let process_plugins = |bus_idx: u8, left: &mut [f32], right: &mut [f32]| {
-                if let Some(bus) = buses.get(bus_idx as usize) {
-                    if !bus.plugin_ids.is_empty() {
-                        au_manager.process_chain(
-                            &bus.plugin_ids,
-                            left,
-                            right,
-                            0.0,
-                        );
-                    }
-                }
-            };
-
-            // Process the graph
-            processor.process(
-                graph,
-                frames_per_tick,
-                sample_counter,
-                read_input,
-                process_plugins,
-            );
-
-            // Write output node buffers to ring buffers
-            let mut min_available = usize::MAX;
-            {
-                let ring_buffers = OUTPUT_RING_BUFFERS.read();
-
-                for &node_id in graph.processing_order.iter() {
-                    if node_id.is_output() {
-                        if let Some(buf) = processor.get_buffer(node_id) {
-                            if buf.valid_frames == 0 {
-                                continue;
-                            }
-
-                            // Extract device hash from node_id
-                            // NodeId format for output: 0x2000 | (hash8 << 4) | pair4
-                            let hash8 = ((node_id.0 >> 4) & 0xFF) as u64;
-                            let pair_idx = (node_id.0 & 0x0F) as usize;
-
-                            // Write to ring buffer (get() since write is &self now)
-                            if let Some(ring) = ring_buffers.get(hash8, pair_idx) {
-                                let (_wp_before, _rp_before) = ring.positions();
-                                let written = ring.write(&buf.left[..buf.valid_frames], &buf.right[..buf.valid_frames]);
-                                let (_wp_after, _rp_after) = ring.positions();
-                                let buffered = ring.available_read();
-                                min_available = min_available.min(buffered);
-                                // Debug logging disabled for performance
-                                let _ = written;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Dynamic adjustment: if buffers are running low, process more frames next time
-            if min_available < usize::MAX {
-                if min_available < min_buffer_target / 2 {
-                    // Buffer critically low - process more, faster
-                    frames_per_tick = (frames_per_tick * 2).min(max_frames_per_tick);
-                    interval = std::time::Duration::from_micros(1000); // 1ms
-                } else if min_available < min_buffer_target {
-                    // Buffer getting low - increase slightly
-                    frames_per_tick = (frames_per_tick + 128).min(max_frames_per_tick);
-                } else if min_available > min_buffer_target * 2 && frames_per_tick > base_frames {
-                    // Buffer healthy - can reduce back towards base
-                    frames_per_tick = (frames_per_tick - 64).max(base_frames);
-                    interval = base_interval;
-                }
-            }
-
-            // Also update bus metering
-            for (bus_idx, bus) in graph.buses.iter().enumerate() {
-                if bus.muted {
-                    continue;
-                }
-                let node_id = NodeId::bus(bus_idx as u8);
-                if let Some(buf) = processor.get_buffer(node_id) {
-                    if buf.valid_frames > 0 {
-                        let fader = bus.fader;
-                        let left_rms = crate::vdsp::VDsp::rms(&buf.left[..frames_per_tick]) * fader;
-                        let left_peak = crate::vdsp::VDsp::peak(&buf.left[..frames_per_tick]) * fader;
-                        let right_rms = crate::vdsp::VDsp::rms(&buf.right[..frames_per_tick]) * fader;
-                        let right_peak = crate::vdsp::VDsp::peak(&buf.right[..frames_per_tick]) * fader;
-                        mixer_state.update_bus_level(bus_idx, left_rms, right_rms, left_peak, right_peak);
-                    }
-                }
-            }
-
-            // Sleep for remaining time
-            let elapsed = start.elapsed();
-            if elapsed < interval {
-                std::thread::sleep(interval - elapsed);
-            }
-        }
-
-        println!("[Mixer] Processing thread stopped");
-    });
-}
-
-/// Stop the audio processing thread
-pub fn stop_processing_thread() {
-    PROCESSING_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Get the current processing sample counter
-pub fn get_processing_sample_counter() -> u64 {
-    PROCESSING_SAMPLE_COUNTER.load(Ordering::Relaxed)
-}
+// `start_processing_thread` was removed: processing is handled by the device-led
+// processing path (lock-free leader/follower) and no dedicated background thread
+// should be spawned. Retained stop/start-related globals remain for compatibility.
 
 // ============================================================================
 // Original Mixer Types (kept for compatibility)
@@ -1697,10 +1552,20 @@ pub struct SendCompact {
 /// Level meters for a channel pair
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ChannelLevels {
-    pub left_rms: f32,
-    pub right_rms: f32,
+    /// Peak levels only — RMS fields removed
     pub left_peak: f32,
     pub right_peak: f32,
+}
+
+/// Bus level meters with both pre-fader and post-fader levels
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct BusLevels {
+    /// Pre-fader levels (for patch view node meters)
+    pub pre_left_peak: f32,
+    pub pre_right_peak: f32,
+    /// Post-fader levels (for mixer meters)
+    pub post_left_peak: f32,
+    pub post_right_peak: f32,
 }
 
 /// Compact sends array for lock-free audio callback access
@@ -1750,6 +1615,11 @@ impl SendsArray {
 
             let output_gain = output_faders.get(&send.target_device).copied().unwrap_or(1.0);
             let total_level = send.level * output_gain;
+
+            // Debug: log mapping from target_device -> output_gain and computed total_level
+            // This is temporary; keep concise to avoid excessive churn.
+            println!("[Mixer] SendsArray::update: target_device='{}' output_gain={} send.level={} total_level={}",
+                &send.target_device, output_gain, send.level, total_level);
 
             if total_level <= 0.0001 {
                 continue;
@@ -2058,6 +1928,10 @@ impl BusSendsArray {
                 level: send.level,
                 active: true,
             });
+            // Debug: log bus send mapping compact entry (helpful to trace attenuation)
+            println!("[MixerDebug] update_sends: src_type={:?} src_id={} src_dev={} src_ch={} -> tgt_type={:?} tgt_id={} tgt_ch={} level={}",
+                send.source_type, send.source_id, send.source_device, send.source_channel,
+                send.target_type, send.target_id, send.target_channel, send.level);
         }
 
         // Compute topological order using Kahn's algorithm (consider only active slots)
@@ -2213,8 +2087,10 @@ impl BusSendsArray {
         }) {
             existing.level = compact_send.level;
             existing.active = compact_send.active;
+            println!("[MixerDebug] set_bus_send: updated existing send: {:?}", existing);
         } else {
             sends.push(compact_send);
+            println!("[MixerDebug] set_bus_send: added send: {:?}", compact_send);
         }
 
         // Recompute processing order using fixed slots
@@ -2493,8 +2369,8 @@ pub struct MixerState {
     pub input_levels: RwLock<[ChannelLevels; PRISM_CHANNELS / 2]>,
     /// Current output levels (per device per pair)
     pub output_levels: RwLock<HashMap<String, Vec<ChannelLevels>>>,
-    /// Bus levels (post-plugin, post-fader) - indexed by bus index
-    pub bus_levels: RwLock<[ChannelLevels; MAX_BUSES]>,
+    /// Bus levels (pre-fader and post-fader) - indexed by bus index
+    pub bus_levels: RwLock<[BusLevels; MAX_BUSES]>,
     /// Sample rate
     pub sample_rate: RwLock<u32>,
     /// Buffer size
@@ -2528,7 +2404,7 @@ impl MixerState {
             output_faders: RwLock::new(HashMap::new()),
             input_levels: RwLock::new([ChannelLevels::default(); PRISM_CHANNELS / 2]),
             output_levels: RwLock::new(HashMap::new()),
-            bus_levels: RwLock::new([ChannelLevels::default(); MAX_BUSES]),
+            bus_levels: RwLock::new([BusLevels::default(); MAX_BUSES]),
             sample_rate: RwLock::new(48000),
             buffer_size: RwLock::new(128),
             snapshot: ArcSwap::from_pointee(MixerSnapshot::default()),
@@ -2596,6 +2472,36 @@ impl MixerState {
         let sends = self.sends.read();
         let output_faders = self.output_faders.read();
         self.sends_compact.update(&sends, &output_faders);
+
+        // Debug: log current sends summary (count + unique target devices)
+        {
+            use std::collections::HashSet;
+            let mut uniq: HashSet<String> = HashSet::new();
+            for s in sends.iter() {
+                uniq.insert(s.target_device.clone());
+            }
+            let mut list: Vec<String> = uniq.into_iter().collect();
+            list.sort();
+            let sample_list = list.iter().take(10).cloned().collect::<Vec<String>>().join(", ");
+            println!("[Mixer] rebuild_compact_sends: sends_count={} unique_target_devices_count={} sample_targets=[{}]",
+                sends.len(), list.len(), sample_list);
+        }
+
+        // Debug: print summary of compact sends for a specific device (e.g., "60")
+        // This helps verify that output_faders were applied when building compact sends.
+        let debug_device = "60";
+        let debug_hash = hash_device_id(debug_device);
+        {
+            let compact = self.sends_compact.read();
+            let total = compact.len();
+            let mut found = 0usize;
+            for sc in compact.iter() {
+                if sc.target_device_hash == debug_hash {
+                    found += 1;
+                }
+            }
+            println!("[Mixer] rebuild_compact_sends: compact_count={} entries_for_{}={}", total, debug_device, found);
+        }
 
         // Pre-allocate buffers for all output devices
         // Collect unique target devices first
@@ -2696,6 +2602,8 @@ impl MixerState {
                 .write()
                 .insert(device_id.to_string(), gain);
         }
+        // Debug: confirm map updated
+        println!("[Mixer] set_output_fader: device_id={}, db={}, gain={}", device_id, db, gain);
         // Rebuild compact sends to include new fader value
         self.rebuild_compact_sends();
     }
@@ -2848,37 +2756,47 @@ impl MixerState {
     }
 
     /// Update bus levels (called from audio callback after plugin processing)
-    pub fn update_bus_level(&self, bus_idx: usize, left_rms: f32, right_rms: f32, left_peak: f32, right_peak: f32) {
+    /// pre_left_peak/pre_right_peak: levels before bus fader (for patch view)
+    /// post_left_peak/post_right_peak: levels after bus fader (for mixer)
+    pub fn update_bus_level(
+        &self,
+        bus_idx: usize,
+        pre_left_peak: f32,
+        pre_right_peak: f32,
+        post_left_peak: f32,
+        post_right_peak: f32,
+    ) {
         if let Some(mut levels) = self.bus_levels.try_write() {
             if bus_idx < MAX_BUSES {
-                levels[bus_idx] = ChannelLevels {
-                    left_rms,
-                    right_rms,
-                    left_peak,
-                    right_peak,
+                levels[bus_idx] = BusLevels {
+                    pre_left_peak,
+                    pre_right_peak,
+                    post_left_peak,
+                    post_right_peak,
                 };
             }
         }
     }
 
     /// Get bus levels (for UI)
-    pub fn get_bus_levels(&self) -> Vec<(String, ChannelLevels)> {
+    /// Returns (bus_id, BusLevels) with both pre-fader and post-fader peaks
+    pub fn get_bus_levels(&self) -> Vec<(String, BusLevels)> {
         // We must map each bus to its fixed slot index and read the level
         // from `bus_levels` using that slot. Use the compact active list
         // returned by `get_buses()` so ordering matches the UI.
         let buses = self.get_buses();
         let levels = self.bus_levels.read();
 
-        let mut out: Vec<(String, ChannelLevels)> = Vec::with_capacity(buses.len());
+        let mut out: Vec<(String, BusLevels)> = Vec::with_capacity(buses.len());
         for bus in buses.iter() {
             if let Some(idx) = self.bus_sends.get_bus_index(&bus.id) {
                 if idx < MAX_BUSES {
                     out.push((bus.id.clone(), levels[idx]));
                 } else {
-                    out.push((bus.id.clone(), ChannelLevels::default()));
+                    out.push((bus.id.clone(), BusLevels::default()));
                 }
             } else {
-                out.push((bus.id.clone(), ChannelLevels::default()));
+                out.push((bus.id.clone(), BusLevels::default()));
             }
         }
         out
@@ -2997,8 +2915,6 @@ pub fn calculate_input_levels(
         let right_ch = left_ch + 1;
 
         levels[pair] = ChannelLevels {
-            left_rms: VDsp::rms(input_channels[left_ch]),
-            right_rms: VDsp::rms(input_channels[right_ch]),
             left_peak: VDsp::peak(input_channels[left_ch]),
             right_peak: VDsp::peak(input_channels[right_ch]),
         };
@@ -3027,8 +2943,6 @@ pub fn calculate_output_levels(
                 let right = &buffer[right_offset..right_offset + frames];
 
                 levels.push(ChannelLevels {
-                    left_rms: VDsp::rms(left),
-                    right_rms: VDsp::rms(right),
                     left_peak: VDsp::peak(left),
                     right_peak: VDsp::peak(right),
                 });

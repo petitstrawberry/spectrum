@@ -1336,6 +1336,10 @@ impl AudioUnitManager {
             Arc::new(instance),
         );
 
+        // Debug log: instance created and current count
+        let count = self.instances.read().len();
+        println!("[AudioUnit] create_instance -> {} (total={})", instance_id, count);
+
         Ok(instance_id)
     }
 
@@ -1349,7 +1353,14 @@ impl AudioUnitManager {
     pub fn remove_instance(&self, id: &str) -> bool {
         // Clean up cached view controller before removing the instance
         crate::audio_unit_ui::cleanup_cached_view_controller(id);
-        self.instances.write().remove(id).is_some()
+        let removed = self.instances.write().remove(id).is_some();
+        if removed {
+            let count = self.instances.read().len();
+            println!("[AudioUnit] remove_instance -> {} (remaining={})", id, count);
+        } else {
+            println!("[AudioUnit] remove_instance -> {} (not found)", id);
+        }
+        removed
     }
 
     /// Remove and release all instances

@@ -160,10 +160,10 @@ export async function getBuses(): Promise<BusInfo[]> {
 
 export interface BusLevelInfo {
   id: string;
-  left_rms: number;
-  right_rms: number;
-  left_peak: number;
-  right_peak: number;
+  pre_left_peak: number;
+  pre_right_peak: number;
+  post_left_peak: number;
+  post_right_peak: number;
 }
 
 export async function getBusLevels(): Promise<BusLevelInfo[]> {
@@ -193,7 +193,7 @@ export async function reserveBusId(): Promise<string | null> {
  * @param targetType - "bus" or "output"
  * @param targetId - bus ID (for bus) or device ID string (for output)
  * @param targetChannel - target channel index
- * @param level - send level (0.0-1.0)
+ * @param level - send level in dB (0 = unity, negative values for attenuation, -100 = silent)
  * @param muted - mute state
  */
 export async function updateBusSend(
