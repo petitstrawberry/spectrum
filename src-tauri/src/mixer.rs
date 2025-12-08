@@ -1,14 +1,24 @@
 //! Audio Mixer Engine
 //! Uses Accelerate vDSP for hardware-accelerated mixing
 //! Lock-free design using ArcSwap for audio callback safety
+//!
+//! ## Unified Audio Graph
+//! All audio routing is represented as a directed acyclic graph (DAG):
+//! - Input nodes: Read from input devices (Prism, external inputs)
+//! - Bus nodes: Process audio with effects
+//! - Output nodes: Write to output devices
+//!
+//! The graph is topologically sorted for linear processing order.
+//! Each node has a buffer that holds one frame of audio data.
 
 use crate::vdsp::VDsp;
 use arc_swap::ArcSwap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Maximum number of Prism channels (32 stereo pairs = 64 mono channels)
 pub const PRISM_CHANNELS: usize = 64;
@@ -22,6 +32,1291 @@ pub const MAX_SENDS: usize = 1024;
 pub const MAX_BUSES: usize = 32;
 /// Bus channels (stereo)
 pub const BUS_CHANNELS: usize = 2;
+/// Maximum frames per buffer
+pub const MAX_FRAMES: usize = 4096;
+/// Maximum nodes in audio graph
+pub const MAX_GRAPH_NODES: usize = 256;
+/// Maximum edges in audio graph
+pub const MAX_GRAPH_EDGES: usize = 1024;
+
+// ============================================================================
+// Unified Audio Graph
+// ============================================================================
+
+/// Node type in the audio graph
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AudioNodeType {
+    /// Input source (device_id, channel_pair_index)
+    /// device_id 0 = Prism, other = external input device
+    Input { device_id: u32, pair_idx: u8 },
+    /// Effect bus (bus_index)
+    Bus { bus_idx: u8 },
+    /// Output destination (device_id_hash, channel_pair_index)
+    Output { device_hash: u64, pair_idx: u8 },
+}
+
+/// Compact node ID for efficient storage (u16)
+/// Encoding:
+/// - 0x0000-0x00FF: Input nodes (high byte = device_id, low byte = pair_idx) - simplified
+/// - 0x0100-0x01FF: Bus nodes (low byte = bus_idx)
+/// - 0x0200-0xFFFF: Output nodes (encoded device_hash + pair_idx)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct NodeId(pub u16);
+
+impl NodeId {
+    pub const INVALID: NodeId = NodeId(0xFFFF);
+
+    /// Create input node ID
+    #[inline]
+    pub fn input(device_id: u32, pair_idx: u8) -> Self {
+        // For simplicity: device_id in bits 8-11, pair_idx in bits 0-7
+        // This limits device_id to 0-15 and pair_idx to 0-255
+        let dev = (device_id as u16 & 0x0F) << 8;
+        NodeId(dev | (pair_idx as u16))
+    }
+
+    /// Create bus node ID
+    #[inline]
+    pub fn bus(bus_idx: u8) -> Self {
+        NodeId(0x1000 | (bus_idx as u16))
+    }
+
+    /// Create output node ID
+    /// Format: 0x2XXX where XXX encodes device hash (upper 8 bits) + pair_idx (lower 4 bits)
+    #[inline]
+    pub fn output(device_hash: u64, pair_idx: u8) -> Self {
+        // Use lower 8 bits of hash << 4, plus pair_idx in lower 4 bits
+        // This gives us 0x2000 + (hash8 << 4) + pair4
+        // Range: 0x2000 - 0x2FFF
+        let hash_part = ((device_hash as u16) & 0x00FF) << 4;
+        NodeId(0x2000 | hash_part | (pair_idx as u16 & 0x0F))
+    }
+
+    /// Check if this is an input node
+    #[inline]
+    pub fn is_input(&self) -> bool {
+        self.0 < 0x1000
+    }
+
+    /// Check if this is a bus node
+    #[inline]
+    pub fn is_bus(&self) -> bool {
+        self.0 >= 0x1000 && self.0 < 0x2000
+    }
+
+    /// Check if this is an output node
+    #[inline]
+    pub fn is_output(&self) -> bool {
+        self.0 >= 0x2000
+    }
+
+    /// Get bus index if this is a bus node
+    #[inline]
+    pub fn bus_idx(&self) -> Option<u8> {
+        if self.is_bus() {
+            Some((self.0 & 0x00FF) as u8)
+        } else {
+            None
+        }
+    }
+
+    /// Get input info if this is an input node
+    #[inline]
+    pub fn input_info(&self) -> Option<(u32, u8)> {
+        if self.is_input() {
+            let device_id = ((self.0 >> 8) & 0x0F) as u32;
+            let pair_idx = (self.0 & 0xFF) as u8;
+            Some((device_id, pair_idx))
+        } else {
+            None
+        }
+    }
+
+    /// Check if this output node matches the given device hash
+    #[inline]
+    pub fn matches_output_device(&self, device_hash: u64) -> bool {
+        if !self.is_output() {
+            return false;
+        }
+        // Extract the hash part from NodeId (8 bits) and compare with device_hash's lower 8 bits
+        let stored_hash = (self.0 >> 4) & 0x00FF;
+        let expected_hash = (device_hash as u16) & 0x00FF;
+        stored_hash == expected_hash
+    }
+
+    /// Get output pair index if this is an output node
+    #[inline]
+    pub fn output_pair_idx(&self) -> Option<u8> {
+        if self.is_output() {
+            Some((self.0 & 0x0F) as u8)
+        } else {
+            None
+        }
+    }
+}
+
+/// Edge in the audio graph (source -> target with gain)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AudioEdge {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub gain: f32,
+    /// Source channel within the node (0=left, 1=right for stereo nodes)
+    pub source_ch: u8,
+    /// Target channel within the node (0=left, 1=right for stereo nodes)
+    pub target_ch: u8,
+    pub active: bool,
+}
+
+/// Audio buffer for a single node (stereo)
+#[derive(Clone)]
+pub struct NodeBuffer {
+    pub left: Box<[f32; MAX_FRAMES]>,
+    pub right: Box<[f32; MAX_FRAMES]>,
+    pub valid_frames: usize,
+    pub processed_at: u64,
+}
+
+impl NodeBuffer {
+    pub fn new() -> Self {
+        Self {
+            left: Box::new([0.0; MAX_FRAMES]),
+            right: Box::new([0.0; MAX_FRAMES]),
+            valid_frames: 0,
+            processed_at: 0,
+        }
+    }
+
+    #[inline]
+    pub fn clear(&mut self, frames: usize) {
+        let n = frames.min(MAX_FRAMES);
+        self.left[..n].fill(0.0);
+        self.right[..n].fill(0.0);
+        self.valid_frames = n;
+    }
+}
+
+impl Default for NodeBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Unified audio graph for routing and processing
+/// Immutable after construction - swap entire graph when routing changes
+#[derive(Clone)]
+pub struct AudioGraph {
+    /// All edges in the graph
+    pub edges: Vec<AudioEdge>,
+    /// Topologically sorted processing order (node IDs)
+    pub processing_order: Vec<NodeId>,
+    /// Bus definitions (for plugin processing)
+    pub buses: Vec<Bus>,
+    /// Source faders (per stereo pair)
+    pub source_faders: [f32; PRISM_CHANNELS / 2],
+    /// Source mutes (per stereo pair)
+    pub source_mutes: [bool; PRISM_CHANNELS / 2],
+}
+
+impl Default for AudioGraph {
+    fn default() -> Self {
+        Self {
+            edges: Vec::new(),
+            processing_order: Vec::new(),
+            buses: Vec::new(),
+            source_faders: [1.0; PRISM_CHANNELS / 2],
+            source_mutes: [false; PRISM_CHANNELS / 2],
+        }
+    }
+}
+
+impl AudioGraph {
+    /// Build graph from sends and bus_sends
+    pub fn build(
+        sends: &[SendCompact],
+        bus_sends: &[BusSendCompact],
+        buses: &[Bus],
+        source_faders: [f32; PRISM_CHANNELS / 2],
+        source_mutes: [bool; PRISM_CHANNELS / 2],
+    ) -> Self {
+        let mut edges = Vec::with_capacity(sends.len() + bus_sends.len());
+        let mut nodes_set = std::collections::HashSet::new();
+
+        // Process direct sends (Input -> Output)
+        for send in sends.iter() {
+            if !send.active {
+                continue;
+            }
+            let pair_idx = (send.source_channel / 2) as u8;
+            let source = NodeId::input(send.source_device, pair_idx);
+            let target_pair = (send.target_channel / 2) as u8;
+            let target = NodeId::output(send.target_device_hash, target_pair);
+
+            nodes_set.insert(source);
+            nodes_set.insert(target);
+
+            edges.push(AudioEdge {
+                source,
+                target,
+                gain: send.level,
+                source_ch: (send.source_channel % 2) as u8,
+                target_ch: (send.target_channel % 2) as u8,
+                active: true,
+            });
+        }
+
+        // Process bus sends
+        for send in bus_sends.iter() {
+            if !send.active {
+                continue;
+            }
+
+            let source = if send.source_type == 0 {
+                // Input -> Bus or Input -> Output
+                let pair_idx = (send.source_channel / 2) as u8;
+                NodeId::input(send.source_device, pair_idx)
+            } else {
+                // Bus -> Bus or Bus -> Output
+                NodeId::bus(send.source_bus_idx)
+            };
+
+            let target = if send.target_type == 0 {
+                // -> Bus
+                NodeId::bus(send.target_bus_idx)
+            } else {
+                // -> Output
+                let pair_idx = (send.target_channel / 2) as u8;
+                NodeId::output(send.target_device_hash, pair_idx)
+            };
+
+            nodes_set.insert(source);
+            nodes_set.insert(target);
+
+            edges.push(AudioEdge {
+                source,
+                target,
+                gain: send.level,
+                source_ch: (send.source_channel % 2) as u8,
+                target_ch: (send.target_channel % 2) as u8,
+                active: true,
+            });
+        }
+
+        // Topological sort using Kahn's algorithm
+        let processing_order = Self::topological_sort(&nodes_set, &edges);
+
+        Self {
+            edges,
+            processing_order,
+            buses: buses.to_vec(),
+            source_faders,
+            source_mutes,
+        }
+    }
+
+    /// Topological sort of nodes using Kahn's algorithm
+    fn topological_sort(
+        nodes: &std::collections::HashSet<NodeId>,
+        edges: &[AudioEdge],
+    ) -> Vec<NodeId> {
+        use std::collections::VecDeque;
+
+        // Build adjacency list and in-degree count
+        let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+
+        for node in nodes.iter() {
+            in_degree.insert(*node, 0);
+            adj.insert(*node, Vec::new());
+        }
+
+        for edge in edges.iter() {
+            if !edge.active {
+                continue;
+            }
+            if let Some(deg) = in_degree.get_mut(&edge.target) {
+                *deg += 1;
+            }
+            if let Some(neighbors) = adj.get_mut(&edge.source) {
+                if !neighbors.contains(&edge.target) {
+                    neighbors.push(edge.target);
+                }
+            }
+        }
+
+        // Initialize queue with nodes that have in-degree 0
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        for (node, &deg) in in_degree.iter() {
+            if deg == 0 {
+                queue.push_back(*node);
+            }
+        }
+
+        // Process queue
+        let mut order = Vec::with_capacity(nodes.len());
+        while let Some(node) = queue.pop_front() {
+            order.push(node);
+
+            if let Some(neighbors) = adj.get(&node) {
+                for &neighbor in neighbors.iter() {
+                    if let Some(deg) = in_degree.get_mut(&neighbor) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If not all nodes are in order, there's a cycle - add remaining nodes
+        if order.len() < nodes.len() {
+            for node in nodes.iter() {
+                if !order.contains(node) {
+                    order.push(*node);
+                }
+            }
+        }
+
+        order
+    }
+
+    /// Get all edges that target a specific node
+    #[inline]
+    pub fn edges_to(&self, target: NodeId) -> impl Iterator<Item = &AudioEdge> {
+        self.edges.iter().filter(move |e| e.active && e.target == target)
+    }
+}
+
+// ============================================================================
+// Graph Processor - Processes audio through the graph
+// ============================================================================
+
+/// Global shared graph processor (single instance for all devices)
+pub struct GraphProcessor {
+    /// Node buffers indexed by NodeId
+    node_buffers: HashMap<NodeId, NodeBuffer>,
+    /// Temporary buffer for mixing
+    temp_buffer: Box<[f32; MAX_FRAMES]>,
+    /// Last processed sample counter
+    last_processed_at: u64,
+    /// Number of frames in the last processing
+    last_frames: usize,
+}
+
+impl GraphProcessor {
+    pub fn new() -> Self {
+        Self {
+            node_buffers: HashMap::with_capacity(64),
+            temp_buffer: Box::new([0.0; MAX_FRAMES]),
+            last_processed_at: 0,
+            last_frames: 0,
+        }
+    }
+
+    /// Check if already processed for this sample counter
+    #[inline]
+    pub fn is_processed(&self, sample_counter: u64) -> bool {
+        self.last_processed_at == sample_counter && sample_counter > 0
+    }
+
+    /// Get or create a buffer for a node
+    fn get_or_create_buffer(&mut self, node: NodeId) -> &mut NodeBuffer {
+        self.node_buffers.entry(node).or_insert_with(NodeBuffer::new)
+    }
+
+    /// Process the audio graph for one frame (called once per sample_counter)
+    /// Only processes Input and Bus nodes - Output nodes are filled in for ALL devices
+    pub fn process(
+        &mut self,
+        graph: &AudioGraph,
+        frames: usize,
+        sample_counter: u64,
+        read_input: impl Fn(u32, u8, &mut [f32], &mut [f32]) -> usize,
+        process_bus_plugins: impl Fn(u8, &mut [f32], &mut [f32]),
+    ) {
+        // Skip if already processed
+        if self.is_processed(sample_counter) {
+            return;
+        }
+
+        let frames = frames.min(MAX_FRAMES);
+        self.last_frames = frames;
+        self.last_processed_at = sample_counter;
+
+        // Process nodes in topological order
+        for &node_id in graph.processing_order.iter() {
+            // Clear the node buffer
+            let buffer = self.get_or_create_buffer(node_id);
+            buffer.clear(frames);
+
+            if node_id.is_input() {
+                // Input node: read from input device
+                if let Some((device_id, pair_idx)) = node_id.input_info() {
+                    // Check if muted
+                    let muted = if (pair_idx as usize) < graph.source_mutes.len() {
+                        graph.source_mutes[pair_idx as usize]
+                    } else {
+                        false
+                    };
+
+                    if !muted {
+                        let buffer = self.get_or_create_buffer(node_id);
+                        let count = read_input(
+                            device_id,
+                            pair_idx,
+                            &mut buffer.left[..frames],
+                            &mut buffer.right[..frames],
+                        );
+                        buffer.valid_frames = count;
+                        buffer.processed_at = sample_counter;
+                    }
+                }
+            } else if node_id.is_bus() {
+                // Bus node: mix from all incoming edges, then apply plugins
+                let bus_idx = node_id.bus_idx().unwrap_or(0);
+
+                // Check if bus is muted
+                let bus_muted = graph.buses.get(bus_idx as usize)
+                    .map(|b| b.muted)
+                    .unwrap_or(false);
+
+                if !bus_muted {
+                    // Mix from all sources
+                    for edge in graph.edges_to(node_id) {
+                        // First pass: calculate gain and copy source data to temp buffer
+                        let (valid, gain, local_buffer) = {
+                            let src_buf = match self.node_buffers.get(&edge.source) {
+                                Some(buf) if buf.valid_frames > 0 => buf,
+                                _ => continue,
+                            };
+
+                            // Get source fader if it's an input
+                            let fader = if edge.source.is_input() {
+                                if let Some((_, pair_idx)) = edge.source.input_info() {
+                                    if (pair_idx as usize) < graph.source_faders.len() {
+                                        graph.source_faders[pair_idx as usize]
+                                    } else {
+                                        1.0
+                                    }
+                                } else {
+                                    1.0
+                                }
+                            } else if edge.source.is_bus() {
+                                // Get bus fader
+                                if let Some(src_bus_idx) = edge.source.bus_idx() {
+                                    graph.buses.get(src_bus_idx as usize)
+                                        .map(|b| b.fader)
+                                        .unwrap_or(1.0)
+                                } else {
+                                    1.0
+                                }
+                            } else {
+                                1.0
+                            };
+
+                            let gain = edge.gain * fader;
+                            if gain < 0.0001 {
+                                continue;
+                            }
+
+                            // Copy source data to local buffer (stack allocation)
+                            let src_data = if edge.source_ch == 0 { &src_buf.left } else { &src_buf.right };
+                            let valid = src_buf.valid_frames.min(frames);
+
+                            // Copy to stack-local buffer to avoid borrow conflicts
+                            let mut local_buffer = [0.0f32; MAX_FRAMES];
+                            local_buffer[..valid].copy_from_slice(&src_data[..valid]);
+
+                            (valid, gain, local_buffer)
+                        };
+
+                        // Second pass: mix from local buffer to target
+                        if valid > 0 {
+                            let buffer = self.get_or_create_buffer(node_id);
+                            let dst = if edge.target_ch == 0 { &mut buffer.left } else { &mut buffer.right };
+
+                            VDsp::mix_add(&local_buffer[..valid], gain, &mut dst[..valid]);
+                            buffer.valid_frames = buffer.valid_frames.max(valid);
+                        }
+                    }
+
+                    // Apply plugins
+                    let buffer = self.get_or_create_buffer(node_id);
+                    if buffer.valid_frames > 0 {
+                        process_bus_plugins(bus_idx, &mut buffer.left[..frames], &mut buffer.right[..frames]);
+                        buffer.processed_at = sample_counter;
+                    }
+                }
+            } else if node_id.is_output() {
+                // Output node: mix from all incoming edges (for ALL output devices)
+                // Clear buffer first
+                let buffer = self.get_or_create_buffer(node_id);
+                buffer.clear(frames);
+
+                // Mix from all sources
+                for edge in graph.edges_to(node_id) {
+                    // First pass: calculate gain and copy source data
+                    let (valid, gain, local_buffer) = {
+                        let src_buf = match self.node_buffers.get(&edge.source) {
+                            Some(buf) if buf.valid_frames > 0 => buf,
+                            _ => continue,
+                        };
+
+                        // Get source fader
+                        let fader = if edge.source.is_input() {
+                            if let Some((_, pair_idx)) = edge.source.input_info() {
+                                if (pair_idx as usize) < graph.source_faders.len() {
+                                    graph.source_faders[pair_idx as usize]
+                                } else {
+                                    1.0
+                                }
+                            } else {
+                                1.0
+                            }
+                        } else if edge.source.is_bus() {
+                            if let Some(src_bus_idx) = edge.source.bus_idx() {
+                                graph.buses.get(src_bus_idx as usize)
+                                    .map(|b| b.fader)
+                                    .unwrap_or(1.0)
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        };
+
+                        let gain = edge.gain * fader;
+                        if gain < 0.0001 {
+                            continue;
+                        }
+
+                        // Copy source data
+                        let src_data = if edge.source_ch == 0 { &src_buf.left } else { &src_buf.right };
+                        let valid = src_buf.valid_frames.min(frames);
+
+                        let mut local_buffer = [0.0f32; MAX_FRAMES];
+                        local_buffer[..valid].copy_from_slice(&src_data[..valid]);
+
+                        (valid, gain, local_buffer)
+                    };
+
+                    // Second pass: mix to output buffer
+                    if valid > 0 {
+                        let buffer = self.get_or_create_buffer(node_id);
+                        let dst = if edge.target_ch == 0 { &mut buffer.left } else { &mut buffer.right };
+
+                        VDsp::mix_add(&local_buffer[..valid], gain, &mut dst[..valid]);
+                        buffer.valid_frames = buffer.valid_frames.max(valid);
+                        buffer.processed_at = sample_counter;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the buffer for a node (for reading after processing)
+    pub fn get_buffer(&self, node: NodeId) -> Option<&NodeBuffer> {
+        self.node_buffers.get(&node)
+    }
+
+    /// Mix output from the graph to an interleaved output buffer
+    pub fn mix_to_output(
+        &self,
+        graph: &AudioGraph,
+        target_device_hash: u64,
+        target_pair_idx: u8,
+        output_buffer: &mut [f32],
+        output_channels: usize,
+        frames: usize,
+    ) {
+        let target = NodeId::output(target_device_hash, target_pair_idx);
+
+        for edge in graph.edges_to(target) {
+            if let Some(src_buf) = self.node_buffers.get(&edge.source) {
+                if src_buf.valid_frames == 0 {
+                    continue;
+                }
+
+                // Get source fader
+                let fader = if edge.source.is_input() {
+                    if let Some((_, pair_idx)) = edge.source.input_info() {
+                        if (pair_idx as usize) < graph.source_faders.len() {
+                            graph.source_faders[pair_idx as usize]
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else if edge.source.is_bus() {
+                    if let Some(bus_idx) = edge.source.bus_idx() {
+                        graph.buses.get(bus_idx as usize)
+                            .map(|b| b.fader)
+                            .unwrap_or(1.0)
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+
+                let gain = edge.gain * fader;
+                if gain < 0.0001 {
+                    continue;
+                }
+
+                let src_data = if edge.source_ch == 0 { &src_buf.left } else { &src_buf.right };
+                let valid = src_buf.valid_frames.min(frames);
+
+                // Target channel in the output device
+                let target_ch = (target_pair_idx as usize * 2) + edge.target_ch as usize;
+                if target_ch < output_channels {
+                    VDsp::mix_to_interleaved(
+                        &src_data[..valid],
+                        gain,
+                        output_buffer,
+                        target_ch,
+                        output_channels,
+                        valid,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Global single graph processor (shared by all output devices)
+static GLOBAL_GRAPH_PROCESSOR: std::sync::LazyLock<Arc<RwLock<GraphProcessor>>> =
+    std::sync::LazyLock::new(|| Arc::new(RwLock::new(GraphProcessor::new())));
+
+/// Get the global graph processor
+pub fn get_graph_processor() -> Arc<RwLock<GraphProcessor>> {
+    Arc::clone(&GLOBAL_GRAPH_PROCESSOR)
+}
+
+// ============================================================================
+// Pre-computed Output Buffers (for audio callbacks to read)
+// ============================================================================
+
+/// Ring buffer size for output (about 170ms at 48kHz)
+const OUTPUT_RING_SIZE: usize = 8192;
+
+/// Output ring buffer for a specific output device + pair
+/// Uses atomic counters for lock-free SPSC (single producer, single consumer)
+/// The counters track total samples written/read, actual position is counter % SIZE
+pub struct OutputRingBuffer {
+    left: UnsafeCell<Box<[f32; OUTPUT_RING_SIZE]>>,
+    right: UnsafeCell<Box<[f32; OUTPUT_RING_SIZE]>>,
+    /// Total samples written (monotonically increasing, wraps at usize::MAX)
+    write_count: AtomicUsize,
+    /// Total samples read (monotonically increasing, wraps at usize::MAX)
+    read_count: AtomicUsize,
+}
+
+// SAFETY: SPSC ring buffer - producer only writes, consumer only reads
+// The atomic counters ensure proper synchronization
+unsafe impl std::marker::Send for OutputRingBuffer {}
+unsafe impl std::marker::Sync for OutputRingBuffer {}
+
+impl OutputRingBuffer {
+    pub fn new() -> Self {
+        Self {
+            left: UnsafeCell::new(Box::new([0.0; OUTPUT_RING_SIZE])),
+            right: UnsafeCell::new(Box::new([0.0; OUTPUT_RING_SIZE])),
+            write_count: AtomicUsize::new(0),
+            read_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Write samples to the ring buffer (called by processing thread ONLY)
+    /// Returns number of frames written
+    /// SPSC: Only producer writes, never touches read_count
+    pub fn write(&self, left: &[f32], right: &[f32]) -> usize {
+        let frames = left.len().min(right.len());
+        if frames == 0 {
+            return 0;
+        }
+        
+        let wc = self.write_count.load(Ordering::Relaxed);
+        let rc = self.read_count.load(Ordering::Acquire);
+        
+        // Calculate available space
+        let buffered = wc.wrapping_sub(rc);
+        let max_buffer = OUTPUT_RING_SIZE - 1;
+        let available_space = max_buffer.saturating_sub(buffered);
+        
+        // Only write what we have space for (never modify read_count!)
+        let to_write = frames.min(available_space);
+        
+        if to_write == 0 {
+            // Buffer full - skip this write (will cause audio glitch but maintains sync)
+            return 0;
+        }
+        
+        // SAFETY: Single producer, we own the write side
+        let left_buf = unsafe { &mut *self.left.get() };
+        let right_buf = unsafe { &mut *self.right.get() };
+        
+        let wp = wc % OUTPUT_RING_SIZE;
+        for i in 0..to_write {
+            let idx = (wp + i) % OUTPUT_RING_SIZE;
+            left_buf[idx] = left[i];
+            right_buf[idx] = right[i];
+        }
+        
+        // Update write count with release semantics
+        self.write_count.store(wc.wrapping_add(to_write), Ordering::Release);
+        
+        to_write
+    }
+
+    /// Read samples from the ring buffer (called by device callback ONLY)
+    /// Returns the number of frames actually read
+    pub fn read(&self, left_out: &mut [f32], right_out: &mut [f32]) -> usize {
+        let frames = left_out.len().min(right_out.len());
+        let rc = self.read_count.load(Ordering::Relaxed);
+        let wc = self.write_count.load(Ordering::Acquire);
+        
+        // Available samples = written - read (using wrapping arithmetic)
+        let available = wc.wrapping_sub(rc);
+        
+        // Sanity check: if available > SIZE, something is wrong
+        let available = if available > OUTPUT_RING_SIZE {
+            0 // Treat as empty
+        } else {
+            available
+        };
+        
+        let to_read = frames.min(available);
+        
+        // SAFETY: Single consumer, we own the read side
+        let left_buf = unsafe { &*self.left.get() };
+        let right_buf = unsafe { &*self.right.get() };
+        
+        let rp = rc % OUTPUT_RING_SIZE;
+        for i in 0..to_read {
+            let idx = (rp + i) % OUTPUT_RING_SIZE;
+            left_out[i] = left_buf[idx];
+            right_out[i] = right_buf[idx];
+        }
+        
+        // Zero-fill if not enough data (underrun)
+        for i in to_read..frames {
+            left_out[i] = 0.0;
+            right_out[i] = 0.0;
+        }
+        
+        // Update read count
+        if to_read > 0 {
+            self.read_count.store(rc.wrapping_add(to_read), Ordering::Release);
+        }
+        
+        to_read
+    }
+
+    /// Get available samples for reading (data in buffer)
+    pub fn available_read(&self) -> usize {
+        let rc = self.read_count.load(Ordering::Relaxed);
+        let wc = self.write_count.load(Ordering::Acquire);
+        let available = wc.wrapping_sub(rc);
+        if available > OUTPUT_RING_SIZE { 0 } else { available }
+    }
+    
+    /// Get available space for writing (free slots in buffer)
+    pub fn available_write(&self) -> usize {
+        let wc = self.write_count.load(Ordering::Relaxed);
+        let rc = self.read_count.load(Ordering::Acquire);
+        let buffered = wc.wrapping_sub(rc);
+        if buffered > OUTPUT_RING_SIZE { 
+            OUTPUT_RING_SIZE - 1 // Treat as empty
+        } else {
+            (OUTPUT_RING_SIZE - 1).saturating_sub(buffered)
+        }
+    }
+    
+    /// Get current counters for debugging
+    pub fn positions(&self) -> (usize, usize) {
+        (self.write_count.load(Ordering::Relaxed), self.read_count.load(Ordering::Relaxed))
+    }
+}
+
+impl Default for OutputRingBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Output ring buffers indexed by (device_hash_8bit, pair_idx)
+pub struct OutputRingBuffers {
+    /// Ring buffers: device_hash_8bit -> Vec<OutputRingBuffer> for each pair
+    buffers: HashMap<u64, Vec<OutputRingBuffer>>,
+}
+
+impl OutputRingBuffers {
+    pub fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+        }
+    }
+
+    /// Get or create ring buffer for a device pair
+    pub fn get_or_create(&mut self, device_hash: u64, pair_idx: usize) -> &mut OutputRingBuffer {
+        let pairs = self.buffers.entry(device_hash).or_insert_with(|| {
+            (0..16).map(|_| OutputRingBuffer::new()).collect()
+        });
+        if pair_idx >= pairs.len() {
+            pairs.resize_with(pair_idx + 1, OutputRingBuffer::new);
+        }
+        &mut pairs[pair_idx]
+    }
+
+    /// Get ring buffer for reading (immutable)
+    pub fn get(&self, device_hash: u64, pair_idx: usize) -> Option<&OutputRingBuffer> {
+        self.buffers.get(&device_hash)?.get(pair_idx)
+    }
+}
+
+impl Default for OutputRingBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Global output ring buffers (protected by RwLock for writes, but reads are lock-free via atomic positions)
+pub static OUTPUT_RING_BUFFERS: std::sync::LazyLock<RwLock<OutputRingBuffers>> =
+    std::sync::LazyLock::new(|| RwLock::new(OutputRingBuffers::new()));
+
+/// Ensure ring buffer exists for a device/pair (call during setup, not in hot path)
+pub fn ensure_output_ring_buffer(device_hash: u64, pair_idx: usize) {
+    let mut buffers = OUTPUT_RING_BUFFERS.write();
+    buffers.get_or_create(device_hash, pair_idx);
+}
+
+/// Get output ring buffers for writing (uses read lock since write() is &self)
+pub fn get_output_ring_buffers() -> parking_lot::RwLockReadGuard<'static, OutputRingBuffers> {
+    OUTPUT_RING_BUFFERS.read()
+}
+
+/// Read from output ring buffer (for device callback - lock-free after initial setup)
+pub fn read_output_ring(device_hash: u64, pair_idx: usize, left: &mut [f32], right: &mut [f32]) -> usize {
+    let buffers = OUTPUT_RING_BUFFERS.read();
+    if let Some(ring) = buffers.get(device_hash, pair_idx) {
+        let available_before = ring.available_read();
+        let read = ring.read(left, right);
+        let requested = left.len().min(right.len());
+        
+        // Log underruns (when we can't provide enough data)
+        static LOG_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if count % 500 == 0 || (read < requested && read > 0) {
+            println!("[OutputRing] READ dev={:x} pair={} req={} buffered={} read={}",
+                device_hash, pair_idx, requested, available_before, read);
+        }
+        
+        read
+    } else {
+        // No buffer yet, fill with zeros
+        left.fill(0.0);
+        right.fill(0.0);
+        0
+    }
+}
+
+/// Global sample counter for processing thread (DEPRECATED - used by old processing thread)
+static PROCESSING_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Processing thread running flag (DEPRECATED - used by old processing thread)
+static PROCESSING_RUNNING: std::sync::atomic::AtomicBool = 
+    std::sync::atomic::AtomicBool::new(false);
+
+// ============================================================================
+// Shared Output Buffers (for multi-device sync)
+// ============================================================================
+// Graph processing writes to these shared buffers.
+// Each device callback then copies from shared buffers to its own ring buffer
+// at its own pace. This prevents fast devices from overrunning slow ones.
+
+/// Shared output buffer for a single output node (device + pair)
+/// Written by leader, read by individual device callbacks
+pub struct SharedOutputEntry {
+    pub left: [f32; MAX_FRAMES],
+    pub right: [f32; MAX_FRAMES],
+    pub valid_frames: usize,
+    pub cycle_id: u64,
+}
+
+impl Default for SharedOutputEntry {
+    fn default() -> Self {
+        Self {
+            left: [0.0; MAX_FRAMES],
+            right: [0.0; MAX_FRAMES],
+            valid_frames: 0,
+            cycle_id: 0,
+        }
+    }
+}
+
+/// Container for all shared output buffers
+/// Indexed by (device_hash_8bit, pair_idx)
+pub struct SharedOutputBuffers {
+    /// Storage indexed by hash (0-255)
+    entries: Vec<Vec<UnsafeCell<SharedOutputEntry>>>,
+    /// Current cycle that data is valid for
+    cycle_id: AtomicU64,
+}
+
+// SAFETY: The leader writes while holding the processing lock.
+// Readers only read after cycle_id is updated (with proper memory ordering).
+unsafe impl std::marker::Send for SharedOutputBuffers {}
+unsafe impl std::marker::Sync for SharedOutputBuffers {}
+
+impl SharedOutputBuffers {
+    pub fn new() -> Self {
+        let mut entries = Vec::with_capacity(256);
+        for _ in 0..256 {
+            let mut pairs = Vec::with_capacity(MAX_OUTPUT_PAIRS);
+            for _ in 0..MAX_OUTPUT_PAIRS {
+                pairs.push(UnsafeCell::new(SharedOutputEntry::default()));
+            }
+            entries.push(pairs);
+        }
+        Self {
+            entries,
+            cycle_id: AtomicU64::new(0),
+        }
+    }
+
+    /// Write data for a specific output (called by leader only)
+    pub fn write(&self, hash8: u64, pair_idx: usize, left: &[f32], right: &[f32], cycle_id: u64) {
+        if hash8 >= 256 || pair_idx >= MAX_OUTPUT_PAIRS {
+            return;
+        }
+        
+        let entry = unsafe { &mut *self.entries[hash8 as usize][pair_idx].get() };
+        let frames = left.len().min(right.len()).min(MAX_FRAMES);
+        entry.left[..frames].copy_from_slice(&left[..frames]);
+        entry.right[..frames].copy_from_slice(&right[..frames]);
+        entry.valid_frames = frames;
+        entry.cycle_id = cycle_id;
+    }
+
+    /// Publish the cycle (called after all writes are done)
+    pub fn publish_cycle(&self, cycle_id: u64) {
+        self.cycle_id.store(cycle_id, Ordering::Release);
+    }
+
+    /// Get current published cycle
+    pub fn get_published_cycle(&self) -> u64 {
+        self.cycle_id.load(Ordering::Acquire)
+    }
+
+    /// Read data for a specific output (called by device callback)
+    /// Returns None if data is not ready for current cycle
+    pub fn read(&self, hash8: u64, pair_idx: usize, expected_cycle: u64) -> Option<(&[f32], &[f32], usize)> {
+        if hash8 >= 256 || pair_idx >= MAX_OUTPUT_PAIRS {
+            return None;
+        }
+        
+        // Check if data is ready
+        let published = self.cycle_id.load(Ordering::Acquire);
+        if published < expected_cycle {
+            return None; // Data not ready yet
+        }
+        
+        let entry = unsafe { &*self.entries[hash8 as usize][pair_idx].get() };
+        if entry.valid_frames == 0 {
+            return None;
+        }
+        
+        Some((&entry.left[..entry.valid_frames], &entry.right[..entry.valid_frames], entry.valid_frames))
+    }
+}
+
+impl Default for SharedOutputBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Global shared output buffers
+static SHARED_OUTPUT_BUFFERS: std::sync::OnceLock<SharedOutputBuffers> = std::sync::OnceLock::new();
+
+/// Get shared output buffers
+pub fn get_shared_output_buffers() -> &'static SharedOutputBuffers {
+    SHARED_OUTPUT_BUFFERS.get_or_init(|| SharedOutputBuffers::new())
+}
+
+// ============================================================================
+// Dynamic Leader Synchronization (for multi-device audio callbacks)
+// ============================================================================
+
+/// Flag indicating whether the current cycle's processing is in progress
+/// true = some callback is currently processing the graph
+/// false = no callback is processing, next one can take leadership
+static PROCESSING_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Sample counter for the last completed processing cycle
+/// Followers use this to detect when the leader has finished
+static LAST_COMPLETED_CYCLE: AtomicU64 = AtomicU64::new(0);
+
+/// Current cycle counter (incremented when a leader starts processing)
+static CURRENT_CYCLE: AtomicU64 = AtomicU64::new(0);
+
+/// Try to become the leader for this processing cycle.
+/// Returns Some(cycle_id) if this callback should process the graph (leader),
+/// Returns None if another callback is already processing (follower).
+/// 
+/// Uses CAS (Compare-And-Swap) for lock-free race resolution.
+#[inline]
+pub fn try_start_processing() -> Option<u64> {
+    // Try to set PROCESSING_IN_PROGRESS from false to true
+    if PROCESSING_IN_PROGRESS.compare_exchange(
+        false, true,
+        Ordering::Acquire, Ordering::Relaxed
+    ).is_ok() {
+        // We won the race - become leader
+        let cycle = CURRENT_CYCLE.fetch_add(1, Ordering::Relaxed);
+        Some(cycle)
+    } else {
+        // Someone else is already processing
+        None
+    }
+}
+
+/// Called by the leader after finishing graph processing.
+/// Releases the processing lock and updates the completed cycle counter.
+#[inline]
+pub fn finish_processing(cycle_id: u64) {
+    // Update completed cycle counter first (so followers can see it)
+    LAST_COMPLETED_CYCLE.store(cycle_id, Ordering::Release);
+    // Then release the processing lock
+    PROCESSING_IN_PROGRESS.store(false, Ordering::Release);
+}
+
+/// Get the last completed cycle ID.
+/// Followers use this to check if their data is ready.
+#[inline]
+pub fn get_last_completed_cycle() -> u64 {
+    LAST_COMPLETED_CYCLE.load(Ordering::Acquire)
+}
+
+/// Get the current cycle ID (what the leader is working on, or will work on next)
+#[inline]
+pub fn get_current_cycle() -> u64 {
+    CURRENT_CYCLE.load(Ordering::Acquire)
+}
+
+/// Wait for processing to complete (for followers).
+/// Returns true if processing completed within timeout, false if timed out.
+/// 
+/// Uses spin-wait with exponential backoff to minimize latency while avoiding CPU waste.
+#[inline]
+pub fn wait_for_processing(expected_cycle: u64, max_spins: u32) -> bool {
+    let mut spins = 0u32;
+    
+    while spins < max_spins {
+        // Check if the expected cycle (or later) has completed
+        let completed = get_last_completed_cycle();
+        if completed >= expected_cycle {
+            return true;
+        }
+        
+        // Check if no one is processing (leader might have bailed)
+        if !PROCESSING_IN_PROGRESS.load(Ordering::Acquire) {
+            // No leader active, we might become the leader on next try
+            return false;
+        }
+        
+        // Spin-wait with hint
+        std::hint::spin_loop();
+        spins += 1;
+        
+        // After 1000 spins, yield to OS
+        if spins % 1000 == 0 {
+            std::thread::yield_now();
+        }
+    }
+    
+    false // Timed out
+}
+
+/// Start the audio processing thread
+pub fn start_processing_thread() {
+    use std::sync::atomic::Ordering;
+    
+    if PROCESSING_RUNNING.swap(true, Ordering::SeqCst) {
+        // Already running
+        return;
+    }
+
+    std::thread::spawn(move || {
+        println!("[Mixer] Processing thread started");
+        
+        // Base processing parameters
+        let base_interval = std::time::Duration::from_micros(2000); // ~2ms base
+        let base_frames = 512usize;
+        let min_buffer_target = 2048usize; // Target minimum samples in buffer
+        let max_frames_per_tick = 2048usize; // Max frames to process at once
+        
+        let mut frames_per_tick = base_frames;
+        let mut interval = base_interval;
+
+        while PROCESSING_RUNNING.load(Ordering::Relaxed) {
+            let start = std::time::Instant::now();
+            
+            // Increment sample counter
+            let sample_counter = PROCESSING_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            
+            // Get mixer state
+            let mixer_state = get_mixer_state();
+            let snapshot = mixer_state.load_snapshot();
+            let graph = &snapshot.audio_graph;
+            
+            if graph.processing_order.is_empty() {
+                std::thread::sleep(interval);
+                continue;
+            }
+            
+            // Get processor
+            let processor_arc = get_graph_processor();
+            let mut processor = match processor_arc.try_write() {
+                Some(p) => p,
+                None => {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    continue;
+                }
+            };
+            
+            // Define input reader
+            let read_input = |device_id: u32, pair_idx: u8, left: &mut [f32], right: &mut [f32]| -> usize {
+                // Read from the primary output device's perspective (device 0 = any)
+                crate::audio_capture::read_channel_audio_any(
+                    pair_idx as usize * 2,
+                    pair_idx as usize * 2 + 1,
+                    left,
+                    right,
+                )
+            };
+            
+            // Define plugin processor
+            let au_manager = crate::audio_unit::get_au_manager();
+            let buses = &graph.buses;
+            let process_plugins = |bus_idx: u8, left: &mut [f32], right: &mut [f32]| {
+                if let Some(bus) = buses.get(bus_idx as usize) {
+                    if !bus.plugin_ids.is_empty() {
+                        au_manager.process_chain(
+                            &bus.plugin_ids,
+                            left,
+                            right,
+                            0.0,
+                        );
+                    }
+                }
+            };
+            
+            // Process the graph
+            processor.process(
+                graph,
+                frames_per_tick,
+                sample_counter,
+                read_input,
+                process_plugins,
+            );
+            
+            // Write output node buffers to ring buffers
+            let mut min_available = usize::MAX;
+            {
+                let ring_buffers = OUTPUT_RING_BUFFERS.read();
+                
+                for &node_id in graph.processing_order.iter() {
+                    if node_id.is_output() {
+                        if let Some(buf) = processor.get_buffer(node_id) {
+                            if buf.valid_frames == 0 {
+                                continue;
+                            }
+                            
+                            // Extract device hash from node_id
+                            // NodeId format for output: 0x2000 | (hash8 << 4) | pair4
+                            let hash8 = ((node_id.0 >> 4) & 0xFF) as u64;
+                            let pair_idx = (node_id.0 & 0x0F) as usize;
+                            
+                            // Write to ring buffer (get() since write is &self now)
+                            if let Some(ring) = ring_buffers.get(hash8, pair_idx) {
+                                let (wp_before, rp_before) = ring.positions();
+                                let written = ring.write(&buf.left[..buf.valid_frames], &buf.right[..buf.valid_frames]);
+                                let (wp_after, rp_after) = ring.positions();
+                                let buffered = ring.available_read();
+                                min_available = min_available.min(buffered);
+                                if sample_counter % 500 == 0 || written == 0 {
+                                    println!("[OutputRing] WRITE dev={:x} pair={} frames={} written={} buffered={} wp:{}->{} rp:{}->{}",
+                                        hash8, pair_idx, buf.valid_frames, written, buffered, 
+                                        wp_before, wp_after, rp_before, rp_after);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Dynamic adjustment: if buffers are running low, process more frames next time
+            if min_available < usize::MAX {
+                if min_available < min_buffer_target / 2 {
+                    // Buffer critically low - process more, faster
+                    frames_per_tick = (frames_per_tick * 2).min(max_frames_per_tick);
+                    interval = std::time::Duration::from_micros(1000); // 1ms
+                } else if min_available < min_buffer_target {
+                    // Buffer getting low - increase slightly
+                    frames_per_tick = (frames_per_tick + 128).min(max_frames_per_tick);
+                } else if min_available > min_buffer_target * 2 && frames_per_tick > base_frames {
+                    // Buffer healthy - can reduce back towards base
+                    frames_per_tick = (frames_per_tick - 64).max(base_frames);
+                    interval = base_interval;
+                }
+            }
+            
+            // Also update bus metering
+            for (bus_idx, bus) in graph.buses.iter().enumerate() {
+                if bus.muted {
+                    continue;
+                }
+                let node_id = NodeId::bus(bus_idx as u8);
+                if let Some(buf) = processor.get_buffer(node_id) {
+                    if buf.valid_frames > 0 {
+                        let fader = bus.fader;
+                        let left_rms = crate::vdsp::VDsp::rms(&buf.left[..frames_per_tick]) * fader;
+                        let left_peak = crate::vdsp::VDsp::peak(&buf.left[..frames_per_tick]) * fader;
+                        let right_rms = crate::vdsp::VDsp::rms(&buf.right[..frames_per_tick]) * fader;
+                        let right_peak = crate::vdsp::VDsp::peak(&buf.right[..frames_per_tick]) * fader;
+                        mixer_state.update_bus_level(bus_idx, left_rms, right_rms, left_peak, right_peak);
+                    }
+                }
+            }
+            
+            // Sleep for remaining time
+            let elapsed = start.elapsed();
+            if elapsed < interval {
+                std::thread::sleep(interval - elapsed);
+            }
+        }
+        
+        println!("[Mixer] Processing thread stopped");
+    });
+}
+
+/// Stop the audio processing thread
+pub fn stop_processing_thread() {
+    PROCESSING_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Get the current processing sample counter
+pub fn get_processing_sample_counter() -> u64 {
+    PROCESSING_SAMPLE_COUNTER.load(Ordering::Relaxed)
+}
+
+// ============================================================================
+// Original Mixer Types (kept for compatibility)
+// ============================================================================
 
 // Toggle verbose mixer logging. Set to `true` for debugging.
 const MIXER_LOG: bool = false;
@@ -261,6 +1556,99 @@ impl BusProcessingState {
     }
 }
 
+// ========== Lock-Free Double Buffer for Bus Processing ==========
+
+/// Double buffer for lock-free bus audio processing.
+/// - One device acquires processing lock (AtomicBool CAS)
+/// - Processor writes to back buffer, then flips
+/// - All devices read from front buffer (completely lock-free)
+pub struct DoubleBufferBuses {
+    /// Two sets of bus buffers
+    buffers: [UnsafeCell<Vec<BusBuffer>>; 2],
+    /// Current read index (0 or 1) - front buffer for reading
+    read_index: std::sync::atomic::AtomicUsize,
+    /// Processing lock - only one device can write at a time
+    processing_lock: AtomicBool,
+    /// Sample counter of the last completed write
+    last_sample_counter: AtomicU64,
+}
+
+// SAFETY: DoubleBufferBuses is designed for lock-free concurrent access:
+// - Only one thread can acquire processing_lock at a time (via CAS)
+// - The processor writes to back buffer (1 - read_index)
+// - All readers read from front buffer (read_index) which is immutable during processing
+// - After processing, read_index is atomically swapped
+unsafe impl std::marker::Send for DoubleBufferBuses {}
+unsafe impl std::marker::Sync for DoubleBufferBuses {}
+
+impl DoubleBufferBuses {
+    pub fn new() -> Self {
+        let create_buffers = || {
+            let mut buffers = Vec::with_capacity(MAX_BUSES);
+            for _ in 0..MAX_BUSES {
+                buffers.push(BusBuffer::new());
+            }
+            UnsafeCell::new(buffers)
+        };
+        Self {
+            buffers: [create_buffers(), create_buffers()],
+            read_index: std::sync::atomic::AtomicUsize::new(0),
+            processing_lock: AtomicBool::new(false),
+            last_sample_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Try to acquire processing lock (only one device can process per cycle).
+    /// Returns true if this caller acquired the lock.
+    #[inline]
+    pub fn try_start_processing(&self) -> bool {
+        self.processing_lock.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Relaxed
+        ).is_ok()
+    }
+
+    /// Get mutable access to the back buffer (write buffer).
+    /// SAFETY: Only call this after successfully acquiring processing lock via try_start_processing().
+    #[inline]
+    pub fn get_write_buffer(&self) -> &mut Vec<BusBuffer> {
+        let write_index = 1 - self.read_index.load(Ordering::Acquire);
+        // SAFETY: We hold the processing_lock, so no other thread is writing.
+        // Readers only access read_index buffer.
+        unsafe { &mut *self.buffers[write_index].get() }
+    }
+
+    /// Finish processing: flip buffers and release lock.
+    /// Call this after writing to the back buffer.
+    #[inline]
+    pub fn finish_processing(&self, sample_counter: u64) {
+        // Update sample counter before flipping
+        self.last_sample_counter.store(sample_counter, Ordering::Release);
+        // Flip: make back buffer the new front buffer
+        let current = self.read_index.load(Ordering::Acquire);
+        self.read_index.store(1 - current, Ordering::Release);
+        // Release the processing lock
+        self.processing_lock.store(false, Ordering::Release);
+    }
+
+    /// Get read-only access to the front buffer.
+    /// This is completely lock-free - all devices can read simultaneously.
+    #[inline]
+    pub fn get_read_buffer(&self) -> &Vec<BusBuffer> {
+        let read_index = self.read_index.load(Ordering::Acquire);
+        // SAFETY: The front buffer is only read, never written while it's the front buffer.
+        unsafe { &*self.buffers[read_index].get() }
+    }
+
+    /// Get the sample counter of the last completed processing cycle.
+    #[inline]
+    pub fn get_last_sample_counter(&self) -> u64 {
+        self.last_sample_counter.load(Ordering::Acquire)
+    }
+}
+
 // ========== Lock-Free Snapshot Structures ==========
 
 /// Immutable snapshot of mixer state for audio callback
@@ -273,12 +1661,14 @@ pub struct MixerSnapshot {
     pub bus_sends: Vec<BusSendCompact>,
     /// Bus definitions
     pub buses: Vec<Bus>,
-    /// Pre-computed topological processing order
+    /// Pre-computed topological processing order (legacy - for bus-only order)
     pub processing_order: Vec<u8>,
     /// Source faders (per stereo pair)
     pub source_faders: [f32; PRISM_CHANNELS / 2],
     /// Source mutes (per stereo pair)
     pub source_mutes: [bool; PRISM_CHANNELS / 2],
+    /// Unified audio graph for routing
+    pub audio_graph: AudioGraph,
 }
 
 impl Default for MixerSnapshot {
@@ -290,6 +1680,7 @@ impl Default for MixerSnapshot {
             processing_order: Vec::new(),
             source_faders: [1.0; PRISM_CHANNELS / 2],
             source_mutes: [false; PRISM_CHANNELS / 2],
+            audio_graph: AudioGraph::default(),
         }
     }
 }
@@ -931,9 +2322,6 @@ pub fn hash_device_id(device_id: &str) -> u64 {
     hasher.finish()
 }
 
-/// Maximum frames per buffer
-pub const MAX_FRAMES: usize = 4096;
-
 /// Pre-allocated buffer for one source pair (stereo)
 pub struct PairBuffer {
     pub left: Box<[f32; MAX_FRAMES]>,
@@ -1008,6 +2396,32 @@ impl OutputBufferPool {
 static OUTPUT_BUFFER_POOLS: std::sync::LazyLock<RwLock<HashMap<u64, Arc<RwLock<OutputBufferPool>>>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Per-device bus buffer pools (each device processes buses independently)
+static DEVICE_BUS_BUFFERS: std::sync::LazyLock<RwLock<HashMap<u64, Arc<RwLock<Vec<BusBuffer>>>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Get or create bus buffers for a specific output device
+pub fn get_device_bus_buffers(device_id: u64) -> Arc<RwLock<Vec<BusBuffer>>> {
+    // Try read first
+    {
+        let buffers = DEVICE_BUS_BUFFERS.read();
+        if let Some(buf) = buffers.get(&device_id) {
+            return Arc::clone(buf);
+        }
+    }
+    // Create new buffer set
+    let mut buffers = DEVICE_BUS_BUFFERS.write();
+    buffers.entry(device_id)
+        .or_insert_with(|| {
+            let mut bufs = Vec::with_capacity(MAX_BUSES);
+            for _ in 0..MAX_BUSES {
+                bufs.push(BusBuffer::new());
+            }
+            Arc::new(RwLock::new(bufs))
+        })
+        .clone()
+}
+
 /// Get or create buffer pool for an output device
 pub fn get_output_buffer_pool(device_id: u64) -> Arc<RwLock<OutputBufferPool>> {
     // Try read first
@@ -1055,6 +2469,8 @@ pub struct MixerState {
     pub bus_sends: BusSendsArray,
     /// Bus buffers for audio processing (indexed by bus index)
     pub bus_buffers: RwLock<Vec<BusBuffer>>,
+    /// Lock-free double buffer for bus processing
+    pub double_buffer: DoubleBufferBuses,
     /// Bus processing state - ensures buses are processed exactly once per audio cycle
     pub bus_processing: BusProcessingState,
     /// Master fader for each Prism channel pair (0.0 to 1.0)
@@ -1095,6 +2511,7 @@ impl MixerState {
             bus_sends: BusSendsArray::new(),
             // Pre-allocate bus buffers for fixed slots
             bus_buffers: RwLock::new((0..MAX_BUSES).map(|_| BusBuffer::new()).collect()),
+            double_buffer: DoubleBufferBuses::new(),
             bus_processing: BusProcessingState::new(),
             source_faders: RwLock::new([1.0; PRISM_CHANNELS / 2]),
             source_mutes: RwLock::new([false; PRISM_CHANNELS / 2]),
@@ -1126,6 +2543,15 @@ impl MixerState {
         let source_faders = self.source_faders.read().clone();
         let source_mutes = self.source_mutes.read().clone();
 
+        // Build unified audio graph
+        let audio_graph = AudioGraph::build(
+            &sends_compact,
+            &bus_sends,
+            &buses,
+            source_faders,
+            source_mutes,
+        );
+
         let new_snapshot = MixerSnapshot {
             sends: sends_compact,
             bus_sends,
@@ -1133,6 +2559,7 @@ impl MixerState {
             processing_order,
             source_faders,
             source_mutes,
+            audio_graph,
         };
 
         self.snapshot.store(Arc::new(new_snapshot));
@@ -1262,13 +2689,23 @@ impl MixerState {
         *self.input_levels.read()
     }
 
-    /// Get output levels for a device
-    pub fn get_output_levels(&self, device_id: &str) -> Vec<ChannelLevels> {
+    /// Get output levels for a device/pair key
+    /// key format: "{device_id}_{pair_idx}"
+    pub fn get_output_levels(&self, device_key: &str) -> Vec<ChannelLevels> {
         self.output_levels
             .read()
-            .get(device_id)
+            .get(device_key)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Update output levels for a virtual device pair
+    /// device_key: unique identifier in format "{device_id}_{pair_idx}"
+    /// - device_id: the actual audio device ID (aggregate ID if sub-device)
+    /// - pair_idx: stereo pair index (0, 1, 2, ... calculated from channelOffset / 2)
+    /// levels: vector of ChannelLevels for this stereo pair
+    pub fn update_output_levels(&self, device_key: &str, levels: Vec<ChannelLevels>) {
+        self.output_levels.write().insert(device_key.to_string(), levels);
     }
 
     // ========== Bus Operations ==========

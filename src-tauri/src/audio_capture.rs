@@ -47,7 +47,7 @@ const DEFAULT_IO_BUFFER_SIZE: usize = 256;
 static IO_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_SIZE);
 
 /// Shared level data - updated from audio thread (legacy Prism support)
-static LEVEL_DATA: RwLock<[ChannelLevels; STEREO_PAIRS]> = 
+static LEVEL_DATA: RwLock<[ChannelLevels; STEREO_PAIRS]> =
     RwLock::new([ChannelLevels {
         left_rms: 0.0,
         right_rms: 0.0,
@@ -189,57 +189,57 @@ impl ChannelBuffer {
             write_pos: AtomicUsize::new(0),
         }
     }
-    
+
     /// Write samples to the buffer (called from input callback)
     fn write(&self, samples: &[f32]) {
         let len = self.data.len();
         let mut pos = self.write_pos.load(Ordering::Acquire);
-        
+
         // Safety: single writer (input callback), multiple readers
         let data_ptr = self.data.as_ptr() as *mut f32;
-        
+
         for &sample in samples {
             unsafe {
                 *data_ptr.add(pos) = sample;
             }
             pos = (pos + 1) % len;
         }
-        
+
         self.write_pos.store(pos, Ordering::Release);
     }
-    
+
     /// Read samples from the buffer starting at a specific position
     /// Returns the new read position
     fn read(&self, read_pos: usize, out: &mut [f32]) -> usize {
         let len = self.data.len();
         let write_pos = self.write_pos.load(Ordering::Acquire);
-        
+
         // Normalize read_pos to be within buffer bounds (handles buffer resize)
         let read_pos = read_pos % len;
-        
+
         // Calculate available samples
         let available = if write_pos >= read_pos {
             write_pos - read_pos
         } else {
             len - read_pos + write_pos
         };
-        
+
         let to_read = out.len().min(available);
         let mut pos = read_pos;
-        
+
         for i in 0..to_read {
             out[i] = self.data[pos];
             pos = (pos + 1) % len;
         }
-        
+
         // Fill remaining with silence if not enough samples
         for i in to_read..out.len() {
             out[i] = 0.0;
         }
-        
+
         pos
     }
-    
+
     fn get_write_pos(&self) -> usize {
         self.write_pos.load(Ordering::Acquire)
     }
@@ -264,7 +264,7 @@ impl AudioBuffers {
 static AUDIO_BUFFERS: RwLock<Option<AudioBuffers>> = RwLock::new(None);
 
 /// Legacy: Read positions for each output device (lock-free after registration)
-static DEVICE_READ_POSITIONS: LazyLock<RwLock<HashMap<u32, Arc<OutputReadPositions>>>> = 
+static DEVICE_READ_POSITIONS: LazyLock<RwLock<HashMap<u32, Arc<OutputReadPositions>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Legacy: Global write frame counter (monotonic)
@@ -287,7 +287,7 @@ fn set_device_buffer_size(device_id: u32, buffer_size: u32) -> Result<(), String
         mScope: kAudioDevicePropertyScopeInput,
         mElement: kAudioObjectPropertyElementMaster,
     };
-    
+
     let status = unsafe {
         AudioObjectSetPropertyData(
             device_id,
@@ -298,12 +298,12 @@ fn set_device_buffer_size(device_id: u32, buffer_size: u32) -> Result<(), String
             &buffer_size as *const u32 as *const _,
         )
     };
-    
+
     if status != 0 {
         return Err(format!("Failed to set buffer size: OSStatus {}", status));
     }
-    
-    println!("[AudioCapture] Device {} I/O buffer size set to {} samples ({:.1}ms)", 
+
+    println!("[AudioCapture] Device {} I/O buffer size set to {} samples ({:.1}ms)",
              device_id, buffer_size, buffer_size as f64 / 48.0);
     Ok(())
 }
@@ -315,10 +315,10 @@ fn get_device_buffer_size(device_id: u32) -> Option<u32> {
         mScope: kAudioDevicePropertyScopeInput,
         mElement: kAudioObjectPropertyElementMaster,
     };
-    
+
     let mut buffer_size: u32 = 0;
     let mut size = std::mem::size_of::<u32>() as u32;
-    
+
     let status = unsafe {
         AudioObjectGetPropertyData(
             device_id,
@@ -329,7 +329,7 @@ fn get_device_buffer_size(device_id: u32) -> Option<u32> {
             &mut buffer_size as *mut u32 as *mut _,
         )
     };
-    
+
     if status == 0 {
         Some(buffer_size)
     } else {
@@ -340,7 +340,7 @@ fn get_device_buffer_size(device_id: u32) -> Option<u32> {
 /// Find Prism device ID
 pub fn find_prism_device() -> Option<u32> {
     let device_ids = get_audio_device_ids().ok()?;
-    
+
     for id in device_ids {
         if let Ok(name) = get_device_name(id) {
             let lower = name.to_lowercase();
@@ -425,10 +425,10 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
     if let Err(e) = set_device_buffer_size(device_id, io_buffer_size) {
         println!("[AudioCapture] Warning: Could not set I/O buffer size: {}", e);
     }
-    
+
     // Report actual buffer size
     if let Some(actual_size) = get_device_buffer_size(device_id) {
-        println!("[AudioCapture] Actual device buffer size: {} samples ({:.1}ms)", 
+        println!("[AudioCapture] Actual device buffer size: {} samples ({:.1}ms)",
                  actual_size, actual_size as f64 / 48.0);
     }
 
@@ -482,7 +482,7 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
     // Get input channel count
     let input_channels = get_device_input_channels(device_id);
     let channels = input_channels.min(PRISM_CHANNELS as u32);
-    
+
     println!("[AudioCapture] Using {} channels", channels);
 
     // Set stream format
@@ -512,7 +512,7 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
 
     // Set input callback
     type Args = render_callback::Args<data::Interleaved<f32>>;
-    
+
     if let Err(e) = audio_unit.set_input_callback(move |args: Args| {
         if !running_callback.load(Ordering::Relaxed) {
             return Ok(());
@@ -520,11 +520,11 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
 
         let Args { data, num_frames, .. } = args;
         let buffer = data.buffer;
-        
+
         let frames = num_frames as usize;
         let num_channels = channel_count;
         let stereo_pairs = num_channels / 2;
-        
+
         if buffer.len() < frames * num_channels || frames > MAX_FRAMES {
             return Ok(());
         }
@@ -540,7 +540,7 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
                     VDsp::deinterleave(buffer, ch, num_channels, &mut deinterleaved[..frames]);
                     buffers.channels[ch].write(&deinterleaved[..frames]);
                 }
-                
+
                 // Update frame counter
                 WRITE_FRAME_COUNTER.fetch_add(frames as u64, Ordering::Relaxed);
             }
@@ -560,7 +560,7 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
 
                 let old = levels[pair];
                 let smooth = 0.3;
-                
+
                 levels[pair] = ChannelLevels {
                     left_rms: old.left_rms * smooth + left_rms * (1.0 - smooth),
                     right_rms: old.right_rms * smooth + right_rms * (1.0 - smooth),
@@ -610,7 +610,7 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
 pub fn set_io_buffer_size(size: usize) {
     let size = size.max(32).min(2048);
     IO_BUFFER_SIZE.store(size, Ordering::SeqCst);
-    println!("[AudioCapture] I/O buffer size set to {} samples ({:.1}ms at 48kHz)", 
+    println!("[AudioCapture] I/O buffer size set to {} samples ({:.1}ms at 48kHz)",
              size, size as f64 / 48.0);
 }
 
@@ -634,13 +634,13 @@ pub fn start_capture() -> Result<bool, String> {
     };
 
     PRISM_DEVICE_ID.store(device_id, Ordering::SeqCst);
-    
+
     // Initialize ring buffers (fixed size)
     init_audio_buffers();
-    
+
     let running = Arc::new(AtomicBool::new(true));
     CAPTURE_RUNNING.store(true, Ordering::SeqCst);
-    
+
     let running_clone = running.clone();
     thread::spawn(move || {
         capture_thread(device_id, running_clone);
@@ -660,34 +660,34 @@ pub fn stop_capture() {
 /// Restart audio capture with new settings
 pub fn restart_capture() -> Result<bool, String> {
     println!("[AudioCapture] Restarting capture...");
-    
+
     // Stop current capture
     if CAPTURE_RUNNING.load(Ordering::SeqCst) {
         stop_capture();
     }
-    
+
     // Clear all device read positions (critical for avoiding position mismatch!)
     {
         let mut positions = DEVICE_READ_POSITIONS.write();
         positions.clear();
         println!("[AudioCapture] Cleared all device read positions");
     }
-    
+
     // Clear existing buffers
     {
         let mut buffers = AUDIO_BUFFERS.write();
         *buffers = None;
     }
-    
+
     // Wait a bit more for output devices to notice the missing buffers
     std::thread::sleep(std::time::Duration::from_millis(100));
-    
+
     // Start capture again (will use new buffer size)
     let result = start_capture();
-    
+
     // After restart, give time for buffers to fill before outputs read
     std::thread::sleep(std::time::Duration::from_millis(50));
-    
+
     result
 }
 
@@ -696,7 +696,7 @@ pub fn get_capture_levels() -> Vec<ChannelLevels> {
     if !CAPTURE_RUNNING.load(Ordering::SeqCst) {
         return vec![ChannelLevels::default(); STEREO_PAIRS];
     }
-    
+
     LEVEL_DATA.read().to_vec()
 }
 
@@ -734,31 +734,31 @@ pub fn unregister_output_device(device_id: u32) {
 /// Returns the number of frames actually read
 pub fn read_channel_audio(
     device_id: u32,
-    left_ch: usize, 
-    right_ch: usize, 
+    left_ch: usize,
+    right_ch: usize,
     left_out: &mut [f32],
     right_out: &mut [f32],
 ) -> usize {
     let num_frames = left_out.len().min(right_out.len());
-    
+
     // Initialize to silence
     left_out[..num_frames].fill(0.0);
     right_out[..num_frames].fill(0.0);
-    
+
     let buffers = match AUDIO_BUFFERS.try_read() {
         Some(b) => b,
         None => return 0,
     };
-    
+
     let audio_buffers = match buffers.as_ref() {
         Some(b) => b,
         None => return 0,
     };
-    
+
     if left_ch >= audio_buffers.channels.len() || right_ch >= audio_buffers.channels.len() {
         return 0;
     }
-    
+
     // Get read positions - lock-free after initial registration
     let read_pos = {
         // Fast path: try read lock
@@ -777,25 +777,37 @@ pub fn read_channel_audio(
             }
         }
     };
-    
+
     // Read from left channel - fully lock-free!
     let left_read_pos = read_pos.get(left_ch);
     let new_left_pos = audio_buffers.channels[left_ch].read(left_read_pos, left_out);
     read_pos.set(left_ch, new_left_pos);
-    
+
     // Read from right channel - fully lock-free!
     let right_read_pos = read_pos.get(right_ch);
     let new_right_pos = audio_buffers.channels[right_ch].read(right_read_pos, right_out);
     read_pos.set(right_ch, new_right_pos);
-    
+
     num_frames
+}
+
+/// Read audio for processing thread (not tied to specific output device)
+/// Uses a dedicated read position for the processing thread
+pub fn read_channel_audio_any(
+    left_ch: usize,
+    right_ch: usize,
+    left_out: &mut [f32],
+    right_out: &mut [f32],
+) -> usize {
+    // Use device_id u32::MAX as the processing thread's ID
+    read_channel_audio(u32::MAX, left_ch, right_ch, left_out, right_out)
 }
 
 /// Legacy API - deprecated, use read_channel_audio instead
 /// This is kept for compatibility but now just wraps read_channel_audio
 pub fn pop_channel_audio(
-    left_ch: usize, 
-    right_ch: usize, 
+    left_ch: usize,
+    right_ch: usize,
     left_out: &mut [f32],
     right_out: &mut [f32],
 ) -> usize {
@@ -806,11 +818,11 @@ pub fn pop_channel_audio(
 /// Update mixer state with captured levels
 pub fn update_mixer_levels() {
     use crate::mixer::get_mixer_state;
-    
+
     let levels = get_capture_levels();
     let mixer_state = get_mixer_state();
     let mut input_levels = mixer_state.input_levels.write();
-    
+
     for (i, level) in levels.iter().enumerate() {
         if i < input_levels.len() {
             input_levels[i] = *level;

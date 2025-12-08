@@ -33,7 +33,19 @@ pub struct AudioDevice {
     pub device_type: String,  // "prism", "virtual", "builtin", "external"
     pub input_channels: u32,
     pub output_channels: u32,
-    pub transport_type: String,  // "builtin", "usb", "bluetooth", "hdmi", "displayport", "airplay", "thunderbolt", "pci", "virtual", "unknown"
+    pub transport_type: String,  // "builtin", "usb", "bluetooth", "hdmi", "displayport", "airplay", "thunderbolt", "pci", "virtual", "aggregate", "unknown"
+    #[serde(default)]
+    pub is_aggregate: bool,     // true if this is an Aggregate Device
+    #[serde(default)]
+    pub sub_devices: Vec<SubDeviceInfo>,  // Sub-devices if aggregate
+}
+
+/// Sub-device information for Aggregate Devices
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SubDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub output_channels: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -956,11 +968,15 @@ fn restart_app(app: tauri::AppHandle) {
     // Disable further saves during the unload/shutdown sequence
     SAVE_ALLOWED.store(false, Ordering::SeqCst);
 
-    // 2) Stop all outputs and captures to ensure audio threads exit
+    // 2) Stop audio processing thread first
+    mixer::stop_processing_thread();
+    println!("[Spectrum] Audio processing thread stopped");
+
+    // 3) Stop all outputs and captures to ensure audio threads exit
     audio_output::stop_all_outputs();
     audio_capture::stop_all_captures();
 
-    // 3) Remove/unload all AudioUnit instances to ensure plugins are released
+    // 4) Remove/unload all AudioUnit instances to ensure plugins are released
     audio_unit::get_au_manager().remove_all_instances();
 
     // Give a short moment for threads/resources to clean up
@@ -1069,17 +1085,21 @@ pub fn run() {
             audio_capture::set_io_buffer_size(saved_buffer_size);
             println!("[Spectrum] Loaded I/O buffer size from config: {} samples", saved_buffer_size);
 
+            // NOTE: Processing thread is no longer used - Dynamic Leader pattern is now active
+            // The first device callback to arrive processes the entire audio graph
+            // mixer::start_processing_thread();
+            println!("[Spectrum] Using Dynamic Leader pattern for audio processing");
+
             // Try to start audio capture on app launch
             match audio_capture::start_capture() {
                 Ok(true) => {
                     println!("[Spectrum] Audio capture started from Prism device");
 
-                    // Also start output to default device for routing
-                    if let Err(e) = audio_output::start_default_output() {
-                        eprintln!("[Spectrum] Failed to start default output: {}", e);
-                    } else {
-                        println!("[Spectrum] Default audio output started");
-                    }
+                    // NOTE: We don't start default output here anymore.
+                    // Output devices are started when routing is configured via frontend.
+                    // Starting Prism as output when it's used as input causes issues
+                    // because there's no routing to it, leading to empty ring buffers.
+                    println!("[Spectrum] Output devices will be started when routing is configured");
                 }
                 Ok(false) => {
                     println!("[Spectrum] No Prism device found, using simulated levels");

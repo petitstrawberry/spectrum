@@ -42,6 +42,7 @@ import {
   stopInputCapture,
   getActiveInputCaptures,
   getInputDeviceLevels,
+  getOutputDeviceLevels,
   getBusLevels,
   reserveBusId,
   openPrismApp,
@@ -467,6 +468,9 @@ export default function App() {
   const [driverStatus, setDriverStatus] = useState<DriverStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Selected output device (single device mode)
+  const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState<string | null>(null);
+
   // Input device capture state
   const [inputDevices, setInputDevices] = useState<InputDeviceInfo[]>([]);
   const [activeCaptures, setActiveCaptures] = useState<ActiveCaptureInfo[]>([]);
@@ -479,6 +483,8 @@ export default function App() {
   const [deviceLevelsMap, setDeviceLevelsMap] = useState<Map<number, LevelData[]>>(new Map());
   // Per-bus level meters (bus_id -> levels)
   const [busLevelsMap, setBusLevelsMap] = useState<Map<string, BusLevelInfo>>(new Map());
+  // Per-output level meters (device_key -> levels, key format: "{device_id}_{pair_idx}")
+  const [outputLevelsMap, setOutputLevelsMap] = useState<Map<string, LevelData[]>>(new Map());
 
   // dB input editing state
   const [editingDbNodeId, setEditingDbNodeId] = useState<string | null>(null);
@@ -583,15 +589,21 @@ export default function App() {
           const restoredNodes: NodeData[] = savedState.saved_nodes.map(sn => {
             // Check if the device/source is currently available
             let available = true;
+            // Keep the saved libraryId - it contains deviceId and channelOffset
             let currentLibraryId = sn.library_id;
 
             if (sn.node_type === 'target') {
-              // Check if output device exists (by name, since ID can change)
-              const device = audioDevices.find(d => d.name === sn.label && d.is_output);
-              available = !!device;
-              // Update libraryId if device is available (ID may have changed)
-              if (device) {
-                currentLibraryId = `out_${device.id}`;
+              // For target nodes, check if the device exists
+              // Parse deviceId from libraryId: vout_{deviceId}_{channelOffset}
+              const voutMatch = sn.library_id?.match(/^vout_(\d+)_(\d+)$/);
+              if (voutMatch) {
+                const deviceId = voutMatch[1];
+                const device = audioDevices.find(d => d.id === deviceId && d.is_output);
+                available = !!device;
+              } else {
+                // Old format or unknown - check by name
+                const device = audioDevices.find(d => d.name === sn.label && d.is_output);
+                available = !!device;
               }
             } else if (sn.source_type === 'device') {
               // Check if input device exists
@@ -714,21 +726,22 @@ export default function App() {
           const startedOutputDevices = new Set<number>();
           for (const node of restoredNodes) {
             if (node.type === 'target' && node.available) {
-              const device = audioDevices.find(d => d.name === node.label && d.is_output);
-              if (device) {
-                const deviceIdNum = parseInt(device.id);
+              // Parse deviceId from libraryId: vout_{deviceId}_{channelOffset}
+              const voutMatch = node.libraryId?.match(/^vout_(\d+)_(\d+)$/);
+              if (voutMatch) {
+                const deviceIdNum = parseInt(voutMatch[1], 10);
                 if (!isNaN(deviceIdNum) && !startedOutputDevices.has(deviceIdNum)) {
                   startedOutputDevices.add(deviceIdNum);
                   // Start audio output to this device
                   startPromises.push(
                     startAudioOutput(deviceIdNum)
-                      .then(() => console.log(`[Spectrum] Started audio output to ${device.name}`))
-                      .catch(err => { console.error(`[Spectrum] Failed to start output to ${device.name}:`, err); })
+                      .then(() => console.log(`[Spectrum] Started audio output to device ${deviceIdNum} (${node.label})`))
+                      .catch(err => { console.error(`[Spectrum] Failed to start output to device ${deviceIdNum}:`, err); })
                   );
                 }
 
                 // Set output volume
-                setOutputVolume(device.id, faderToDb(node.volume))
+                setOutputVolume(voutMatch[1], faderToDb(node.volume))
                   .catch(err => console.error('[Spectrum] Failed to restore output volume:', err));
               }
             }
@@ -765,7 +778,7 @@ export default function App() {
                       createAudioUnitInstance(plugin.pluginId)
                         .then(async (newInstanceId) => {
                           console.log(`[Spectrum] Recreated plugin instance: ${plugin.name} -> ${newInstanceId}`);
-                          
+
                           // Restore plugin state if available
                           if (savedState) {
                             try {
@@ -779,7 +792,7 @@ export default function App() {
                               console.error(`[Spectrum] Error restoring plugin state for ${plugin.name}:`, err);
                             }
                           }
-                          
+
                           // Update the plugin's instance ID in the nodes state
                           setNodes(prev => prev.map(n => {
                             if (n.id === bus.id && n.plugins) {
@@ -833,8 +846,9 @@ export default function App() {
                   const srcDevId = sourceNode.sourceType === 'device' && sourceNode.deviceId !== undefined
                     ? sourceNode.deviceId : 0;
                   const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
+                  const tgtCh = (targetNode.channelOffset ?? 0) + conn.toChannel;
                   const level = conn.muted ? 0 : conn.sendLevel / 100;
-                  updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, conn.toChannel, level, conn.muted)
+                  updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, level, conn.muted)
                     .then(() => console.log(`[Spectrum] Bus send restored: Input -> ${busId}`))
                     .catch(console.error);
                 }
@@ -846,8 +860,10 @@ export default function App() {
                 const srcBusId = sourceNode.busId;
                 const tgtBusId = targetNode.busId;
                 if (srcBusId && tgtBusId) {
+                  const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
+                  const tgtCh = (targetNode.channelOffset ?? 0) + conn.toChannel;
                   const level = conn.muted ? 0 : conn.sendLevel / 100;
-                  updateBusSend('bus', srcBusId, 0, conn.fromChannel, 'bus', tgtBusId, conn.toChannel, level, conn.muted)
+                  updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, level, conn.muted)
                     .then(() => console.log(`[Spectrum] Bus chain restored: ${srcBusId} -> ${tgtBusId}`))
                     .catch(console.error);
                 }
@@ -857,11 +873,16 @@ export default function App() {
               if (sourceNode?.type === 'bus' && targetNode?.type === 'target') {
                 // Bus -> Output
                 const srcBusId = sourceNode.busId;
-                if (srcBusId && targetNode.available) {
-                  const tgtDevId = targetNode.libraryId.replace('out_', '');
+                // Parse target device info from libraryId: vout_{deviceId}_{channelOffset}
+                const voutMatch = targetNode.libraryId?.match(/^vout_(\d+)_(\d+)$/);
+                if (srcBusId && targetNode.available && voutMatch) {
+                  const targetDeviceId = voutMatch[1];
+                  const targetChannelOffset = parseInt(voutMatch[2], 10);
+                  const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
+                  const tgtCh = targetChannelOffset + conn.toChannel;
                   const level = conn.muted ? 0 : conn.sendLevel / 100;
-                  updateBusSend('bus', srcBusId, 0, conn.fromChannel, 'output', tgtDevId, conn.toChannel, level, conn.muted)
-                    .then(() => console.log(`[Spectrum] Bus to output restored: ${srcBusId} -> ${tgtDevId}`))
+                  updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetDeviceId, tgtCh, level, conn.muted)
+                    .then(() => console.log(`[Spectrum] Bus to output restored: ${srcBusId} -> ${targetDeviceId}:${tgtCh}`))
                     .catch(console.error);
                 }
                 continue;
@@ -878,17 +899,21 @@ export default function App() {
                   ? sourceNode.deviceId : 0;
                 const srcCh = (sourceNode.channelOffset ?? 0) + conn.fromChannel;
 
-                // Get target device ID from libraryId (format: "out_123")
-                const tgtDevId = targetNode.libraryId.replace('out_', '');
-                const tgtCh = (targetNode.channelOffset ?? 0) + conn.toChannel;
+                // Parse target device ID and channelOffset from libraryId: vout_{deviceId}_{channelOffset}
+                const voutMatch = targetNode.libraryId?.match(/^vout_(\d+)_(\d+)$/);
+                if (!voutMatch) continue;
+
+                const targetDeviceId = voutMatch[1];
+                const targetChannelOffset = parseInt(voutMatch[2], 10);
+                const tgtCh = targetChannelOffset + conn.toChannel;
 
                 // sendLevel is 0-100 fader value, pass as-is (not divided)
                 const sendLevel = conn.muted ? 0 : conn.sendLevel;
 
-                console.log(`[Spectrum] updateMixerSend(${srcDevId}, ${srcCh}, ${tgtDevId}, ${tgtCh}, ${sendLevel}, ${conn.muted})`);
+                console.log(`[Spectrum] updateMixerSend(${srcDevId}, ${srcCh}, ${targetDeviceId}, ${tgtCh}, ${sendLevel}, ${conn.muted})`);
 
-                updateMixerSend(srcDevId, srcCh, tgtDevId, tgtCh, sendLevel, conn.muted)
-                  .then(() => console.log(`[Spectrum] Send restored: ${srcDevId}:${srcCh} -> ${tgtDevId}:${tgtCh}`))
+                updateMixerSend(srcDevId, srcCh, targetDeviceId, tgtCh, sendLevel, conn.muted)
+                  .then(() => console.log(`[Spectrum] Send restored: ${srcDevId}:${srcCh} -> ${targetDeviceId}:${tgtCh}`))
                   .catch(err => console.error('[Spectrum] Failed to restore send:', err));
               }
             }
@@ -1025,7 +1050,7 @@ export default function App() {
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         const state = buildAppState();
-        
+
         // Fetch plugin states for all plugins before saving
         if (state.saved_nodes) {
           for (const node of state.saved_nodes) {
@@ -1043,7 +1068,7 @@ export default function App() {
             }
           }
         }
-        
+
         await saveAppState(state);
         console.log('[Spectrum] Auto-saved state');
       } catch (error) {
@@ -1149,6 +1174,42 @@ export default function App() {
           } catch (err) {
             // ignore bus level fetch errors
           }
+
+          // 4. Get output levels for selected output device
+          if (selectedOutputDeviceId) {
+            try {
+              // Find the output device from audioDevices
+              const outputDev = audioDevices.find(d => d.id === selectedOutputDeviceId);
+              if (outputDev) {
+                // Calculate how many stereo pairs to fetch
+                const totalChannels = outputDev.output_channels;
+                const numPairs = Math.ceil(totalChannels / 2);
+                const deviceId = outputDev.id;
+
+                // Fetch levels for each pair
+                const outputLevelPromises = [];
+                for (let pairIdx = 0; pairIdx < numPairs; pairIdx++) {
+                  const deviceKey = `${deviceId}_${pairIdx}`;
+                  outputLevelPromises.push(
+                    getOutputDeviceLevels(deviceKey).then(levels => ({ deviceKey, levels }))
+                  );
+                }
+
+                const results = await Promise.all(outputLevelPromises);
+                setOutputLevelsMap(prev => {
+                  const newMap = new Map(prev);
+                  for (const { deviceKey, levels } of results) {
+                    if (levels && levels.length > 0) {
+                      newMap.set(deviceKey, levels);
+                    }
+                  }
+                  return newMap;
+                });
+              }
+            } catch (err) {
+              // ignore output level fetch errors
+            }
+          }
         } catch (error) {
           errorCount++;
           if (errorCount <= 3) {
@@ -1162,7 +1223,7 @@ export default function App() {
 
     animationFrame = requestAnimationFrame(updateLevels);
     return () => cancelAnimationFrame(animationFrame);
-  }, [activeCaptures]);
+  }, [activeCaptures, selectedOutputDeviceId, audioDevices]);
 
   // Channel-based source type for UI (32 stereo pairs = 64 channels)
   type ChannelSource = {
@@ -1235,30 +1296,89 @@ export default function App() {
   }, [prismApps]);
 
   // Generate output targets from actual audio devices
+  // All virtual devices are represented as (deviceId, channelOffset) pairs
+  // - Regular device: (deviceId, 0)
+  // - Aggregate sub-device: (aggregateDeviceId, channelOffset)
   type OutputTarget = {
-    id: string;
-    name: string;
-    type: string;
+    id: string;           // Unique ID: `vout_${deviceId}_${channelOffset}`
+    name: string;         // Display name
+    type: string;         // Device type label
     icon: React.ComponentType<{ className?: string }>;
     color: string;
-    channels: number;
-    deviceId: string;
+    channels: number;     // Number of channels in this virtual device
+    deviceId: string;     // The actual audio device ID (aggregate ID if sub-device)
+    channelOffset: number; // Channel offset within the device (0 for regular devices)
   };
 
-  const outputTargets = useMemo((): OutputTarget[] => {
-    // Filter out Prism devices to prevent feedback loops (Prism→Prism routing)
-    return audioDevices
-      .filter(device => device.device_type !== 'prism')
-      .map(device => ({
-        id: `out_${device.id}`,
-        name: device.name,
-        type: getTypeLabelForDevice(device),
-        icon: getIconForOutputDevice(device),
-        color: getColorForDeviceType(device),
-        channels: device.output_channels,
-        deviceId: device.id,
-      }));
+  // All available output devices for selection (excluding Prism)
+  const availableOutputDevices = useMemo(() => {
+    return audioDevices.filter(device => device.device_type !== 'prism');
   }, [audioDevices]);
+
+  // Auto-select first aggregate device (or first device) if none selected
+  useEffect(() => {
+    if (!selectedOutputDeviceId && availableOutputDevices.length > 0) {
+      // Prefer aggregate devices
+      const aggregateDevice = availableOutputDevices.find(d => d.is_aggregate);
+      if (aggregateDevice) {
+        setSelectedOutputDeviceId(aggregateDevice.id);
+      } else {
+        setSelectedOutputDeviceId(availableOutputDevices[0].id);
+      }
+    }
+  }, [availableOutputDevices, selectedOutputDeviceId]);
+
+  // Get the selected output device
+  const selectedOutputDevice = useMemo(() => {
+    return audioDevices.find(d => d.id === selectedOutputDeviceId);
+  }, [audioDevices, selectedOutputDeviceId]);
+
+  // Generate output targets from selected device
+  // Generate output targets (virtual devices) from selected device
+  // All virtual devices are represented as (deviceId, channelOffset) pairs
+  // - Regular device: (deviceId, 0)
+  // - Aggregate sub-device: (aggregateDeviceId, channelOffset)
+  const outputTargets = useMemo((): OutputTarget[] => {
+    if (!selectedOutputDevice) return [];
+
+    // If aggregate device with sub-devices, show each sub-device as virtual device
+    if (selectedOutputDevice.is_aggregate && selectedOutputDevice.sub_devices && selectedOutputDevice.sub_devices.length > 0) {
+      let aggregateChannelOffset = 0; // Offset within aggregate device (for audio routing)
+
+      return selectedOutputDevice.sub_devices.map(subDevice => {
+        // Find the actual device info from audioDevices list to get proper icon/color
+        const actualDevice = audioDevices.find(d => d.id === subDevice.id);
+        const currentOffset = aggregateChannelOffset;
+
+        const target: OutputTarget = {
+          // Unified ID format: vout_{deviceId}_{channelOffset}
+          id: `vout_${selectedOutputDevice.id}_${currentOffset}`,
+          name: subDevice.name,
+          // Use actual device info if found, otherwise use defaults
+          type: actualDevice ? getTypeLabelForDevice(actualDevice) : 'Output',
+          icon: actualDevice ? getIconForOutputDevice(actualDevice) : Speaker,
+          color: actualDevice ? getColorForDeviceType(actualDevice) : 'text-pink-400',
+          channels: subDevice.output_channels,
+          deviceId: selectedOutputDevice.id, // Use the aggregate device ID for audio routing
+          channelOffset: currentOffset, // For internal routing to aggregate device
+        };
+        aggregateChannelOffset += subDevice.output_channels;
+        return target;
+      });
+    }
+
+    // Regular device: show as single output with channelOffset = 0
+    return [{
+      id: `vout_${selectedOutputDevice.id}_0`,
+      name: selectedOutputDevice.name,
+      type: getTypeLabelForDevice(selectedOutputDevice),
+      icon: getIconForOutputDevice(selectedOutputDevice),
+      color: getColorForDeviceType(selectedOutputDevice),
+      channels: selectedOutputDevice.output_channels,
+      deviceId: selectedOutputDevice.id,
+      channelOffset: 0,
+    }];
+  }, [selectedOutputDevice, audioDevices]);
 
   // --- Helpers ---
 
@@ -1362,7 +1482,7 @@ export default function App() {
       }
     }
 
-    // Target nodes
+    // Target nodes (virtual devices)
     const targetData = outputTargets.find(t => t.id === libraryId);
     const targetChannels = targetData?.channels || 2;
     return {
@@ -1377,6 +1497,7 @@ export default function App() {
       volume: dbToFader(0), // 0dB = unity gain
       muted: false,
       channelCount: targetChannels,
+      channelOffset: targetData?.channelOffset ?? 0, // Channel offset within the actual device
       channelMode: (targetChannels >= 2 && targetChannels % 2 === 0) ? 'stereo' : 'mono', // Stereo for even channels >= 2
       available: true,
     };
@@ -1626,11 +1747,23 @@ export default function App() {
     }
 
     // Also stop audio output if deleting a target node
+    // But only if no other target nodes use the same device
     if (nodeToDelete?.type === 'target') {
-      const targetData = outputTargets.find(t => t.id === nodeToDelete.libraryId);
-      if (targetData) {
-        const deviceIdNum = parseInt(targetData.deviceId);
-        if (!isNaN(deviceIdNum)) {
+      // Parse deviceId from libraryId: vout_{deviceId}_{channelOffset}
+      const voutMatch = nodeToDelete.libraryId?.match(/^vout_(\d+)_(\d+)$/);
+      if (voutMatch) {
+        const deviceIdStr = voutMatch[1];
+        const deviceIdNum = parseInt(deviceIdStr);
+
+        // Check if other target nodes use the same device
+        const otherTargetsWithSameDevice = nodes.filter(n =>
+          n.id !== nodeToDelete.id &&
+          n.type === 'target' &&
+          n.libraryId?.startsWith(`vout_${deviceIdStr}_`)
+        );
+
+        // Only stop if no other targets use this device
+        if (otherTargetsWithSameDevice.length === 0 && !isNaN(deviceIdNum)) {
           stopAudioOutput(deviceIdNum).catch(console.error);
         }
       }
@@ -2918,6 +3051,26 @@ export default function App() {
                                     maxDb > -12 ? 'from-yellow-500/20' :
                                     'from-green-500/20';
                 }
+              } else if (node.type === 'target') {
+                // Target node: get output levels from outputLevelsMap
+                const targetData = outputTargets.find(t => t.id === node.libraryId);
+                if (targetData) {
+                  // Calculate pair index from channelOffset (channels are 0-indexed, pairs are 2ch each)
+                  const pairIndex = Math.floor(targetData.channelOffset / 2);
+                  const deviceKey = `${targetData.deviceId}_${pairIndex}`;
+                  const levels = outputLevelsMap.get(deviceKey);
+                  if (levels && levels.length > 0) {
+                    const levelData = levels[0];
+                    const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
+                    const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
+                    const maxDb = Math.max(leftDb, rightDb);
+                    avgLevel = dbToMeterPercent(maxDb);
+                    meterColorClass = maxDb > 0 ? 'from-red-500/30' :
+                                      maxDb > -6 ? 'from-amber-500/25' :
+                                      maxDb > -12 ? 'from-yellow-500/20' :
+                                      'from-green-500/20';
+                  }
+                }
               }
 
               const isSelected = selectedNodeId === node.id;
@@ -2959,10 +3112,10 @@ export default function App() {
                   className={`canvas-node absolute w-[180px] ${bgClass} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${isUnavailable ? 'opacity-50' : ''}`}
                   style={{ left: node.x, top: node.y, height: nodeHeight }}
                 >
-                {/* Header with level meter for source nodes */}
+                {/* Header with level meter for source and target nodes */}
                 <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing relative overflow-hidden">
-                  {/* Level meter background for source nodes */}
-                  {node.type === 'source' && (
+                  {/* Level meter background for source and target nodes */}
+                  {(node.type === 'source' || node.type === 'target') && (
                     <div
                       className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${meterColorClass} to-transparent transition-all duration-75 pointer-events-none`}
                       style={{ width: `${Math.min(avgLevel, 100)}%` }}
@@ -3137,20 +3290,55 @@ export default function App() {
             </div>
           </div>
 
-          {/* Output Devices Section */}
+          {/* Output Device Selection */}
+          <div className="p-4 border-b border-slate-800 bg-slate-900/50">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2 mb-3">
+              <Speaker className="w-3 h-3" /> Output Device
+            </div>
+            <select
+              value={selectedOutputDeviceId || ''}
+              onChange={(e) => {
+                const newDeviceId = e.target.value || null;
+                setSelectedOutputDeviceId(newDeviceId);
+                // TODO: Start audio output to new device
+              }}
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-purple-500 cursor-pointer"
+            >
+              <option value="" disabled>Select output device...</option>
+              {availableOutputDevices.map(device => (
+                <option key={device.id} value={device.id}>
+                  {device.name} {device.is_aggregate ? '(Aggregate)' : ''} - {device.output_channels}ch
+                </option>
+              ))}
+            </select>
+            {selectedOutputDevice?.is_aggregate && (
+              <div className="mt-2 text-[9px] text-slate-500">
+                Aggregate device: routing to sub-devices below
+              </div>
+            )}
+          </div>
+
+          {/* Output Devices Section (virtual devices from selected device) */}
           <div className="p-4 border-b border-slate-800 bg-slate-900/50">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
               <LinkIcon className="w-3 h-3" /> Output Devices
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2">
-            {outputTargets.length === 0 ? (
+            {!selectedOutputDeviceId ? (
               <div className="text-center py-8 text-slate-600 text-xs">
-                No output devices found
+                Select an output device above
+              </div>
+            ) : outputTargets.length === 0 ? (
+              <div className="text-center py-8 text-slate-600 text-xs">
+                No sub-devices available
               </div>
             ) : outputTargets.map(item => {
               const isUsed = nodes.some(n => n.libraryId === item.id);
               const ItemIcon = item.icon;
+              // Display channels within the virtual device (1-based, like regular devices)
+              // NOT the aggregate channel offset
+              const channelDisplay = `${item.channels}ch`;
               return (
                 <div
                   key={item.id}
@@ -3167,7 +3355,7 @@ export default function App() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-xs font-bold text-slate-200 truncate">{item.name}</div>
-                    <div className="text-[9px] text-slate-500 uppercase">{item.channels}ch • {item.type}</div>
+                    <div className="text-[9px] text-slate-500 uppercase">{channelDisplay} • {item.type}</div>
                   </div>
                   {!isUsed && <Plus className="w-4 h-4 text-slate-600 group-hover:text-pink-400 transition-colors" />}
                 </div>
@@ -3249,9 +3437,9 @@ export default function App() {
                             const fromIdx = parseInt(e.dataTransfer.getData('plugin-idx'), 10);
                             const busId = e.dataTransfer.getData('bus-id');
                             const toIdx = idx;
-                            
+
                             console.log('[DnD] Drop event:', { fromIdx, toIdx, busId, selectedBusId });
-                            
+
                             if (busId !== selectedBusId || fromIdx === toIdx || isNaN(fromIdx)) {
                               console.log('[DnD] Skipped:', { busIdMatch: busId === selectedBusId, sameIdx: fromIdx === toIdx, isNaN: isNaN(fromIdx) });
                               return;
@@ -3263,15 +3451,15 @@ export default function App() {
                               console.log('[DnD] No target bus or plugins');
                               return;
                             }
-                            
+
                             console.log('[DnD] Reordering:', targetBus.plugins.map(p => p.name));
-                            
+
                             const newPlugins = [...targetBus.plugins];
                             const [moved] = newPlugins.splice(fromIdx, 1);
                             newPlugins.splice(toIdx, 0, moved);
-                            
+
                             console.log('[DnD] New order:', newPlugins.map(p => p.name));
-                            
+
                             // Update local state
                             setNodes(prev => prev.map(n => {
                               if (n.id === selectedBusId) {
@@ -3279,7 +3467,7 @@ export default function App() {
                               }
                               return n;
                             }));
-                            
+
                             // Update backend with new plugin order
                             if (targetBus.busId) {
                               const pluginIds = newPlugins.map(p => p.id);
@@ -3346,17 +3534,17 @@ export default function App() {
                               // Remove plugin
                               try {
                                 await removeAudioUnitInstance(plugin.id);
-                                
+
                                 // Update local state and get updated plugin list
                                 const targetBus = nodes.find(n => n.id === selectedBusId);
                                 const updatedPlugins = (targetBus?.plugins || []).filter(p => p.id !== plugin.id);
                                 const pluginIds = updatedPlugins.map(p => p.id);
-                                
+
                                 // Update backend with new plugin chain
                                 if (targetBus?.busId) {
                                   await setBusPlugins(targetBus.busId, pluginIds);
                                 }
-                                
+
                                 setNodes(prev => prev.map(n => {
                                   if (n.id === selectedBusId && n.plugins) {
                                     return {
@@ -3905,6 +4093,28 @@ export default function App() {
                     const isSelected = focusedOutputId === node.id;
                     const Icon = node.icon;
 
+                    // Get output levels for this target
+                    let outputLevel = 0;
+                    let outputMeterColor = 'from-pink-500/20';
+                    const targetData = outputTargets.find(t => t.id === node.libraryId);
+                    if (targetData) {
+                      // Calculate pair index from channelOffset (channels are 0-indexed, pairs are 2ch each)
+                      const pairIndex = Math.floor(targetData.channelOffset / 2);
+                      const deviceKey = `${targetData.deviceId}_${pairIndex}`;
+                      const levels = outputLevelsMap.get(deviceKey);
+                      if (levels && levels.length > 0) {
+                        const levelData = levels[0];
+                        const leftDb = levelData ? rmsToDb(levelData.left_rms) : -60;
+                        const rightDb = levelData ? rmsToDb(levelData.right_rms) : -60;
+                        const maxDb = Math.max(leftDb, rightDb);
+                        outputLevel = dbToMeterPercent(maxDb);
+                        outputMeterColor = maxDb > 0 ? 'from-red-500/30' :
+                                          maxDb > -6 ? 'from-amber-500/25' :
+                                          maxDb > -12 ? 'from-yellow-500/20' :
+                                          'from-pink-500/20';
+                      }
+                    }
+
                     return (
                         <div
                             key={node.id}
@@ -3913,7 +4123,7 @@ export default function App() {
                                 setFocusedPairIndex(0);
                             }}
                             className={`
-                                flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0
+                                relative flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0 overflow-hidden
                                 ${node.available === false
                                   ? 'opacity-40 grayscale border-slate-800'
                                   : isSelected
@@ -3921,14 +4131,21 @@ export default function App() {
                                     : 'border-slate-800 hover:border-slate-600'}
                             `}
                         >
-                            <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.available === false ? 'text-slate-500' : node.color}`}>
+                            {/* Level meter background */}
+                            {node.available !== false && (
+                              <div
+                                className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${outputMeterColor} to-transparent transition-all duration-75 pointer-events-none`}
+                                style={{ width: `${Math.min(outputLevel, 100)}%` }}
+                              />
+                            )}
+                            <div className={`relative z-10 w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${node.available === false ? 'text-slate-500' : node.color}`}>
                                 <Icon className="w-3 h-3" />
                             </div>
-                            <div className="flex-1 min-w-0">
+                            <div className="relative z-10 flex-1 min-w-0">
                                 <div className={`text-[10px] font-bold truncate ${node.available === false ? 'text-slate-500' : isSelected ? 'text-white' : 'text-slate-400'}`}>{node.label}</div>
                                 {node.available === false && <div className="text-[8px] text-red-400">Disconnected</div>}
                             </div>
-                            {isSelected && node.available !== false && <div className={`w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
+                            {isSelected && node.available !== false && <div className={`relative z-10 w-1.5 h-1.5 rounded-full ${node.color.replace('text-', 'bg-')} animate-pulse`}></div>}
                         </div>
                     );
                 })}

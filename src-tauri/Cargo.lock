@@ -3578,6 +3578,7 @@ dependencies = [
  "arc-swap",
  "base64 0.22.1",
  "block2 0.6.2",
+ "core-foundation",
  "coreaudio-rs",
  "crossbeam-channel",
  "dirs 5.0.1",

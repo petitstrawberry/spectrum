@@ -36,6 +36,7 @@ block2 = "0.6"
 base64 = "0.22.1"
 arc-swap = "1.7.1"
 shellexpand = "2"
+core-foundation = "0.10"
 
 [profile.dev]
 incremental = true

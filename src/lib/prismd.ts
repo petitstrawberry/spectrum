@@ -50,6 +50,12 @@ export interface DriverStatus {
   buffer_size: number;
 }
 
+export interface SubDeviceInfo {
+  id: string;
+  name: string;
+  output_channels: number;
+}
+
 export interface AudioDevice {
   id: string;
   name: string;
@@ -60,6 +66,8 @@ export interface AudioDevice {
   input_channels: number;
   output_channels: number;
   transport_type: string;  // "builtin", "usb", "bluetooth", "hdmi", "displayport", "airplay", "thunderbolt", etc.
+  is_aggregate?: boolean;  // true if this is an Aggregate Device
+  sub_devices?: SubDeviceInfo[];  // Sub-devices if aggregate
 }
 
 // --- Helpers ---

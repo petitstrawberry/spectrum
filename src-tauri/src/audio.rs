@@ -1,6 +1,7 @@
 //! CoreAudio utilities for device enumeration and level metering
 
-use crate::AudioDevice;
+use crate::{AudioDevice, SubDeviceInfo};
+use crate::audio_output::{is_aggregate_device, get_aggregate_sub_devices};
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_device_name,
 };
@@ -181,6 +182,22 @@ pub fn get_devices() -> Result<Vec<AudioDevice>, Box<dyn Error + Send + Sync>> {
         // Get transport type from CoreAudio
         let transport_type = get_transport_type(device_id);
 
+        // Check if this is an Aggregate Device and get sub-devices
+        let is_aggregate = is_aggregate_device(device_id);
+        let sub_devices = if is_aggregate {
+            get_aggregate_sub_devices(device_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|sd| SubDeviceInfo {
+                    id: sd.device_id.to_string(),
+                    name: sd.name,
+                    output_channels: sd.output_channels,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         devices.push(AudioDevice {
             id: device_id.to_string(),
             name,
@@ -191,6 +208,8 @@ pub fn get_devices() -> Result<Vec<AudioDevice>, Box<dyn Error + Send + Sync>> {
             input_channels,
             output_channels,
             transport_type,
+            is_aggregate,
+            sub_devices,
         });
     }
 
