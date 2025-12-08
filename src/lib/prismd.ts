@@ -229,6 +229,41 @@ export async function getOutputDeviceLevels(deviceId: string): Promise<LevelData
 }
 
 /**
+ * Get output levels for multiple devices in a single call (batch API)
+ */
+export async function getOutputDeviceLevelsBatch(deviceIds: string[]): Promise<Record<string, LevelData[]>> {
+  return invoke<Record<string, LevelData[]>>('get_output_device_levels_batch', { deviceIds });
+}
+
+/**
+ * Bus level data
+ */
+export interface BusLevelData {
+  id: string;
+  left_rms: number;
+  right_rms: number;
+  left_peak: number;
+  right_peak: number;
+}
+
+/**
+ * All levels response - combined response for all level types
+ */
+export interface AllLevelsData {
+  prism: LevelData[];
+  devices: Record<string, LevelData[]>;
+  buses: BusLevelData[];
+  outputs: Record<string, LevelData[]>;
+}
+
+/**
+ * Get all levels in a single IPC call (optimized for high-frequency polling)
+ */
+export async function getAllLevels(deviceIds: string[], outputKeys: string[]): Promise<AllLevelsData> {
+  return invoke<AllLevelsData>('get_all_levels', { deviceIds, outputKeys });
+}
+
+/**
  * Update a send connection (1ch unit)
  */
 export async function updateMixerSend(
@@ -264,6 +299,13 @@ export async function removeMixerSend(
     targetDevice,
     targetChannel,
   });
+}
+
+/**
+ * Clear all mixer sends (used when switching output devices)
+ */
+export async function clearAllMixerSends(): Promise<void> {
+  return invoke('clear_all_mixer_sends');
 }
 
 /**

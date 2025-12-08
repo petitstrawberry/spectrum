@@ -280,3 +280,16 @@ export async function setAudioUnitState(instanceId: string, state: string): Prom
     return false;
   }
 }
+
+/**
+ * Clear all mixer sends (direct and bus sends)
+ */
+export async function clearAllMixerSends(): Promise<void> {
+  try {
+    await invoke('clear_all_mixer_sends');
+    console.log('[API] Cleared all mixer sends');
+  } catch (error) {
+    console.error('Failed to clear all mixer sends:', error);
+    throw error;
+  }
+}

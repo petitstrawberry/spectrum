@@ -366,6 +366,12 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
     let dev_id_for_callback = device_id;
     let out_ch = output_channels as usize;
 
+    // Pre-compute meter keys to avoid format! in callback (heap allocation)
+    let max_pairs = (output_channels as usize + 1) / 2;
+    let meter_keys: Vec<String> = (0..max_pairs)
+        .map(|pair_idx| format!("{}_{}", device_id, pair_idx))
+        .collect();
+
     println!("[AudioOutput] Device {} hash={:x} channels={}",
         device_id, dev_id_hash, out_ch);
 
@@ -477,22 +483,21 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                         }
                     }
 
-                    // Update output metering for this channel pair
-                    // Key format: "{device_id}_{pair_idx}"
-                    let meter_key = format!("{}_{}", dev_id_for_callback, pair_idx);
-                    let left_rms = VDsp::rms(&buf.left[..valid]);
-                    let left_peak = VDsp::peak(&buf.left[..valid]);
-                    let right_rms = VDsp::rms(&buf.right[..valid]);
-                    let right_peak = VDsp::peak(&buf.right[..valid]);
+                    // Update output metering for this channel pair (non-blocking)
+                    // Use pre-computed meter key to avoid heap allocation
+                    if let Some(meter_key) = meter_keys.get(pair_idx) {
+                        let left_rms = VDsp::rms(&buf.left[..valid]);
+                        let left_peak = VDsp::peak(&buf.left[..valid]);
+                        let right_rms = VDsp::rms(&buf.right[..valid]);
+                        let right_peak = VDsp::peak(&buf.right[..valid]);
 
-                    mixer_state.update_output_levels(&meter_key, vec![
-                        crate::mixer::ChannelLevels {
+                        mixer_state.try_update_output_levels(meter_key, crate::mixer::ChannelLevels {
                             left_rms,
                             right_rms,
                             left_peak,
                             right_peak,
-                        }
-                    ]);
+                        });
+                    }
                 }
             }
         }

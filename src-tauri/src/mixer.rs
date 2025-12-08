@@ -737,37 +737,37 @@ impl OutputRingBuffer {
         if frames == 0 {
             return 0;
         }
-        
+
         let wc = self.write_count.load(Ordering::Relaxed);
         let rc = self.read_count.load(Ordering::Acquire);
-        
+
         // Calculate available space
         let buffered = wc.wrapping_sub(rc);
         let max_buffer = OUTPUT_RING_SIZE - 1;
         let available_space = max_buffer.saturating_sub(buffered);
-        
+
         // Only write what we have space for (never modify read_count!)
         let to_write = frames.min(available_space);
-        
+
         if to_write == 0 {
             // Buffer full - skip this write (will cause audio glitch but maintains sync)
             return 0;
         }
-        
+
         // SAFETY: Single producer, we own the write side
         let left_buf = unsafe { &mut *self.left.get() };
         let right_buf = unsafe { &mut *self.right.get() };
-        
+
         let wp = wc % OUTPUT_RING_SIZE;
         for i in 0..to_write {
             let idx = (wp + i) % OUTPUT_RING_SIZE;
             left_buf[idx] = left[i];
             right_buf[idx] = right[i];
         }
-        
+
         // Update write count with release semantics
         self.write_count.store(wc.wrapping_add(to_write), Ordering::Release);
-        
+
         to_write
     }
 
@@ -777,41 +777,41 @@ impl OutputRingBuffer {
         let frames = left_out.len().min(right_out.len());
         let rc = self.read_count.load(Ordering::Relaxed);
         let wc = self.write_count.load(Ordering::Acquire);
-        
+
         // Available samples = written - read (using wrapping arithmetic)
         let available = wc.wrapping_sub(rc);
-        
+
         // Sanity check: if available > SIZE, something is wrong
         let available = if available > OUTPUT_RING_SIZE {
             0 // Treat as empty
         } else {
             available
         };
-        
+
         let to_read = frames.min(available);
-        
+
         // SAFETY: Single consumer, we own the read side
         let left_buf = unsafe { &*self.left.get() };
         let right_buf = unsafe { &*self.right.get() };
-        
+
         let rp = rc % OUTPUT_RING_SIZE;
         for i in 0..to_read {
             let idx = (rp + i) % OUTPUT_RING_SIZE;
             left_out[i] = left_buf[idx];
             right_out[i] = right_buf[idx];
         }
-        
+
         // Zero-fill if not enough data (underrun)
         for i in to_read..frames {
             left_out[i] = 0.0;
             right_out[i] = 0.0;
         }
-        
+
         // Update read count
         if to_read > 0 {
             self.read_count.store(rc.wrapping_add(to_read), Ordering::Release);
         }
-        
+
         to_read
     }
 
@@ -822,19 +822,19 @@ impl OutputRingBuffer {
         let available = wc.wrapping_sub(rc);
         if available > OUTPUT_RING_SIZE { 0 } else { available }
     }
-    
+
     /// Get available space for writing (free slots in buffer)
     pub fn available_write(&self) -> usize {
         let wc = self.write_count.load(Ordering::Relaxed);
         let rc = self.read_count.load(Ordering::Acquire);
         let buffered = wc.wrapping_sub(rc);
-        if buffered > OUTPUT_RING_SIZE { 
+        if buffered > OUTPUT_RING_SIZE {
             OUTPUT_RING_SIZE - 1 // Treat as empty
         } else {
             (OUTPUT_RING_SIZE - 1).saturating_sub(buffered)
         }
     }
-    
+
     /// Get current counters for debugging
     pub fn positions(&self) -> (usize, usize) {
         (self.write_count.load(Ordering::Relaxed), self.read_count.load(Ordering::Relaxed))
@@ -904,16 +904,17 @@ pub fn read_output_ring(device_hash: u64, pair_idx: usize, left: &mut [f32], rig
     if let Some(ring) = buffers.get(device_hash, pair_idx) {
         let available_before = ring.available_read();
         let read = ring.read(left, right);
-        let requested = left.len().min(right.len());
-        
-        // Log underruns (when we can't provide enough data)
-        static LOG_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let count = LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if count % 500 == 0 || (read < requested && read > 0) {
-            println!("[OutputRing] READ dev={:x} pair={} req={} buffered={} read={}",
-                device_hash, pair_idx, requested, available_before, read);
-        }
-        
+        let _requested = left.len().min(right.len());
+
+        // Debug logging disabled for performance
+        // static LOG_COUNTER: AtomicU64 = AtomicU64::new(0);
+        // let count = LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // if count % 500 == 0 || (read < requested && read > 0) {
+        //     println!("[OutputRing] READ dev={:x} pair={} req={} buffered={} read={}",
+        //         device_hash, pair_idx, requested, available_before, read);
+        // }
+        let _ = available_before; // suppress warning
+
         read
     } else {
         // No buffer yet, fill with zeros
@@ -927,7 +928,7 @@ pub fn read_output_ring(device_hash: u64, pair_idx: usize, left: &mut [f32], rig
 static PROCESSING_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Processing thread running flag (DEPRECATED - used by old processing thread)
-static PROCESSING_RUNNING: std::sync::atomic::AtomicBool = 
+static PROCESSING_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 // ============================================================================
@@ -992,7 +993,7 @@ impl SharedOutputBuffers {
         if hash8 >= 256 || pair_idx >= MAX_OUTPUT_PAIRS {
             return;
         }
-        
+
         let entry = unsafe { &mut *self.entries[hash8 as usize][pair_idx].get() };
         let frames = left.len().min(right.len()).min(MAX_FRAMES);
         entry.left[..frames].copy_from_slice(&left[..frames]);
@@ -1017,18 +1018,18 @@ impl SharedOutputBuffers {
         if hash8 >= 256 || pair_idx >= MAX_OUTPUT_PAIRS {
             return None;
         }
-        
+
         // Check if data is ready
         let published = self.cycle_id.load(Ordering::Acquire);
         if published < expected_cycle {
             return None; // Data not ready yet
         }
-        
+
         let entry = unsafe { &*self.entries[hash8 as usize][pair_idx].get() };
         if entry.valid_frames == 0 {
             return None;
         }
-        
+
         Some((&entry.left[..entry.valid_frames], &entry.right[..entry.valid_frames], entry.valid_frames))
     }
 }
@@ -1066,7 +1067,7 @@ static CURRENT_CYCLE: AtomicU64 = AtomicU64::new(0);
 /// Try to become the leader for this processing cycle.
 /// Returns Some(cycle_id) if this callback should process the graph (leader),
 /// Returns None if another callback is already processing (follower).
-/// 
+///
 /// Uses CAS (Compare-And-Swap) for lock-free race resolution.
 #[inline]
 pub fn try_start_processing() -> Option<u64> {
@@ -1109,42 +1110,42 @@ pub fn get_current_cycle() -> u64 {
 
 /// Wait for processing to complete (for followers).
 /// Returns true if processing completed within timeout, false if timed out.
-/// 
+///
 /// Uses spin-wait with exponential backoff to minimize latency while avoiding CPU waste.
 #[inline]
 pub fn wait_for_processing(expected_cycle: u64, max_spins: u32) -> bool {
     let mut spins = 0u32;
-    
+
     while spins < max_spins {
         // Check if the expected cycle (or later) has completed
         let completed = get_last_completed_cycle();
         if completed >= expected_cycle {
             return true;
         }
-        
+
         // Check if no one is processing (leader might have bailed)
         if !PROCESSING_IN_PROGRESS.load(Ordering::Acquire) {
             // No leader active, we might become the leader on next try
             return false;
         }
-        
+
         // Spin-wait with hint
         std::hint::spin_loop();
         spins += 1;
-        
+
         // After 1000 spins, yield to OS
         if spins % 1000 == 0 {
             std::thread::yield_now();
         }
     }
-    
+
     false // Timed out
 }
 
 /// Start the audio processing thread
 pub fn start_processing_thread() {
     use std::sync::atomic::Ordering;
-    
+
     if PROCESSING_RUNNING.swap(true, Ordering::SeqCst) {
         // Already running
         return;
@@ -1152,32 +1153,32 @@ pub fn start_processing_thread() {
 
     std::thread::spawn(move || {
         println!("[Mixer] Processing thread started");
-        
+
         // Base processing parameters
         let base_interval = std::time::Duration::from_micros(2000); // ~2ms base
         let base_frames = 512usize;
         let min_buffer_target = 2048usize; // Target minimum samples in buffer
         let max_frames_per_tick = 2048usize; // Max frames to process at once
-        
+
         let mut frames_per_tick = base_frames;
         let mut interval = base_interval;
 
         while PROCESSING_RUNNING.load(Ordering::Relaxed) {
             let start = std::time::Instant::now();
-            
+
             // Increment sample counter
             let sample_counter = PROCESSING_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-            
+
             // Get mixer state
             let mixer_state = get_mixer_state();
             let snapshot = mixer_state.load_snapshot();
             let graph = &snapshot.audio_graph;
-            
+
             if graph.processing_order.is_empty() {
                 std::thread::sleep(interval);
                 continue;
             }
-            
+
             // Get processor
             let processor_arc = get_graph_processor();
             let mut processor = match processor_arc.try_write() {
@@ -1187,7 +1188,7 @@ pub fn start_processing_thread() {
                     continue;
                 }
             };
-            
+
             // Define input reader
             let read_input = |device_id: u32, pair_idx: u8, left: &mut [f32], right: &mut [f32]| -> usize {
                 // Read from the primary output device's perspective (device 0 = any)
@@ -1198,7 +1199,7 @@ pub fn start_processing_thread() {
                     right,
                 )
             };
-            
+
             // Define plugin processor
             let au_manager = crate::audio_unit::get_au_manager();
             let buses = &graph.buses;
@@ -1214,7 +1215,7 @@ pub fn start_processing_thread() {
                     }
                 }
             };
-            
+
             // Process the graph
             processor.process(
                 graph,
@@ -1223,42 +1224,39 @@ pub fn start_processing_thread() {
                 read_input,
                 process_plugins,
             );
-            
+
             // Write output node buffers to ring buffers
             let mut min_available = usize::MAX;
             {
                 let ring_buffers = OUTPUT_RING_BUFFERS.read();
-                
+
                 for &node_id in graph.processing_order.iter() {
                     if node_id.is_output() {
                         if let Some(buf) = processor.get_buffer(node_id) {
                             if buf.valid_frames == 0 {
                                 continue;
                             }
-                            
+
                             // Extract device hash from node_id
                             // NodeId format for output: 0x2000 | (hash8 << 4) | pair4
                             let hash8 = ((node_id.0 >> 4) & 0xFF) as u64;
                             let pair_idx = (node_id.0 & 0x0F) as usize;
-                            
+
                             // Write to ring buffer (get() since write is &self now)
                             if let Some(ring) = ring_buffers.get(hash8, pair_idx) {
-                                let (wp_before, rp_before) = ring.positions();
+                                let (_wp_before, _rp_before) = ring.positions();
                                 let written = ring.write(&buf.left[..buf.valid_frames], &buf.right[..buf.valid_frames]);
-                                let (wp_after, rp_after) = ring.positions();
+                                let (_wp_after, _rp_after) = ring.positions();
                                 let buffered = ring.available_read();
                                 min_available = min_available.min(buffered);
-                                if sample_counter % 500 == 0 || written == 0 {
-                                    println!("[OutputRing] WRITE dev={:x} pair={} frames={} written={} buffered={} wp:{}->{} rp:{}->{}",
-                                        hash8, pair_idx, buf.valid_frames, written, buffered, 
-                                        wp_before, wp_after, rp_before, rp_after);
-                                }
+                                // Debug logging disabled for performance
+                                let _ = written;
                             }
                         }
                     }
                 }
             }
-            
+
             // Dynamic adjustment: if buffers are running low, process more frames next time
             if min_available < usize::MAX {
                 if min_available < min_buffer_target / 2 {
@@ -1274,7 +1272,7 @@ pub fn start_processing_thread() {
                     interval = base_interval;
                 }
             }
-            
+
             // Also update bus metering
             for (bus_idx, bus) in graph.buses.iter().enumerate() {
                 if bus.muted {
@@ -1292,14 +1290,14 @@ pub fn start_processing_thread() {
                     }
                 }
             }
-            
+
             // Sleep for remaining time
             let elapsed = start.elapsed();
             if elapsed < interval {
                 std::thread::sleep(interval - elapsed);
             }
         }
-        
+
         println!("[Mixer] Processing thread stopped");
     });
 }
@@ -2283,6 +2281,18 @@ impl BusSendsArray {
         self.version.fetch_add(1, Ordering::Release);
     }
 
+    /// Clear all sends (but keep buses)
+    pub fn clear_all_sends(&self) {
+        let mut sends = self.sends.write();
+        sends.clear();
+
+        // Recompute processing order
+        let buses = self.buses.read();
+        self.compute_processing_order(&sends, buses.len());
+
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
     /// Get all buses
     pub fn get_buses(&self) -> Vec<Bus> {
         self.buses.read().clone()
@@ -2646,6 +2656,17 @@ impl MixerState {
         self.rebuild_compact_sends();
     }
 
+    /// Clear all sends (used when switching output devices)
+    pub fn clear_all_sends(&self) {
+        {
+            let mut sends = self.sends.write();
+            sends.clear();
+        }
+        // Also clear bus sends to output
+        self.bus_sends.clear_all_sends();
+        self.rebuild_compact_sends();
+    }
+
     /// Set source fader level (0-100 -> 0.0-1.0)
     pub fn set_source_fader(&self, pair_index: usize, level: f32) {
         if pair_index < PRISM_CHANNELS / 2 {
@@ -2706,6 +2727,24 @@ impl MixerState {
     /// levels: vector of ChannelLevels for this stereo pair
     pub fn update_output_levels(&self, device_key: &str, levels: Vec<ChannelLevels>) {
         self.output_levels.write().insert(device_key.to_string(), levels);
+    }
+
+    /// Non-blocking update of output levels for audio callback
+    /// Skips update if lock is contended to avoid blocking the audio thread
+    pub fn try_update_output_levels(&self, device_key: &str, level: ChannelLevels) {
+        if let Some(mut guard) = self.output_levels.try_write() {
+            // Reuse existing Vec if possible to avoid allocation
+            if let Some(existing) = guard.get_mut(device_key) {
+                if existing.is_empty() {
+                    existing.push(level);
+                } else {
+                    existing[0] = level;
+                }
+            } else {
+                guard.insert(device_key.to_string(), vec![level]);
+            }
+        }
+        // If lock is contended, skip this update (non-blocking for audio thread)
     }
 
     // ========== Bus Operations ==========
@@ -2772,9 +2811,6 @@ impl MixerState {
 
     /// Add or update a bus send (Input/Bus -> Bus/Output)
     pub fn set_bus_send(&self, send: BusSend) {
-        println!("[Mixer] Bus send: {:?} {} ch{} -> {:?} {} ch{} level={}",
-            send.source_type, send.source_id, send.source_channel,
-            send.target_type, send.target_id, send.target_channel, send.level);
         self.bus_sends.set_bus_send(send);
         self.rebuild_snapshot();
     }

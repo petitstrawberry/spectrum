@@ -1097,15 +1097,8 @@ impl AudioUnitInstance {
                 let src = (*block).input_buffer;
                 if input_data.is_null() || src.is_null() { return 0; }
 
-                // DEBUG: Log what format AU is requesting
-                static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if count < 5 {
-                    let dst_count = (*input_data).mNumberBuffers;
-                    let dst_buf0 = &(*input_data).mBuffers[0];
-                    println!("[AU pullInput] dst buffers={}, ch0.channels={}, ch0.bytes={}, frames={}",
-                        dst_count, dst_buf0.mNumberChannels, dst_buf0.mDataByteSize, frame_count);
-                }
+                // DEBUG logging disabled for performance
+                // static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = ...;
 
                 let bytes = (frame_count * 4) as usize;
 
@@ -1193,28 +1186,11 @@ impl AudioUnitInstance {
             let output_list = &*output_buffer_list_ptr;
             let frames_usize = frames as usize;
             
-            // Get buffer info for debug
+            // Get buffer info (debug logging disabled)
             let buf0 = &output_list.mBuffers[0];
             let buf1_ptr = (output_list.mBuffers.as_ptr()).add(1);
             let buf1 = &*buf1_ptr;
-            
-            if out_count < 5 {
-                let ptr_changed_l = buf0.mData != orig_left_ptr as *mut c_void;
-                let ptr_changed_r = buf1.mData != orig_right_ptr as *mut c_void;
-                println!("[AU output] buffers={}, L.ptr_changed={}, R.ptr_changed={}, L.bytes={}, R.bytes={}",
-                    output_list.mNumberBuffers, ptr_changed_l, ptr_changed_r, 
-                    buf0.mDataByteSize, buf1.mDataByteSize);
-                
-                // Check first few samples
-                if !buf0.mData.is_null() {
-                    let samples = std::slice::from_raw_parts(buf0.mData as *const f32, 4.min(frames_usize));
-                    println!("[AU output] L samples: {:?}", samples);
-                }
-                if !buf1.mData.is_null() {
-                    let samples = std::slice::from_raw_parts(buf1.mData as *const f32, 4.min(frames_usize));
-                    println!("[AU output] R samples: {:?}", samples);
-                }
-            }
+            let _ = out_count; // suppress warning
             
             // Left channel
             if output_list.mNumberBuffers >= 1 {

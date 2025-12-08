@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Find Prism device ID
 pub fn find_prism_device() -> Option<u32> {
     let device_ids = get_audio_device_ids().ok()?;
-    
+
     for id in device_ids {
         if let Ok(name) = get_device_name(id) {
             if name.to_lowercase().contains("prism") {
@@ -78,14 +78,14 @@ pub fn get_channel_count(device_id: u32, is_input: bool) -> u32 {
 
     let buffer_list = unsafe { &*(buffer.as_ptr() as *const AudioBufferList) };
     let num_buffers = buffer_list.mNumberBuffers;
-    
+
     if num_buffers == 0 {
         return 0;
     }
 
     let mut total_channels = 0u32;
     let buffers_ptr: *const AudioBuffer = &buffer_list.mBuffers as *const _;
-    
+
     for i in 0..num_buffers {
         let audio_buffer = unsafe { &*buffers_ptr.add(i as usize) };
         total_channels += audio_buffer.mNumberChannels;
@@ -104,10 +104,30 @@ pub fn is_prism_available() -> bool {
 pub fn get_output_levels(device_id: &str) -> Vec<(f32, f32, f32, f32)> {
     let mixer_state = get_mixer_state();
     let levels = mixer_state.get_output_levels(device_id);
-    
+
     levels.iter()
         .map(|l| (l.left_rms, l.right_rms, l.left_peak, l.right_peak))
         .collect()
+}
+
+/// Get output levels for multiple devices in a single call (batch API)
+/// device_ids is a list of device keys like "deviceId_pairIdx"
+/// Returns a HashMap of device_id -> Vec of (left_rms, right_rms, left_peak, right_peak)
+pub fn get_output_levels_batch(device_ids: &[String]) -> std::collections::HashMap<String, Vec<(f32, f32, f32, f32)>> {
+    let mixer_state = get_mixer_state();
+    let mut result = std::collections::HashMap::new();
+
+    for device_id in device_ids {
+        let levels = mixer_state.get_output_levels(device_id);
+        result.insert(
+            device_id.clone(),
+            levels.iter()
+                .map(|l| (l.left_rms, l.right_rms, l.left_peak, l.right_peak))
+                .collect()
+        );
+    }
+
+    result
 }
 
 /// Convert fader position (0-100) to dB (-∞ to +6)
@@ -120,7 +140,7 @@ fn fader_to_db(fader_value: f32) -> f32 {
     if fader_value >= 100.0 {
         return 6.0;
     }
-    
+
     if fader_value >= 83.0 {
         // 83-100 maps to 0dB to +6dB
         ((fader_value - 83.0) / 17.0) * 6.0
@@ -163,7 +183,7 @@ pub fn update_send(
     // Convert fader position (0-100) to linear gain via dB
     let db = fader_to_db(level);
     let linear_gain = db_to_linear(db);
-    
+
     mixer_state.set_send(crate::mixer::Send {
         source_device,
         source_channel,
@@ -178,6 +198,12 @@ pub fn update_send(
 pub fn remove_send(source_device: u32, source_channel: u32, target_device: &str, target_channel: u32) {
     let mixer_state = get_mixer_state();
     mixer_state.remove_send(source_device, source_channel, target_device, target_channel);
+}
+
+/// Clear all mixer sends (used when switching output devices)
+pub fn clear_all_sends() {
+    let mixer_state = get_mixer_state();
+    mixer_state.clear_all_sends();
 }
 
 /// Set source fader level (0-100)
@@ -203,14 +229,14 @@ pub fn set_output_fader(device_id: &str, level: f32) {
 pub fn simulate_levels() {
     let mixer_state = get_mixer_state();
     let mut input_levels = mixer_state.input_levels.write();
-    
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as f32;
-    
+
     let stereo_pairs = PRISM_CHANNELS / 2;
-    
+
     // DEBUG: Always max level (RMS = 1.0 = 0dBFS) for testing meter display
     for i in 0..stereo_pairs {
         input_levels[i].left_rms = 1.0;

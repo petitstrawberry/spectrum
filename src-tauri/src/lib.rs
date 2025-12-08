@@ -64,7 +64,30 @@ pub struct LevelData {
     pub right_peak: f32,
 }
 
-/// All levels response
+/// Bus level data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusLevelData {
+    pub id: String,
+    pub left_rms: f32,
+    pub right_rms: f32,
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
+
+/// All levels response - combined response for all level types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllLevelsData {
+    /// Prism input levels (32 stereo pairs)
+    pub prism: Vec<LevelData>,
+    /// Input device levels: device_id -> Vec<LevelData>
+    pub devices: HashMap<String, Vec<LevelData>>,
+    /// Bus levels
+    pub buses: Vec<BusLevelData>,
+    /// Output device levels: device_key -> Vec<LevelData>
+    pub outputs: HashMap<String, Vec<LevelData>>,
+}
+
+/// All levels response (legacy)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllLevels {
     pub input: Vec<LevelData>,
@@ -168,6 +191,107 @@ fn get_output_device_levels(device_id: String) -> Vec<LevelData> {
         .collect()
 }
 
+/// Get output levels for multiple devices in a single call (batch API)
+#[tauri::command]
+fn get_output_device_levels_batch(device_ids: Vec<String>) -> std::collections::HashMap<String, Vec<LevelData>> {
+    router::get_output_levels_batch(&device_ids)
+        .into_iter()
+        .map(|(device_id, levels)| {
+            (device_id, levels.into_iter()
+                .map(|(left_rms, right_rms, left_peak, right_peak)| LevelData {
+                    left_rms,
+                    right_rms,
+                    left_peak,
+                    right_peak,
+                })
+                .collect())
+        })
+        .collect()
+}
+
+/// Get all levels in a single IPC call (optimized for high-frequency polling)
+/// This reduces IPC overhead by returning all level data at once
+#[tauri::command]
+fn get_all_levels(device_ids: Vec<String>, output_keys: Vec<String>) -> AllLevelsData {
+    let mixer_state = mixer::get_mixer_state();
+    
+    // 1. Prism input levels
+    let prism = if audio_capture::is_capture_running() {
+        audio_capture::get_capture_levels()
+            .into_iter()
+            .map(|l| LevelData {
+                left_rms: l.left_rms,
+                right_rms: l.right_rms,
+                left_peak: l.left_peak,
+                right_peak: l.right_peak,
+            })
+            .collect()
+    } else {
+        mixer_state.get_input_levels()
+            .iter()
+            .map(|l| LevelData {
+                left_rms: l.left_rms,
+                right_rms: l.right_rms,
+                left_peak: l.left_peak,
+                right_peak: l.right_peak,
+            })
+            .collect()
+    };
+    
+    // 2. Input device levels
+    let mut devices = HashMap::new();
+    for device_id_str in device_ids {
+        if let Ok(device_id) = device_id_str.parse::<u32>() {
+            let levels = audio_capture::get_input_device_levels(device_id);
+            if !levels.is_empty() {
+                devices.insert(device_id_str, levels.into_iter()
+                    .map(|l| LevelData {
+                        left_rms: l.left_rms,
+                        right_rms: l.right_rms,
+                        left_peak: l.left_peak,
+                        right_peak: l.right_peak,
+                    })
+                    .collect());
+            }
+        }
+    }
+    
+    // 3. Bus levels
+    let buses = mixer_state.get_bus_levels()
+        .into_iter()
+        .map(|(id, levels)| BusLevelData {
+            id,
+            left_rms: levels.left_rms,
+            right_rms: levels.right_rms,
+            left_peak: levels.left_peak,
+            right_peak: levels.right_peak,
+        })
+        .collect();
+    
+    // 4. Output levels
+    let mut outputs = HashMap::new();
+    for key in output_keys {
+        let levels = mixer_state.get_output_levels(&key);
+        if !levels.is_empty() {
+            outputs.insert(key, levels.into_iter()
+                .map(|l| LevelData {
+                    left_rms: l.left_rms,
+                    right_rms: l.right_rms,
+                    left_peak: l.left_peak,
+                    right_peak: l.right_peak,
+                })
+                .collect());
+        }
+    }
+    
+    AllLevelsData {
+        prism,
+        devices,
+        buses,
+        outputs,
+    }
+}
+
 /// Update a send connection
 /// Update a send connection (1ch unit)
 #[tauri::command]
@@ -186,6 +310,12 @@ fn update_mixer_send(
 #[tauri::command]
 fn remove_mixer_send(source_device: u32, source_channel: u32, target_device: String, target_channel: u32) {
     router::remove_send(source_device, source_channel, &target_device, target_channel);
+}
+
+/// Clear all mixer sends (used when switching output devices)
+#[tauri::command]
+fn clear_all_mixer_sends() {
+    router::clear_all_sends();
 }
 
 /// Set source channel fader (0-100)
@@ -1085,11 +1215,6 @@ pub fn run() {
             audio_capture::set_io_buffer_size(saved_buffer_size);
             println!("[Spectrum] Loaded I/O buffer size from config: {} samples", saved_buffer_size);
 
-            // NOTE: Processing thread is no longer used - Dynamic Leader pattern is now active
-            // The first device callback to arrive processes the entire audio graph
-            // mixer::start_processing_thread();
-            println!("[Spectrum] Using Dynamic Leader pattern for audio processing");
-
             // Try to start audio capture on app launch
             match audio_capture::start_capture() {
                 Ok(true) => {
@@ -1121,8 +1246,11 @@ pub fn run() {
             // Mixer/Router commands
             get_input_levels,
             get_output_device_levels,
+            get_output_device_levels_batch,
+            get_all_levels,
             update_mixer_send,
             remove_mixer_send,
+            clear_all_mixer_sends,
             set_source_volume,
             set_source_mute,
             set_output_volume,

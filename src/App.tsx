@@ -28,7 +28,6 @@ import {
   getPrismApps,
   getDriverStatus,
   getAudioDevices,
-  getInputLevels,
   updateMixerSend,
   removeMixerSend,
   setOutputVolume,
@@ -41,9 +40,7 @@ import {
   startInputCapture,
   stopInputCapture,
   getActiveInputCaptures,
-  getInputDeviceLevels,
-  getOutputDeviceLevels,
-  getBusLevels,
+  getAllLevels,
   reserveBusId,
   openPrismApp,
   startAudioOutput,
@@ -1120,38 +1117,63 @@ export default function App() {
     }
   };
 
-  // High-frequency level meter polling (~30fps)
+  // High-frequency level meter polling - Optimized: single IPC call at 30fps
   useEffect(() => {
     let animationFrame: number;
     let lastTime = 0;
-    let errorCount = 0;
 
     const updateLevels = async (currentTime: number) => {
       // Throttle to ~30fps (33ms interval)
       if (currentTime - lastTime >= 33) {
         try {
-          // 1. Get Prism levels (always)
-          const prismLevels = await getInputLevels();
-          if (prismLevels && prismLevels.length > 0) {
-            setInputLevels(prismLevels);
-          }
-
-          // 2. Get levels for all active device captures (non-Prism)
+          // Collect device IDs to query (convert to string for IPC)
           const activeDeviceIds = activeCaptures
             .filter(c => !c.is_prism)
-            .map(c => c.device_id);
+            .map(c => String(c.device_id));
 
-          if (activeDeviceIds.length > 0) {
-            const levelPromises = activeDeviceIds.map(async (deviceId) => {
-              const levels = await getInputDeviceLevels(deviceId);
-              return { deviceId, levels };
-            });
+          // Collect output keys from target nodes on canvas
+          const outputKeys: string[] = [];
+          const targetNodes = nodes.filter(n => n.type === 'target');
+          const deviceKeySet = new Set<string>();
+          for (const node of targetNodes) {
+            const voutMatch = node.libraryId?.match(/^vout_(\d+)_(\d+)$/);
+            if (voutMatch) {
+              const pairIdx = Math.floor(parseInt(voutMatch[2]) / 2);
+              const key = `${voutMatch[1]}_${pairIdx}`;
+              if (!deviceKeySet.has(key)) {
+                deviceKeySet.add(key);
+                outputKeys.push(key);
+              }
+            }
+          }
 
-            const results = await Promise.all(levelPromises);
+          // Single IPC call for ALL levels
+          const allLevels = await getAllLevels(activeDeviceIds, outputKeys);
+
+          // Update Prism levels
+          if (allLevels.prism && allLevels.prism.length > 0) {
+            setInputLevels(allLevels.prism);
+          }
+
+          // Update device levels (only if changed)
+          if (Object.keys(allLevels.devices).length > 0) {
             setDeviceLevelsMap(prev => {
-              const newMap = new Map(prev);
-              for (const { deviceId, levels } of results) {
+              let changed = false;
+              for (const [deviceIdStr, levels] of Object.entries(allLevels.devices)) {
                 if (levels && levels.length > 0) {
+                  const deviceId = parseInt(deviceIdStr, 10);
+                  const existing = prev.get(deviceId);
+                  if (!existing || JSON.stringify(existing) !== JSON.stringify(levels)) {
+                    changed = true;
+                    break;
+                  }
+                }
+              }
+              if (!changed) return prev;
+              const newMap = new Map(prev);
+              for (const [deviceIdStr, levels] of Object.entries(allLevels.devices)) {
+                if (levels && levels.length > 0) {
+                  const deviceId = parseInt(deviceIdStr, 10);
                   newMap.set(deviceId, levels);
                 }
               }
@@ -1159,62 +1181,51 @@ export default function App() {
             });
           }
 
-          // 3. Get bus levels
-          try {
-            const busLevels = await getBusLevels();
-            if (busLevels && busLevels.length > 0) {
-              setBusLevelsMap(prev => {
-                const m = new Map(prev);
-                for (const bl of busLevels) {
-                  m.set(bl.id, bl);
+          // Update bus levels (only if changed)
+          if (allLevels.buses && allLevels.buses.length > 0) {
+            setBusLevelsMap(prev => {
+              let changed = false;
+              for (const bl of allLevels.buses) {
+                const existing = prev.get(bl.id);
+                if (!existing || existing.left_rms !== bl.left_rms || existing.right_rms !== bl.right_rms) {
+                  changed = true;
+                  break;
                 }
-                return m;
-              });
-            }
-          } catch (err) {
-            // ignore bus level fetch errors
+              }
+              if (!changed) return prev;
+              const m = new Map(prev);
+              for (const bl of allLevels.buses) {
+                m.set(bl.id, bl);
+              }
+              return m;
+            });
           }
 
-          // 4. Get output levels for selected output device
-          if (selectedOutputDeviceId) {
-            try {
-              // Find the output device from audioDevices
-              const outputDev = audioDevices.find(d => d.id === selectedOutputDeviceId);
-              if (outputDev) {
-                // Calculate how many stereo pairs to fetch
-                const totalChannels = outputDev.output_channels;
-                const numPairs = Math.ceil(totalChannels / 2);
-                const deviceId = outputDev.id;
-
-                // Fetch levels for each pair
-                const outputLevelPromises = [];
-                for (let pairIdx = 0; pairIdx < numPairs; pairIdx++) {
-                  const deviceKey = `${deviceId}_${pairIdx}`;
-                  outputLevelPromises.push(
-                    getOutputDeviceLevels(deviceKey).then(levels => ({ deviceKey, levels }))
-                  );
-                }
-
-                const results = await Promise.all(outputLevelPromises);
-                setOutputLevelsMap(prev => {
-                  const newMap = new Map(prev);
-                  for (const { deviceKey, levels } of results) {
-                    if (levels && levels.length > 0) {
-                      newMap.set(deviceKey, levels);
-                    }
+          // Update output levels (only if changed)
+          if (Object.keys(allLevels.outputs).length > 0) {
+            setOutputLevelsMap(prev => {
+              let changed = false;
+              for (const [deviceKey, levels] of Object.entries(allLevels.outputs)) {
+                if (levels && levels.length > 0) {
+                  const existing = prev.get(deviceKey);
+                  if (!existing || JSON.stringify(existing) !== JSON.stringify(levels)) {
+                    changed = true;
+                    break;
                   }
-                  return newMap;
-                });
+                }
               }
-            } catch (err) {
-              // ignore output level fetch errors
-            }
+              if (!changed) return prev;
+              const newMap = new Map(prev);
+              for (const [deviceKey, levels] of Object.entries(allLevels.outputs)) {
+                if (levels && levels.length > 0) {
+                  newMap.set(deviceKey, levels);
+                }
+              }
+              return newMap;
+            });
           }
         } catch (error) {
-          errorCount++;
-          if (errorCount <= 3) {
-            console.error('Level fetch error:', error);
-          }
+          // ignore
         }
         lastTime = currentTime;
       }
@@ -1223,7 +1234,7 @@ export default function App() {
 
     animationFrame = requestAnimationFrame(updateLevels);
     return () => cancelAnimationFrame(animationFrame);
-  }, [activeCaptures, selectedOutputDeviceId, audioDevices]);
+  }, [activeCaptures, nodes]);
 
   // Channel-based source type for UI (32 stereo pairs = 64 channels)
   type ChannelSource = {
@@ -1379,6 +1390,47 @@ export default function App() {
       channelOffset: 0,
     }];
   }, [selectedOutputDevice, audioDevices]);
+
+  // Track previous output device to handle device changes
+  const prevOutputDeviceIdRef = useRef<string | null>(null);
+
+  // Handle output device change - stop old device, start new device
+  useEffect(() => {
+    const prevDeviceId = prevOutputDeviceIdRef.current;
+    const newDeviceId = selectedOutputDeviceId;
+
+    // Skip if no change or initial load (handled elsewhere)
+    if (prevDeviceId === newDeviceId) return;
+
+    // Skip during restoration
+    if (!restoredRef.current && prevDeviceId === null) {
+      prevOutputDeviceIdRef.current = newDeviceId;
+      return;
+    }
+
+    console.log(`[Spectrum] Output device changed: ${prevDeviceId} -> ${newDeviceId}`);
+
+    // Stop output on old device
+    if (prevDeviceId) {
+      const prevDeviceNum = parseInt(prevDeviceId);
+      if (!isNaN(prevDeviceNum)) {
+        stopAudioOutput(prevDeviceNum).catch(console.error);
+      }
+    }
+
+    // Start output on new device if available
+    if (newDeviceId) {
+      const newDeviceNum = parseInt(newDeviceId);
+      if (!isNaN(newDeviceNum)) {
+        startAudioOutput(newDeviceNum).catch(console.error);
+      }
+    }
+
+    // UI connections remain unchanged - backend will process only valid nodes
+    // (nodes pointing to unavailable channel pairs will simply have no output)
+
+    prevOutputDeviceIdRef.current = newDeviceId;
+  }, [selectedOutputDeviceId]);
 
   // --- Helpers ---
 
@@ -3311,19 +3363,9 @@ export default function App() {
                 </option>
               ))}
             </select>
-            {selectedOutputDevice?.is_aggregate && (
-              <div className="mt-2 text-[9px] text-slate-500">
-                Aggregate device: routing to sub-devices below
-              </div>
-            )}
           </div>
 
-          {/* Output Devices Section (virtual devices from selected device) */}
-          <div className="p-4 border-b border-slate-800 bg-slate-900/50">
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-              <LinkIcon className="w-3 h-3" /> Output Devices
-            </div>
-          </div>
+          {/* Virtual output targets from selected device */}
           <div className="flex-1 overflow-y-auto p-3 space-y-2">
             {!selectedOutputDeviceId ? (
               <div className="text-center py-8 text-slate-600 text-xs">
@@ -3331,13 +3373,11 @@ export default function App() {
               </div>
             ) : outputTargets.length === 0 ? (
               <div className="text-center py-8 text-slate-600 text-xs">
-                No sub-devices available
+                No channels available
               </div>
             ) : outputTargets.map(item => {
               const isUsed = nodes.some(n => n.libraryId === item.id);
               const ItemIcon = item.icon;
-              // Display channels within the virtual device (1-based, like regular devices)
-              // NOT the aggregate channel offset
               const channelDisplay = `${item.channels}ch`;
               return (
                 <div
@@ -3769,7 +3809,7 @@ export default function App() {
                   const busId = node.busId;
                   const busLevel = busId ? busLevelsMap.get(busId) : undefined;
                   if (busLevel) {
-                    // busLevel contains RMS/peak per bus (stereo)
+                    // busLevel contains RMS/peak per bus (stereo) - use peak for consistency
                     leftDb = rmsToDb(busLevel.left_peak);
                     rightDb = rmsToDb(busLevel.right_peak);
                   } else {
@@ -4153,113 +4193,25 @@ export default function App() {
 
              {/* 3. Master Fader (Right) */}
              {focusedTarget && (() => {
-                 // Calculate master levels from connected sources
-                 // In stereo mode, need to consider both L and R channels
-                 const leftCh = focusedPairIndex * 2;
-                 const rightCh = focusedPairIndex * 2 + 1;
-                 const connectedSources = isStereoMode
-                   ? connections.filter(c => c.toNodeId === focusedTarget.id && (c.toChannel === leftCh || c.toChannel === rightCh))
-                   : connections.filter(c => c.toNodeId === focusedTarget.id && c.toChannel === focusedPairIndex);
-                 let masterLeftRms = 0;
-                 let masterRightRms = 0;
+                 // Get master levels from outputLevelsMap (calculated in audio callback)
+                 const targetData = outputTargets.find(t => t.id === focusedTarget.libraryId);
+                 let masterLeftDb = -60;
+                 let masterRightDb = -60;
 
-                 // Track which connections we've processed to avoid double-counting stereo pairs
-                 const processedConnIds = new Set<string>();
-
-                 for (const conn of connectedSources) {
-                   if (conn.muted) continue;
-                   if (processedConnIds.has(conn.id)) continue;
-
-                   const sourceNode = nodes.find(n => n.id === conn.fromNodeId);
-                   if (!sourceNode) continue;
-
-                   // Determine level data based on source type
-                   let levelData: { left_rms: number; right_rms: number; left_peak: number; right_peak: number } | undefined;
-                   const isDeviceSource = sourceNode.sourceType === 'device';
-
-                   if (isDeviceSource && sourceNode.deviceId !== undefined) {
-                     // Device node: use deviceLevelsMap with conn.fromChannel to get the correct pair
-                     const deviceLevels = deviceLevelsMap.get(sourceNode.deviceId);
-                     const pairIdx = Math.floor(conn.fromChannel / 2);
-                     levelData = deviceLevels?.[pairIdx];
-                   } else {
-                     // Prism channel: use inputLevels
-                     const channelOffset = sourceNode.channelOffset ?? 0;
-                     const pairIdx = channelOffset / 2;
-                     levelData = inputLevels[pairIdx];
-                   }
-
-                   if (levelData) {
-                     const sendGain = faderToDb(conn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(conn.sendLevel) / 20);
-
-                     // In stereo mode, determine if this is L or R channel
-                     if (isStereoMode) {
-                       const isLeftChannel = conn.toChannel === leftCh;
-                       const isRightChannel = conn.toChannel === rightCh;
-
-                       // Check for stereo pair or mono-to-stereo
-                       const pairedConn = connectedSources.find(c =>
-                         c.fromNodeId === conn.fromNodeId &&
-                         c.id !== conn.id &&
-                         !processedConnIds.has(c.id)
-                       );
-
-                       if (pairedConn) {
-                         // Mark paired connection as processed
-                         processedConnIds.add(conn.id);
-                         processedConnIds.add(pairedConn.id);
-
-                         const pairedGain = faderToDb(pairedConn.sendLevel) <= -100 ? 0 : Math.pow(10, faderToDb(pairedConn.sendLevel) / 20);
-
-                         // Check if mono-to-stereo (same fromChannel) or true stereo pair
-                         const isMonoToStereo = conn.fromChannel === pairedConn.fromChannel;
-
-                         if (isMonoToStereo) {
-                           // Mono source to stereo output: use same level for both
-                           const monoLevel = levelData.left_peak; // Use left (mono) level
-                           if (isLeftChannel) {
-                             masterLeftRms += Math.pow(monoLevel * sendGain, 2);
-                             masterRightRms += Math.pow(monoLevel * pairedGain, 2);
-                           } else {
-                             masterLeftRms += Math.pow(monoLevel * pairedGain, 2);
-                             masterRightRms += Math.pow(monoLevel * sendGain, 2);
-                           }
-                         } else {
-                           // True stereo pair
-                           if (isLeftChannel) {
-                             masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
-                             masterRightRms += Math.pow(levelData.right_peak * pairedGain, 2);
-                           } else {
-                             masterLeftRms += Math.pow(levelData.left_peak * pairedGain, 2);
-                             masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
-                           }
-                         }
-                       } else {
-                         // Single channel (L only or R only)
-                         processedConnIds.add(conn.id);
-                         if (isLeftChannel) {
-                           masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
-                         } else if (isRightChannel) {
-                           masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
-                         }
-                       }
-                     } else {
-                       // Mono mode: sum both L and R
-                       masterLeftRms += Math.pow(levelData.left_peak * sendGain, 2);
-                       masterRightRms += Math.pow(levelData.right_peak * sendGain, 2);
-                     }
+                 if (targetData) {
+                   // focusedPairIndex is the pair within the sub-device (0 = ch 1-2, 1 = ch 3-4, etc.)
+                   // channelOffset is the offset within the aggregate device
+                   // So the total pair index is: base offset in pairs + selected pair
+                   const basePairIndex = Math.floor(targetData.channelOffset / 2);
+                   const pairIndex = basePairIndex + focusedPairIndex;
+                   const deviceKey = `${targetData.deviceId}_${pairIndex}`;
+                   const levels = outputLevelsMap.get(deviceKey);
+                   if (levels && levels.length > 0) {
+                     const levelData = levels[0];
+                     masterLeftDb = levelData ? rmsToDb(levelData.left_peak) : -60;
+                     masterRightDb = levelData ? rmsToDb(levelData.right_peak) : -60;
                    }
                  }
-
-                 // Apply master volume and convert to dB for meter display
-                 const masterDb = faderToDb(focusedTarget.volume);
-                 const masterGain = masterDb <= -100 ? 0 : Math.pow(10, masterDb / 20);
-                 masterLeftRms = Math.sqrt(masterLeftRms) * masterGain;
-                 masterRightRms = Math.sqrt(masterRightRms) * masterGain;
-
-                 // Convert to dB for meter display
-                 const masterLeftDb = rmsToDb(masterLeftRms);
-                 const masterRightDb = rmsToDb(masterRightRms);
 
                  // Helper to update master volume from dB
                  const updateMasterFromDb = (db: number) => {
