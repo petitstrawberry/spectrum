@@ -1730,7 +1730,7 @@ src-tauri/src/
 
 ### 次のステップ
 
-1. **メータリング完全実装** - リアルタイムレベル計算とポーリングAPI
+1. ~~**メータリング完全実装**~~ ✅ - `processor.process()` で RMS/Peak 計算、Edge post-gain メータリング
 2. **BusNode プラグイン統合** - AudioUnit との連携
 3. **Plugin UI コマンド** - `open_plugin_ui`, `close_plugin_ui` (AudioUnit統合後)
 4. **Frontend更新** - v2 API に対応したUI

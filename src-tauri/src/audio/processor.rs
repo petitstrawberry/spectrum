@@ -186,41 +186,14 @@ impl GraphProcessor {
 
     /// オーディオ処理を実行
     ///
-    /// Called from audio callback. Must be lock-free.
-    /// Note: This uses try_read to avoid blocking in audio callback
+    /// Called from audio callback. Uses write lock for mutable access.
+    /// In realtime-critical scenarios, consider double-buffering.
     pub fn process(&self, frames: usize, read_source_fn: &dyn Fn(&SourceId, &mut [f32])) {
-        // Try to get read access - if locked, skip this callback
-        let Some(graph) = self.graph.try_read() else {
-            return;
+        // Get write access for processing
+        let Some(mut graph) = self.graph.try_write() else {
+            return; // Skip if locked
         };
 
-        // 1. すべてのノードのバッファをクリア
-        // Note: We need mutable access here, which is tricky with read lock
-        // In production, buffers should be separate from the graph structure
-
-        // 2. ソースノードの読み込み
-        for handle in graph.source_nodes() {
-            // Read from source...
-        }
-
-        // 3. トポロジカル順でノードを処理
-        for &handle in graph.processing_order() {
-            // Process node...
-        }
-
-        // 4. メーターを更新
-        self.update_meters_internal(&graph);
-    }
-
-    /// 簡易処理（グラフ直接操作版）
-    ///
-    /// Note: This version takes a mutable graph reference directly.
-    /// Use this when you have exclusive access to the graph (e.g., in single-threaded tests).
-    pub fn process_graph(
-        graph: &mut AudioGraph,
-        frames: usize,
-        read_source_fn: impl Fn(&SourceId, &mut [f32]),
-    ) {
         graph.rebuild_order_if_needed();
 
         // 1. すべてのノードのバッファをクリア
@@ -231,18 +204,31 @@ impl GraphProcessor {
         }
 
         // 2. ソースノードの読み込み
+        use super::source::SourceNode;
         for handle in graph.source_nodes().collect::<Vec<_>>() {
             if let Some(node) = graph.get_node_mut(handle) {
-                // Get source info and read audio
-                // Note: We need to downcast to SourceNode to access source_id
-                // This is a limitation of the trait-based design
-                // In production, use a type-erased approach or store source_id separately
+                // Downcast to get source_id
+                if let Some(source) = node.as_any_mut().downcast_mut::<SourceNode>() {
+                    let source_id = source.source_id().clone();
+                    // Read each output port
+                    for port_idx in 0..source.output_port_count() {
+                        if let Some(buf) = source.output_buffer_mut(PortId::new(port_idx as u8)) {
+                            let samples = buf.samples_mut();
+                            read_source_fn(&source_id, samples);
+                            buf.set_valid_frames(frames);
+                            buf.update_meters();
+                        }
+                    }
+                }
             }
         }
 
         // 3. トポロジカル順でノードを処理
         let processing_order = graph.processing_order().to_vec();
-        let edges = graph.edges().to_vec(); // Clone edges for iteration
+        let edges = graph.edges().to_vec();
+
+        // Collect edge meters during processing
+        let mut edge_meter_data: Vec<(EdgeId, f32)> = Vec::new();
 
         for &handle in &processing_order {
             // 3a. このノードへの入力を集約（エッジからミックス）
@@ -252,25 +238,29 @@ impl GraphProcessor {
                 .cloned()
                 .collect();
 
-            for edge in incoming_edges {
-                // Get source output buffer
-                let source_samples: Vec<f32> = if let Some(source_node) = graph.get_node(edge.source)
-                {
-                    if let Some(buf) = source_node.output_buffer(edge.source_port) {
-                        buf.samples().to_vec()
+            for edge in &incoming_edges {
+                // Get source output buffer samples
+                let (source_samples, source_peak): (Vec<f32>, f32) = 
+                    if let Some(source_node) = graph.get_node(edge.source) {
+                        if let Some(buf) = source_node.output_buffer(edge.source_port) {
+                            (buf.samples().to_vec(), buf.cached_peak())
+                        } else {
+                            continue;
+                        }
                     } else {
                         continue;
-                    }
-                } else {
-                    continue;
-                };
+                    };
 
-                // Mix into target input buffer
+                // Calculate post-gain peak for metering
+                let post_gain_peak = source_peak * edge.gain.abs();
+                edge_meter_data.push((edge.id, post_gain_peak));
+
+                // Mix into target input buffer with gain applied
                 if let Some(target_node) = graph.get_node_mut(handle) {
                     if let Some(tgt_buf) = target_node.input_buffer_mut(edge.target_port) {
-                        // Create temporary buffer for mixing
                         let mut temp = super::buffer::AudioBuffer::new();
                         temp.write_samples(&source_samples);
+                        temp.set_valid_frames(frames);
                         tgt_buf.mix_from(&temp, edge.gain);
                     }
                 }
@@ -281,6 +271,93 @@ impl GraphProcessor {
                 node.process(frames);
             }
         }
+
+        // Store edge meters
+        self.edge_meters.store(Arc::new(edge_meter_data));
+
+        // 4. メーターを更新
+        self.update_meters_internal(&graph);
+    }
+
+    /// 簡易処理（グラフ直接操作版）
+    ///
+    /// Note: This version takes a mutable graph reference directly.
+    /// Use this when you have exclusive access to the graph.
+    pub fn process_graph(
+        graph: &mut AudioGraph,
+        frames: usize,
+        read_source_fn: impl Fn(&SourceId, &mut [f32]),
+    ) -> Vec<(EdgeId, f32)> {
+        graph.rebuild_order_if_needed();
+
+        // 1. すべてのノードのバッファをクリア
+        for handle in graph.processing_order().to_vec() {
+            if let Some(node) = graph.get_node_mut(handle) {
+                node.clear_buffers(frames);
+            }
+        }
+
+        // 2. ソースノードの読み込み
+        use super::source::SourceNode;
+        for handle in graph.source_nodes().collect::<Vec<_>>() {
+            if let Some(node) = graph.get_node_mut(handle) {
+                if let Some(source) = node.as_any_mut().downcast_mut::<SourceNode>() {
+                    let source_id = source.source_id().clone();
+                    for port_idx in 0..source.output_port_count() {
+                        if let Some(buf) = source.output_buffer_mut(PortId::new(port_idx as u8)) {
+                            let samples = buf.samples_mut();
+                            read_source_fn(&source_id, samples);
+                            buf.set_valid_frames(frames);
+                            buf.update_meters();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. トポロジカル順でノードを処理
+        let processing_order = graph.processing_order().to_vec();
+        let edges = graph.edges().to_vec();
+        let mut edge_meter_data: Vec<(EdgeId, f32)> = Vec::new();
+
+        for &handle in &processing_order {
+            let incoming_edges: Vec<_> = edges
+                .iter()
+                .filter(|e| e.target == handle && e.is_active())
+                .cloned()
+                .collect();
+
+            for edge in &incoming_edges {
+                let (source_samples, source_peak): (Vec<f32>, f32) = 
+                    if let Some(source_node) = graph.get_node(edge.source) {
+                        if let Some(buf) = source_node.output_buffer(edge.source_port) {
+                            (buf.samples().to_vec(), buf.cached_peak())
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    };
+
+                let post_gain_peak = source_peak * edge.gain.abs();
+                edge_meter_data.push((edge.id, post_gain_peak));
+
+                if let Some(target_node) = graph.get_node_mut(handle) {
+                    if let Some(tgt_buf) = target_node.input_buffer_mut(edge.target_port) {
+                        let mut temp = super::buffer::AudioBuffer::new();
+                        temp.write_samples(&source_samples);
+                        temp.set_valid_frames(frames);
+                        tgt_buf.mix_from(&temp, edge.gain);
+                    }
+                }
+            }
+
+            if let Some(node) = graph.get_node_mut(handle) {
+                node.process(frames);
+            }
+        }
+
+        edge_meter_data
     }
 
     fn update_meters_internal(&self, graph: &AudioGraph) {

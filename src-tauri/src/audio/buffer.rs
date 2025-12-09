@@ -9,6 +9,8 @@ pub struct AudioBuffer {
     valid_frames: usize,
     /// Cached peak level (updated during process)
     peak: f32,
+    /// Cached RMS level (updated during process)
+    rms: f32,
 }
 
 impl AudioBuffer {
@@ -17,6 +19,7 @@ impl AudioBuffer {
             data: Box::new([0.0; MAX_FRAMES]),
             valid_frames: 0,
             peak: 0.0,
+            rms: 0.0,
         }
     }
 
@@ -26,6 +29,7 @@ impl AudioBuffer {
         VDsp::clear(&mut self.data[..frames]);
         self.valid_frames = frames;
         self.peak = 0.0;
+        self.rms = 0.0;
     }
 
     /// Get the number of valid frames
@@ -83,6 +87,24 @@ impl AudioBuffer {
         self.peak = VDsp::peak(&self.data[..self.valid_frames]);
     }
 
+    /// Get RMS level (updates cache)
+    pub fn rms(&mut self) -> f32 {
+        self.rms = VDsp::rms(&self.data[..self.valid_frames]);
+        self.rms
+    }
+
+    /// Get cached RMS level without recalculating
+    pub fn cached_rms(&self) -> f32 {
+        self.rms
+    }
+
+    /// Update both peak and RMS caches
+    pub fn update_meters(&mut self) {
+        let samples = &self.data[..self.valid_frames];
+        self.peak = VDsp::peak(samples);
+        self.rms = VDsp::rms(samples);
+    }
+
     /// Write raw samples directly into the buffer
     pub fn write_samples(&mut self, samples: &[f32]) {
         let frames = samples.len().min(MAX_FRAMES);
@@ -103,6 +125,7 @@ impl Clone for AudioBuffer {
         new.data.copy_from_slice(&*self.data);
         new.valid_frames = self.valid_frames;
         new.peak = self.peak;
+        new.rms = self.rms;
         new
     }
 }
