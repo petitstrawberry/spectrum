@@ -1,6 +1,6 @@
 /**
  * Spectrum v2 API Client
- * 
+ *
  * Pure Sends-on-Fader architecture API
  */
 
@@ -51,7 +51,7 @@ export interface PrismStatusDto {
 
 // --- Graph Types ---
 
-export type SourceIdDto = 
+export type SourceIdDto =
   | { type: 'prism_channel'; channel: number }
   | { type: 'input_device'; device_id: number; channel: number };
 

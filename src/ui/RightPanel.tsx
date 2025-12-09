@@ -78,19 +78,12 @@ export default function RightPanel({ width, devices }: Props) {
           >
             <option value="">Select output device...</option>
             {outputDevices.map(d => (
-              <option key={d.deviceId} value={d.deviceId}>{d.name} ({d.channelCount}ch)</option>
+              <option key={d.deviceId} value={d.deviceId}>{d.name}{d.isAggregate ? ' (Aggregate)' : ''} ({d.channelCount}ch)</option>
             ))}
           </select>
         </div>
         <div className="mt-2 text-xs text-slate-400">
-          <div>Found {outputDevices.length} output(s)</div>
-          {outputDevices.length > 0 && (
-            <div className="mt-1 text-[11px] text-slate-300">
-              {outputDevices.map(d => (
-                <div key={d.deviceId} className="truncate">- {d.name} ({d.channelCount}ch)</div>
-              ))}
-            </div>
-          )}
+          <div className="mt-1 text-[11px] text-slate-400">Select an output device from the pulldown</div>
         </div>
       </div>
 

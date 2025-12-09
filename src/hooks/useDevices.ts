@@ -33,6 +33,14 @@ export interface OutputDevice {
   subDevices: SubDevice[];
 }
 
+export interface VirtualOutputDevice {
+  id: string; // vout_{deviceId}_{channelOffset}
+  parentDeviceId: number;
+  name: string;
+  channelOffset: number;
+  channels: number;
+}
+
 export interface SubDevice {
   id: string;
   name: string;
@@ -62,7 +70,10 @@ export interface UseDevicesOptions {
 
 export interface UseDevicesReturn {
   inputDevices: InputDevice[];
+  // physical devices (includes aggregate devices)
   outputDevices: OutputDevice[];
+  // virtual devices derived from aggregates (vout_{device}_{offset})
+  virtualOutputDevices: VirtualOutputDevice[];
   prismStatus: PrismStatus;
   isLoading: boolean;
   error: string | null;
@@ -84,6 +95,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
 
   const [inputDevices, setInputDevices] = useState<InputDevice[]>([]);
   const [outputDevices, setOutputDevices] = useState<OutputDevice[]>([]);
+  const [virtualOutputDevices, setVirtualOutputDevices] = useState<VirtualOutputDevice[]>([]);
   const [prismStatus, setPrismStatus] = useState<PrismStatus>({
     connected: false,
     channels: 0,
@@ -111,29 +123,63 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         transportType: d.transport_type,
       })));
 
-      // Normalize output device DTOs from backend which may have different shapes
-      setOutputDevices(outputs.map(d => {
-        const channelCount = (d as any).channel_count ?? (d as any).channelCount ?? 0;
-        const deviceId = (d as any).device_id ?? (d as any).deviceId ?? 0;
-        const name = (d as any).name ?? (d as any).label ?? `Device ${deviceId}`;
-        // sub_devices may be absent; support backend's aggregate-sub representation
-        const subDevicesRaw = (d as any).sub_devices ?? (d as any).subDevices ?? [];
-        const subDevices = Array.isArray(subDevicesRaw) ? subDevicesRaw.map((s: any) => ({
-          id: s.id ?? s.device_id ?? `${deviceId}`,
-          name: s.name ?? s.label ?? 'SubDevice',
-          channelCount: s.channel_count ?? s.channelCount ?? 0,
-        })) : [];
+      // DEBUG: log raw output DTOs to help diagnose naming issues
+      try {
+        // eslint-disable-next-line no-console
+        console.debug('useDevices: raw outputs:', outputs);
+      } catch (e) {}
 
-        return {
-          id: (d as any).id ?? `vout_${deviceId}_0`,
+      // Backend currently returns only virtual entries (id like "vout_{device}_{offset}").
+      // Group virtual entries by parent device_id to synthesize physical device list.
+      const virtuals: VirtualOutputDevice[] = [];
+      const groups = new Map<number, VirtualOutputDevice[]>();
+
+      for (const d of outputs) {
+        const rawId = (d as any).id ?? '';
+        if (typeof rawId === 'string' && rawId.startsWith('vout_')) {
+          const m = rawId.match(/^vout_(\d+)_(\d+)$/);
+          if (!m) continue;
+          const parentId = Number(m[1]);
+          const offset = Number(m[2]);
+          const name = (d as any).name ?? (d as any).label ?? rawId;
+          const channels = (d as any).channel_count ?? (d as any).channelCount ?? (d as any).output_channels ?? 2;
+          const v: VirtualOutputDevice = { id: rawId, parentDeviceId: parentId, name, channelOffset: offset, channels };
+          virtuals.push(v);
+          const arr = groups.get(parentId) ?? [];
+          arr.push(v);
+          groups.set(parentId, arr);
+        }
+      }
+
+      const phys: OutputDevice[] = [];
+      for (const [deviceId, vs] of groups.entries()) {
+        // Prefer the vout with offset 0 for base name and channel count if present
+        const zero = vs.find(x => x.channelOffset === 0);
+        let baseName = zero ? zero.name : vs[0].name;
+        // If baseName includes " (Ch X-Y)", strip it
+        baseName = baseName.replace(/\s*\(Ch\s*\d+-?\d*\)$/, '').trim();
+        const totalChannels = vs.reduce((s, x) => s + x.channels, 0);
+        const isAggregate = vs.length > 1 || vs.some(x => /(aggregate|aggregate_sub)/i.test((x as any).id));
+
+        const subDevices: SubDevice[] = vs.map(v => ({
+          id: v.id,
+          name: v.name,
+          channelCount: v.channels,
+        }));
+
+        phys.push({
+          id: `device_${deviceId}`,
           deviceId,
-          name,
-          channelCount,
-          transportType: (d as any).transport_type ?? (d as any).transportType ?? 'Unknown',
-          isAggregate: !!((d as any).is_aggregate ?? (d as any).is_aggregate_sub ?? (d as any).isAggregate),
+          name: baseName || `Device ${deviceId}`,
+          channelCount: totalChannels,
+          transportType: 'Unknown',
+          isAggregate,
           subDevices,
-        };
-      }));
+        });
+      }
+
+      setOutputDevices(phys);
+      setVirtualOutputDevices(virtuals);
 
       setPrismStatus({
         connected: prism.connected,
@@ -216,6 +262,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   return {
     inputDevices,
     outputDevices,
+    virtualOutputDevices,
     prismStatus,
     isLoading,
     error,
