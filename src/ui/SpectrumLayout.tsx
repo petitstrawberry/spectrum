@@ -129,20 +129,31 @@ interface Connection {
 }
 
 // The visual layout component (previously V1ExactLayout)
-export default function SpectrumLayout() {
-  // For visual parity we keep local state where needed, but all logic
-  // calling backend APIs is preserved in-place as no-ops or safe stubs
-  // to avoid accidental side-effects when rendering the UI-only component.
+import type { UseDevicesReturn } from '../hooks/useDevices';
+
+interface SpectrumLayoutProps {
+  devices: UseDevicesReturn;
+}
+
+export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
+  // For visual parity we keep local state where needed
   const [showSettings, setShowSettings] = useState(false);
   const [showPluginBrowser, setShowPluginBrowser] = useState(false);
   // Minimal placeholders for the big UI to render without wiring
-  const driverStatus: any = { connected: false };
-  const isRefreshing = false;
-  const prismDevice: any = null;
-  const inputSourceMode = 'prism';
-  const selectedInputDevice = null;
-  const channelSources: any[] = [];
-  const otherInputDevices: any[] = [];
+  const isRefreshing = devices?.isLoading ?? false;
+  const [driverStatus, setDriverStatus] = useState<any | null>(null);
+  const prismDevice = devices?.inputDevices?.find((d: any) => d.isPrism) ?? null;
+  const inputSourceMode = devices?.prismStatus?.connected ? 'prism' : 'devices';
+  const selectedInputDevice = prismDevice;
+  const channelSources: any[] = (devices?.prismStatus?.apps || []).map((a: any, i: number) => ({
+    id: `ch_${(a.channelOffset ?? (i * 2))}`,
+    channelOffset: a.channelOffset ?? (i * 2),
+    channelLabel: `${(a.channelOffset ?? (i * 2)) + 1}-${(a.channelOffset ?? (i * 2)) + 2}`,
+    apps: [{ name: a.name, icon: Music, color: 'text-cyan-400', pid: a.pid, clientCount: 1 }],
+    hasApps: !!a.name,
+    isMain: (a.channelOffset ?? (i * 2)) === 0,
+  }));
+  const otherInputDevices: any[] = (devices?.inputDevices || []).filter((d: any) => !d.isPrism);
   const leftSidebarWidth = 300;
   const rightSidebarWidth = 300;
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -168,7 +179,7 @@ export default function SpectrumLayout() {
   const libraryDrag: any = null;
 
   // No-op handlers to satisfy JSX bindings
-  const handleRefresh = () => {};
+  const handleRefresh = async () => { if (devices?.refresh) await devices.refresh(); };
   const handleResizeStart: any = () => {};
   const handleCanvasWheel = () => {};
   const handleCanvasPanStart = () => {};
@@ -179,10 +190,28 @@ export default function SpectrumLayout() {
   const deleteNode = () => {};
   const toggleChannelMode = () => {};
   const handleLibraryMouseDown = () => {};
-  const openPrismApp = async () => {};
+  // Use the real openPrismApp from ../lib/prismd (imported above)
+  // openPrismApp is imported; call it directly where needed
   const reserveBusIdStub = async () => 'bus_1';
   const addBusStub = async () => {};
   const getActiveInputCaptures = async () => [];
+  // Fetch driver status periodically (to mirror v1 behavior)
+  useEffect(() => {
+    let running = true;
+    const poll = async () => {
+      try {
+        const s = await getDriverStatus();
+        if (!running) return;
+        setDriverStatus(s);
+      } catch (e) {
+        console.debug('getDriverStatus failed', e);
+        setDriverStatus({ connected: false, sample_rate: 0, buffer_size: 0 });
+      }
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => { running = false; clearInterval(id); };
+  }, []);
   const setNodes = (fn: any) => {};
   const setPluginBrowserTargetBusId = (id: string | null) => {};
   const setAvailablePlugins = (p: any[]) => {};
@@ -226,7 +255,7 @@ export default function SpectrumLayout() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <LeftSidebar width={leftSidebarWidth} isRefreshing={isRefreshing} inputSourceMode={inputSourceMode} handleRefresh={handleRefresh} />
+        <LeftSidebar width={leftSidebarWidth} isRefreshing={isRefreshing} inputSourceMode={inputSourceMode} handleRefresh={handleRefresh} driverStatus={driverStatus} />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />

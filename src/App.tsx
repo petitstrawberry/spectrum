@@ -453,5 +453,5 @@ export default function App() {
     void setSelectedNodeHandle; void showSettings; void setShowSettings;
   })();
 
-  return <SpectrumLayout />;
+  return <SpectrumLayout devices={devices} />;
 }
