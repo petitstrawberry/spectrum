@@ -1,6 +1,6 @@
 /**
  * useGraph - Graph state management hook for Spectrum v2
- * 
+ *
  * Pure Sends-on-Fader architecture
  */
 
@@ -130,13 +130,13 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
   switch (info.type) {
     case 'source': {
       const sourceType = info.source_id.type === 'prism_channel' ? 'prism' : 'device';
-      const channel = info.source_id.type === 'prism_channel' 
-        ? info.source_id.channel 
+      const channel = info.source_id.type === 'prism_channel'
+        ? info.source_id.channel
         : info.source_id.channel;
-      const deviceId = info.source_id.type === 'input_device' 
-        ? info.source_id.device_id 
+      const deviceId = info.source_id.type === 'input_device'
+        ? info.source_id.device_id
         : undefined;
-      
+
       return {
         handle: info.handle,
         type: 'source',
@@ -155,7 +155,7 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
     case 'bus': {
       const busNum = parseInt(info.bus_id.replace('bus_', ''), 10) || 1;
       const colorIndex = (busNum - 1) % BUS_COLORS.length;
-      
+
       return {
         handle: info.handle,
         type: 'bus',
@@ -219,24 +219,24 @@ export interface UseGraphReturn {
   edges: Map<number, UIEdge>;
   isLoading: boolean;
   error: string | null;
-  
+
   // Node Operations
   addSource: (sourceId: SourceIdDto, label?: string, position?: { x: number; y: number }) => Promise<number>;
   addBus: (label: string, portCount?: number, position?: { x: number; y: number }) => Promise<number>;
   addSink: (sink: OutputSinkDto, label?: string, position?: { x: number; y: number }) => Promise<number>;
   deleteNode: (handle: number) => Promise<void>;
   updateNodePosition: (handle: number, x: number, y: number) => void;
-  
+
   // Edge Operations
   connect: (source: number, sourcePort: number, target: number, targetPort: number, gain?: number) => Promise<number>;
   disconnect: (edgeId: number) => Promise<void>;
   setGain: (edgeId: number, gain: number) => Promise<void>;
   setMuted: (edgeId: number, muted: boolean) => Promise<void>;
-  
+
   // State
   refresh: () => Promise<void>;
   save: () => Promise<void>;
-  
+
   // Helpers
   getNodeByHandle: (handle: number) => UINode | undefined;
   getEdgesForNode: (handle: number) => UIEdge[];
@@ -246,16 +246,16 @@ export interface UseGraphReturn {
 
 export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   const { autoRestore = true } = options;
-  
+
   const [nodes, setNodes] = useState<Map<number, UINode>>(new Map());
   const [edges, setEdges] = useState<Map<number, UIEdge>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   // Position tracking (not synced to backend)
   const positionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const nextPositionRef = useRef({ x: 100, y: 100 });
-  
+
   // Auto-assign position for new nodes
   const getNextPosition = useCallback(() => {
     const pos = { ...nextPositionRef.current };
@@ -266,12 +266,12 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     }
     return pos;
   }, []);
-  
+
   // Refresh graph from backend
   const refresh = useCallback(async () => {
     try {
       const graphDto = await getGraph();
-      
+
       const newNodes = new Map<number, UINode>();
       for (const info of graphDto.nodes) {
         const handle = 'handle' in info ? info.handle : 0;
@@ -282,12 +282,12 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
         }
         newNodes.set(handle, nodeInfoToUINode(info, position));
       }
-      
+
       const newEdges = new Map<number, UIEdge>();
       for (const info of graphDto.edges) {
         newEdges.set(info.id, edgeInfoToUIEdge(info));
       }
-      
+
       setNodes(newNodes);
       setEdges(newEdges);
       setError(null);
@@ -295,7 +295,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       setError(e instanceof Error ? e.message : 'Failed to refresh graph');
     }
   }, [getNextPosition]);
-  
+
   // Initialize
   useEffect(() => {
     const init = async () => {
@@ -316,7 +316,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     };
     init();
   }, [autoRestore, refresh]);
-  
+
   // Node Operations
   const addSource = useCallback(async (
     sourceId: SourceIdDto,
@@ -329,7 +329,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     await refresh();
     return handle;
   }, [getNextPosition, refresh]);
-  
+
   const addBusNode_ = useCallback(async (
     label: string,
     portCount?: number,
@@ -341,7 +341,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     await refresh();
     return handle;
   }, [getNextPosition, refresh]);
-  
+
   const addSinkNode_ = useCallback(async (
     sink: OutputSinkDto,
     label?: string,
@@ -353,13 +353,13 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     await refresh();
     return handle;
   }, [getNextPosition, refresh]);
-  
+
   const deleteNode = useCallback(async (handle: number): Promise<void> => {
     await removeNode(handle);
     positionsRef.current.delete(handle);
     await refresh();
   }, [refresh]);
-  
+
   const updateNodePosition = useCallback((handle: number, x: number, y: number) => {
     positionsRef.current.set(handle, { x, y });
     setNodes(prev => {
@@ -370,7 +370,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       return newNodes;
     });
   }, []);
-  
+
   // Edge Operations
   const connect = useCallback(async (
     source: number,
@@ -383,12 +383,12 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     await refresh();
     return edgeId;
   }, [refresh]);
-  
+
   const disconnect = useCallback(async (edgeId: number): Promise<void> => {
     await removeEdge(edgeId);
     await refresh();
   }, [refresh]);
-  
+
   const setGain_ = useCallback(async (edgeId: number, gain: number): Promise<void> => {
     await setEdgeGain(edgeId, gain);
     // Update local state immediately for responsiveness
@@ -400,7 +400,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       return newEdges;
     });
   }, []);
-  
+
   const setMuted_ = useCallback(async (edgeId: number, muted: boolean): Promise<void> => {
     await setEdgeMuted(edgeId, muted);
     setEdges(prev => {
@@ -411,31 +411,31 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       return newEdges;
     });
   }, []);
-  
+
   // Save
   const save = useCallback(async (): Promise<void> => {
     await persistState();
   }, []);
-  
+
   // Helpers
   const getNodeByHandle = useCallback((handle: number): UINode | undefined => {
     return nodes.get(handle);
   }, [nodes]);
-  
+
   const getEdgesForNode = useCallback((handle: number): UIEdge[] => {
     return Array.from(edges.values()).filter(
       e => e.sourceHandle === handle || e.targetHandle === handle
     );
   }, [edges]);
-  
+
   const getIncomingEdges = useCallback((handle: number): UIEdge[] => {
     return Array.from(edges.values()).filter(e => e.targetHandle === handle);
   }, [edges]);
-  
+
   const getOutgoingEdges = useCallback((handle: number): UIEdge[] => {
     return Array.from(edges.values()).filter(e => e.sourceHandle === handle);
   }, [edges]);
-  
+
   return {
     nodes,
     edges,
