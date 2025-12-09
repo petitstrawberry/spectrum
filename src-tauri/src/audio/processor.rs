@@ -3,9 +3,10 @@
 use super::edge::EdgeId;
 use super::graph::AudioGraph;
 use super::meters::{EdgeMeter, GraphMeters, NodeMeter, PortMeter};
-use super::node::{NodeHandle, NodeType, PortId};
+use super::node::{AudioNode, NodeHandle, NodeType, PortId};
 use super::source::SourceId;
 use arc_swap::ArcSwap;
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -13,8 +14,11 @@ use std::sync::Arc;
 ///
 /// オーディオコールバックから呼び出され、グラフ全体を処理
 pub struct GraphProcessor {
-    /// The audio graph (ArcSwap for lock-free reads from audio thread)
-    graph: Arc<ArcSwap<AudioGraph>>,
+    /// The audio graph (RwLock for synchronized access)
+    /// For realtime-safe processing, we use ArcSwap for reads
+    graph: Arc<RwLock<AudioGraph>>,
+    /// Snapshot for audio thread (lock-free reads)
+    graph_snapshot: Arc<ArcSwap<AudioGraph>>,
     /// Meters (ArcSwap for lock-free reads from UI thread)
     meters: Arc<ArcSwap<GraphMeters>>,
     /// Processing timestamp
@@ -26,73 +30,133 @@ pub struct GraphProcessor {
 impl GraphProcessor {
     /// Create a new graph processor
     pub fn new() -> Self {
+        let graph = AudioGraph::new();
         Self {
-            graph: Arc::new(ArcSwap::from_pointee(AudioGraph::new())),
+            graph: Arc::new(RwLock::new(AudioGraph::new())),
+            graph_snapshot: Arc::new(ArcSwap::from_pointee(graph)),
             meters: Arc::new(ArcSwap::from_pointee(GraphMeters::new())),
             timestamp: AtomicU64::new(0),
             edge_meters: Arc::new(ArcSwap::from_pointee(Vec::new())),
         }
     }
 
-    /// Get a reference to the graph (for non-realtime operations)
+    /// Get a reference to the graph snapshot (for non-realtime operations)
     pub fn graph(&self) -> Arc<AudioGraph> {
-        self.graph.load_full()
+        self.graph_snapshot.load_full()
     }
 
-    /// Get a clone of the current graph for modification
-    pub fn graph_clone(&self) -> AudioGraph {
-        // We need to create a snapshot for modification
-        // This is a workaround since AudioGraph doesn't implement Clone directly
-        // In practice, we should have a separate method to get/set the graph
-        // For now, we'll panic if this is called (should use update_graph instead)
-        panic!("Use update_graph() to modify the graph")
+    /// Add a node to the graph
+    pub fn add_node(&self, node: Box<dyn AudioNode>) -> NodeHandle {
+        let mut graph = self.graph.write();
+        let handle = graph.add_node(node);
+        graph.rebuild_order_if_needed();
+        self.update_snapshot(&graph);
+        handle
     }
 
-    /// Update the graph atomically
-    pub fn update_graph<F>(&self, f: F)
-    where
-        F: FnOnce(&mut AudioGraph),
-    {
-        // Load current graph
-        let current = self.graph.load();
+    /// Remove a node from the graph
+    pub fn remove_node(&self, handle: NodeHandle) -> bool {
+        let mut graph = self.graph.write();
+        let result = graph.remove_node(handle);
+        if result {
+            graph.rebuild_order_if_needed();
+            self.update_snapshot(&graph);
+        }
+        result
+    }
 
-        // Create a new graph with the same state
-        // Note: This requires cloning the graph, which we need to implement
-        // For now, we create a new graph and apply the function
-        let mut new_graph = AudioGraph::new();
+    /// Add an edge to the graph
+    pub fn add_edge(
+        &self,
+        source: NodeHandle,
+        source_port: PortId,
+        target: NodeHandle,
+        target_port: PortId,
+        gain: f32,
+        muted: bool,
+    ) -> Option<EdgeId> {
+        let mut graph = self.graph.write();
+        let edge_id = graph.add_edge_with_params(source, source_port, target, target_port, gain, muted);
+        if edge_id.is_some() {
+            graph.rebuild_order_if_needed();
+            self.update_snapshot(&graph);
+        }
+        edge_id
+    }
 
-        // Copy state (this is a simplified version - in production you'd want proper cloning)
-        // For now, the caller is responsible for rebuilding the graph state
+    /// Remove an edge from the graph
+    pub fn remove_edge(&self, edge_id: EdgeId) -> bool {
+        let mut graph = self.graph.write();
+        let result = graph.remove_edge(edge_id);
+        if result {
+            self.update_snapshot(&graph);
+        }
+        result
+    }
 
-        f(&mut new_graph);
-        new_graph.rebuild_order_if_needed();
+    /// Set edge gain (hot path - uses RwLock for now, optimize later)
+    pub fn set_edge_gain(&self, edge_id: EdgeId, gain: f32) -> bool {
+        let mut graph = self.graph.write();
+        let result = graph.set_edge_gain(edge_id, gain);
+        if result {
+            self.update_snapshot(&graph);
+        }
+        result
+    }
 
-        // Store atomically
-        self.graph.store(Arc::new(new_graph));
+    /// Set edge muted state
+    pub fn set_edge_muted(&self, edge_id: EdgeId, muted: bool) -> bool {
+        let mut graph = self.graph.write();
+        let result = graph.set_edge_muted(edge_id, muted);
+        if result {
+            self.update_snapshot(&graph);
+        }
+        result
+    }
+
+    /// Batch update edge gains
+    pub fn set_edge_gains_batch(&self, updates: &[(EdgeId, f32)]) -> usize {
+        let mut graph = self.graph.write();
+        let mut count = 0;
+        for &(edge_id, gain) in updates {
+            if graph.set_edge_gain(edge_id, gain) {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.update_snapshot(&graph);
+        }
+        count
+    }
+
+    /// Update the snapshot for audio thread
+    fn update_snapshot(&self, graph: &AudioGraph) {
+        // Note: This creates a new AudioGraph which is not ideal
+        // For now, we store the edges and recreate - proper solution needs Clone for AudioGraph
+        // This is a temporary workaround
+        let snapshot = self.create_snapshot(graph);
+        self.graph_snapshot.store(Arc::new(snapshot));
+    }
+
+    /// Create a snapshot of the graph (temporary workaround)
+    fn create_snapshot(&self, _graph: &AudioGraph) -> AudioGraph {
+        // For now, return a new empty graph
+        // TODO: Implement proper graph cloning
+        // The issue is that Box<dyn AudioNode> is not Clone
+        // Solutions:
+        // 1. Store node state separately from processing buffers
+        // 2. Use Arc<dyn AudioNode> instead of Box
+        // 3. Implement a custom clone mechanism
+        AudioGraph::new()
     }
 
     /// Replace the entire graph
     pub fn set_graph(&self, graph: AudioGraph) {
-        let mut graph = graph;
-        graph.rebuild_order_if_needed();
-        self.graph.store(Arc::new(graph));
-    }
-
-    /// Set edge gain (hot path - lock-free)
-    pub fn set_edge_gain(&self, edge_id: EdgeId, gain: f32) {
-        // For hot path, we need mutable access to the graph
-        // This requires ArcSwap's rcu pattern
-        self.graph.rcu(|current| {
-            // Clone the current graph (need to implement Clone for AudioGraph)
-            // For now, we'll use a workaround with interior mutability
-            // In production, edges should be in a separate ArcSwap for truly lock-free updates
-
-            // Workaround: edges are in the graph, so we need to rebuild
-            let mut new_graph = AudioGraph::new();
-            // Copy nodes and edges...
-            // This is expensive - in production, separate edges into their own ArcSwap
-            new_graph
-        });
+        let mut current = self.graph.write();
+        *current = graph;
+        current.rebuild_order_if_needed();
+        // For now, just create an empty snapshot (temporary)
+        self.graph_snapshot.store(Arc::new(AudioGraph::new()));
     }
 
     /// Get current meters (lock-free read)
@@ -100,14 +164,38 @@ impl GraphProcessor {
         self.meters.load_full()
     }
 
+    /// Execute with read access to the graph
+    pub fn with_graph<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&AudioGraph) -> R,
+    {
+        let graph = self.graph.read();
+        f(&graph)
+    }
+
+    /// Execute with write access to the graph
+    pub fn with_graph_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut AudioGraph) -> R,
+    {
+        let mut graph = self.graph.write();
+        let result = f(&mut graph);
+        self.update_snapshot(&graph);
+        result
+    }
+
     /// オーディオ処理を実行
     ///
     /// Called from audio callback. Must be lock-free.
+    /// Note: This uses try_read to avoid blocking in audio callback
     pub fn process(&self, frames: usize, read_source_fn: &dyn Fn(&SourceId, &mut [f32])) {
-        let graph = self.graph.load();
+        // Try to get read access - if locked, skip this callback
+        let Some(graph) = self.graph.try_read() else {
+            return;
+        };
 
         // 1. すべてのノードのバッファをクリア
-        // Note: We need mutable access here, which is tricky with ArcSwap
+        // Note: We need mutable access here, which is tricky with read lock
         // In production, buffers should be separate from the graph structure
 
         // 2. ソースノードの読み込み
@@ -234,10 +322,15 @@ impl GraphProcessor {
         channel: usize,
         output: &mut [f32],
     ) -> bool {
-        let graph = self.graph.load();
+        // Try to get read access - if locked, return silence
+        let Some(graph) = self.graph.try_read() else {
+            output.fill(0.0);
+            return false;
+        };
 
         if let Some(node) = graph.get_node(handle) {
             if node.node_type() != NodeType::Sink {
+                output.fill(0.0);
                 return false;
             }
 

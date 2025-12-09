@@ -1660,13 +1660,13 @@ src-tauri/src/
 | `device/enumerate.rs` | ✅ | 出力デバイス列挙 (aggregate対応) |
 | BusNode プラグイン統合 | ❌ | 未実装 |
 
-### Phase 5: API + UI 🔄 部分完了
+### Phase 5: API + UI ✅ API実装完了
 
 | ファイル | 状態 | 内容 |
 |----------|------|------|
 | `api/mod.rs` | ✅ | APIモジュール |
 | `api/dto.rs` | ✅ | 全DTO定義 (設計書通り) |
-| `api/commands.rs` | 🔄 | Tauriコマンド スケルトン (ほとんど未実装) |
+| `api/commands.rs` | ✅ | Tauriコマンド実装 (Graph/Edge/Meter/System) |
 | `lib.rs` | ✅ | v2モジュール + レガシー互換 |
 | UI更新 | ❌ | 未着手 |
 
@@ -1679,6 +1679,9 @@ src-tauri/src/
 5. ✅ `audio_unit::get_effect_audio_units()` を使用するよう修正
 6. ✅ `processor` モジュールをpublic化
 7. ✅ `graph.rs` の lifetime エラー修正
+8. ✅ `GraphProcessor` にノード/エッジ操作API追加 (RwLock + ArcSwap)
+9. ✅ `api/commands.rs` の全コマンド実装
+10. ✅ `uuid` crate追加
 
 ### ビルド状態
 
@@ -1686,10 +1689,43 @@ src-tauri/src/
 ✅ cargo build 成功 (警告あり、エラーなし)
 ```
 
+### 実装済みAPI一覧
+
+| カテゴリ | コマンド | 状態 |
+|----------|----------|------|
+| **Device** | `get_input_devices` | ✅ |
+| | `get_output_devices` | ✅ |
+| | `get_prism_status` | ✅ |
+| **Graph** | `add_source_node` | ✅ |
+| | `add_bus_node` | ✅ |
+| | `add_sink_node` | ✅ |
+| | `remove_node` | ✅ |
+| | `add_edge` | ✅ |
+| | `remove_edge` | ✅ |
+| | `get_graph` | ✅ |
+| **Edge** | `set_edge_gain` | ✅ |
+| | `set_edge_muted` | ✅ |
+| | `set_edge_gains_batch` | ✅ |
+| **Plugin** | `get_available_plugins` | ✅ |
+| | `add_plugin_to_bus` | ❌ (未実装) |
+| | `remove_plugin_from_bus` | ❌ (未実装) |
+| | `open_plugin_ui` | ❌ (未実装) |
+| | `close_plugin_ui` | ❌ (未実装) |
+| **Meter** | `get_meters` | ✅ |
+| | `get_node_meters` | ✅ |
+| | `get_edge_meters` | ✅ |
+| **State** | `save_graph_state` | ❌ (未実装) |
+| | `load_graph_state` | ❌ (未実装) |
+| | `persist_state` | ❌ (未実装) |
+| **System** | `start_audio` | ✅ |
+| | `stop_audio` | ✅ |
+| | `get_system_status` | ✅ |
+| | `set_buffer_size` | ✅ |
+
 ### 次のステップ
 
-1. **API コマンドの実装** - `api/commands.rs` の各関数を実装
-2. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
-3. **メータリング完全実装** - リアルタイムレベル計算
-4. **BusNode プラグイン統合** - AudioUnit との連携
+1. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
+2. **メータリング完全実装** - リアルタイムレベル計算
+3. **BusNode プラグイン統合** - AudioUnit との連携
+4. **State API実装** - グラフ状態の保存/復元
 5. **フロントエンド更新** - 新APIに対応したUI

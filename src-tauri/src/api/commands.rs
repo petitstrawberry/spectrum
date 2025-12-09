@@ -2,7 +2,7 @@
 
 use super::dto::*;
 use crate::audio::processor::get_graph_processor;
-use crate::audio::{AudioGraph, AudioNode};
+use crate::audio::{AudioNode, Edge, EdgeId, NodeHandle, PortId};
 
 // =============================================================================
 // Device Commands
@@ -75,25 +75,48 @@ pub async fn add_source_node(
         }
     };
 
-    // For now, we need to rebuild the entire graph
-    // TODO: Implement proper graph mutation API
-    Err("Graph mutation not yet implemented".to_string())
+    let handle = processor.add_node(node);
+    Ok(handle.raw())
 }
 
 #[tauri::command]
 pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, String> {
-    let _port_count = port_count.unwrap_or(2);
-    Err("Graph mutation not yet implemented".to_string())
+    let processor = get_graph_processor();
+    let port_count = port_count.unwrap_or(2);
+    
+    let bus_id = format!("bus_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+    let node: Box<dyn AudioNode> = if port_count == 2 {
+        Box::new(crate::audio::bus::BusNode::new_stereo(&bus_id, &label))
+    } else {
+        Box::new(crate::audio::bus::BusNode::new(&bus_id, &label, port_count as usize))
+    };
+    
+    let handle = processor.add_node(node);
+    Ok(handle.raw())
 }
 
 #[tauri::command]
 pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result<u32, String> {
-    Err("Graph mutation not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    let label = label.unwrap_or_else(|| format!("Output {}", sink.device_id));
+    let sink_id = crate::audio::sink::SinkId::from(sink);
+    let node: Box<dyn AudioNode> = Box::new(crate::audio::sink::SinkNode::new(sink_id, &label));
+    
+    let handle = processor.add_node(node);
+    Ok(handle.raw())
 }
 
 #[tauri::command]
 pub async fn remove_node(handle: u32) -> Result<(), String> {
-    Err("Graph mutation not yet implemented".to_string())
+    let processor = get_graph_processor();
+    let node_handle = NodeHandle::from(handle);
+    
+    if processor.remove_node(node_handle) {
+        Ok(())
+    } else {
+        Err(format!("Node {} not found", handle))
+    }
 }
 
 #[tauri::command]
@@ -105,37 +128,91 @@ pub async fn add_edge(
     gain: Option<f32>,
     muted: Option<bool>,
 ) -> Result<u32, String> {
-    Err("Graph mutation not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    let edge_id = processor.add_edge(
+        NodeHandle::from(source),
+        PortId::from(source_port),
+        NodeHandle::from(target),
+        PortId::from(target_port),
+        gain.unwrap_or(1.0),
+        muted.unwrap_or(false),
+    );
+    
+    match edge_id {
+        Some(id) => Ok(id.raw()),
+        None => Err("Failed to add edge (nodes may not exist or edge already exists)".to_string()),
+    }
 }
 
 #[tauri::command]
 pub async fn remove_edge(id: u32) -> Result<(), String> {
-    Err("Graph mutation not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    if processor.remove_edge(EdgeId::from(id)) {
+        Ok(())
+    } else {
+        Err(format!("Edge {} not found", id))
+    }
 }
 
 #[tauri::command]
 pub async fn get_graph() -> Result<GraphDto, String> {
     let processor = get_graph_processor();
-    let graph = processor.graph();
+    
+    processor.with_graph(|graph| {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
 
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-
-    // Collect nodes
-    for handle in graph.node_handles() {
-        if let Some(node) = graph.get_node(handle) {
-            // We need type-specific info here
-            // For now, return basic info
-            // TODO: Add proper downcasting or store type info separately
+        // Collect nodes - need type-specific info
+        // For now, we create a basic representation
+        for handle in graph.node_handles() {
+            if let Some(node) = graph.get_node(handle) {
+                // Create NodeInfoDto based on node type
+                // Note: We need additional methods on nodes to get full info
+                // This is a simplified version
+                let info = match node.node_type() {
+                    crate::audio::NodeType::Source => {
+                        NodeInfoDto::Source {
+                            handle: handle.raw(),
+                            source_id: SourceIdDto::PrismChannel { channel: 0 }, // TODO: Get actual source_id
+                            port_count: node.output_port_count() as u8,
+                            label: node.label().to_string(),
+                        }
+                    }
+                    crate::audio::NodeType::Bus => {
+                        NodeInfoDto::Bus {
+                            handle: handle.raw(),
+                            bus_id: "unknown".to_string(), // TODO: Get actual bus_id
+                            label: node.label().to_string(),
+                            port_count: node.input_port_count() as u8,
+                            plugins: Vec::new(), // TODO: Get plugins
+                        }
+                    }
+                    crate::audio::NodeType::Sink => {
+                        NodeInfoDto::Sink {
+                            handle: handle.raw(),
+                            sink: OutputSinkDto {
+                                device_id: 0, // TODO: Get actual device_id
+                                channel_offset: 0,
+                                channel_count: node.input_port_count() as u8,
+                            },
+                            port_count: node.input_port_count() as u8,
+                            label: node.label().to_string(),
+                        }
+                    }
+                };
+                nodes.push(info);
+            }
         }
-    }
 
-    // Collect edges
-    for edge in graph.edges() {
-        edges.push(EdgeInfoDto::from(edge.clone()));
-    }
+        // Collect edges
+        for edge in graph.edges() {
+            edges.push(EdgeInfoDto::from(edge.clone()));
+        }
 
-    Ok(GraphDto { nodes, edges })
+        Ok(GraphDto { nodes, edges })
+    })
 }
 
 // =============================================================================
@@ -144,19 +221,37 @@ pub async fn get_graph() -> Result<GraphDto, String> {
 
 #[tauri::command]
 pub async fn set_edge_gain(id: u32, gain: f32) -> Result<(), String> {
-    // This needs to be lock-free for real-time safety
-    // TODO: Implement proper lock-free edge parameter updates
-    Err("Edge parameter updates not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    if processor.set_edge_gain(EdgeId::from(id), gain) {
+        Ok(())
+    } else {
+        Err(format!("Edge {} not found", id))
+    }
 }
 
 #[tauri::command]
 pub async fn set_edge_muted(id: u32, muted: bool) -> Result<(), String> {
-    Err("Edge parameter updates not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    if processor.set_edge_muted(EdgeId::from(id), muted) {
+        Ok(())
+    } else {
+        Err(format!("Edge {} not found", id))
+    }
 }
 
 #[tauri::command]
 pub async fn set_edge_gains_batch(updates: Vec<EdgeGainUpdate>) -> Result<(), String> {
-    Err("Edge parameter updates not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    let batch: Vec<_> = updates
+        .into_iter()
+        .map(|u| (EdgeId::from(u.id), u.gain))
+        .collect();
+    
+    processor.set_edge_gains_batch(&batch);
+    Ok(())
 }
 
 // =============================================================================

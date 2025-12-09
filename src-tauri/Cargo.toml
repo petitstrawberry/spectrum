@@ -37,6 +37,7 @@ base64 = "0.22.1"
 arc-swap = "1.7.1"
 shellexpand = "2"
 core-foundation = "0.10"
+uuid = { version = "1.19.0", features = ["v4"] }
 
 [profile.dev]
 incremental = true
