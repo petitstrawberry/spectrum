@@ -86,14 +86,14 @@ pub async fn add_source_node(
 pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, String> {
     let processor = get_graph_processor();
     let port_count = port_count.unwrap_or(2);
-    
+
     let bus_id = format!("bus_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
     let node: Box<dyn AudioNode> = if port_count == 2 {
         Box::new(crate::audio::bus::BusNode::new_stereo(&bus_id, &label))
     } else {
         Box::new(crate::audio::bus::BusNode::new(&bus_id, &label, port_count as usize))
     };
-    
+
     let handle = processor.add_node(node);
     Ok(handle.raw())
 }
@@ -101,11 +101,11 @@ pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, 
 #[tauri::command]
 pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result<u32, String> {
     let processor = get_graph_processor();
-    
+
     let label = label.unwrap_or_else(|| format!("Output {}", sink.device_id));
     let sink_id = crate::audio::sink::SinkId::from(sink);
     let node: Box<dyn AudioNode> = Box::new(crate::audio::sink::SinkNode::new(sink_id, &label));
-    
+
     let handle = processor.add_node(node);
     Ok(handle.raw())
 }
@@ -114,7 +114,7 @@ pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result
 pub async fn remove_node(handle: u32) -> Result<(), String> {
     let processor = get_graph_processor();
     let node_handle = NodeHandle::from(handle);
-    
+
     if processor.remove_node(node_handle) {
         Ok(())
     } else {
@@ -132,7 +132,7 @@ pub async fn add_edge(
     muted: Option<bool>,
 ) -> Result<u32, String> {
     let processor = get_graph_processor();
-    
+
     let edge_id = processor.add_edge(
         NodeHandle::from(source),
         PortId::from(source_port),
@@ -141,7 +141,7 @@ pub async fn add_edge(
         gain.unwrap_or(1.0),
         muted.unwrap_or(false),
     );
-    
+
     match edge_id {
         Some(id) => Ok(id.raw()),
         None => Err("Failed to add edge (nodes may not exist or edge already exists)".to_string()),
@@ -151,7 +151,7 @@ pub async fn add_edge(
 #[tauri::command]
 pub async fn remove_edge(id: u32) -> Result<(), String> {
     let processor = get_graph_processor();
-    
+
     if processor.remove_edge(EdgeId::from(id)) {
         Ok(())
     } else {
@@ -162,7 +162,7 @@ pub async fn remove_edge(id: u32) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_graph() -> Result<GraphDto, String> {
     let processor = get_graph_processor();
-    
+
     processor.with_graph(|graph| {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -258,7 +258,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
 #[tauri::command]
 pub async fn set_edge_gain(id: u32, gain: f32) -> Result<(), String> {
     let processor = get_graph_processor();
-    
+
     if processor.set_edge_gain(EdgeId::from(id), gain) {
         Ok(())
     } else {
@@ -269,7 +269,7 @@ pub async fn set_edge_gain(id: u32, gain: f32) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_edge_muted(id: u32, muted: bool) -> Result<(), String> {
     let processor = get_graph_processor();
-    
+
     if processor.set_edge_muted(EdgeId::from(id), muted) {
         Ok(())
     } else {
@@ -280,12 +280,12 @@ pub async fn set_edge_muted(id: u32, muted: bool) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_edge_gains_batch(updates: Vec<EdgeGainUpdate>) -> Result<(), String> {
     let processor = get_graph_processor();
-    
+
     let batch: Vec<_> = updates
         .into_iter()
         .map(|u| (EdgeId::from(u.id), u.gain))
         .collect();
-    
+
     processor.set_edge_gains_batch(&batch);
     Ok(())
 }
@@ -316,20 +316,20 @@ pub async fn add_plugin_to_bus(
 ) -> Result<String, String> {
     let handle = NodeHandle::from_raw(bus_handle);
     let processor = get_graph_processor();
-    
+
     // Get plugin info
     let plugins = crate::audio_unit::get_effect_audio_units();
     let plugin = plugins
         .iter()
         .find(|p| p.id == plugin_id)
         .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
-    
+
     // Generate unique instance ID
     let instance_id = uuid::Uuid::new_v4().to_string();
     let plugin_name = plugin.name.clone();
     let plugin_id_clone = plugin_id.clone();
     let instance_id_clone = instance_id.clone();
-    
+
     processor.with_graph_mut(|graph| {
         if let Some(node) = graph.get_node_mut(handle) {
             if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
@@ -349,7 +349,7 @@ pub async fn add_plugin_to_bus(
             }
         }
     });
-    
+
     Ok(instance_id)
 }
 
@@ -357,7 +357,7 @@ pub async fn add_plugin_to_bus(
 pub async fn remove_plugin_from_bus(bus_handle: u32, instance_id: String) -> Result<(), String> {
     let handle = NodeHandle::from_raw(bus_handle);
     let processor = get_graph_processor();
-    
+
     let mut found = false;
     processor.with_graph_mut(|graph| {
         if let Some(node) = graph.get_node_mut(handle) {
@@ -368,7 +368,7 @@ pub async fn remove_plugin_from_bus(bus_handle: u32, instance_id: String) -> Res
             }
         }
     });
-    
+
     if found {
         Ok(())
     } else {
@@ -380,7 +380,7 @@ pub async fn remove_plugin_from_bus(bus_handle: u32, instance_id: String) -> Res
 pub async fn reorder_plugins(bus_handle: u32, instance_ids: Vec<String>) -> Result<(), String> {
     let handle = NodeHandle::from_raw(bus_handle);
     let processor = get_graph_processor();
-    
+
     processor.with_graph_mut(|graph| {
         if let Some(node) = graph.get_node_mut(handle) {
             if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
@@ -388,7 +388,7 @@ pub async fn reorder_plugins(bus_handle: u32, instance_ids: Vec<String>) -> Resu
             }
         }
     });
-    
+
     Ok(())
 }
 
@@ -474,7 +474,7 @@ pub async fn get_edge_meters(ids: Vec<u32>) -> Result<Vec<EdgeMeterDto>, String>
 #[tauri::command]
 pub async fn save_graph_state() -> Result<GraphStateDto, String> {
     let graph_dto = get_graph().await?;
-    
+
     Ok(GraphStateDto {
         version: 1,
         nodes: graph_dto.nodes,
@@ -486,7 +486,7 @@ pub async fn save_graph_state() -> Result<GraphStateDto, String> {
 #[tauri::command]
 pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
     let processor = get_graph_processor();
-    
+
     // Clear existing graph and rebuild from state
     processor.with_graph_mut(|graph| {
         // Clear existing nodes and edges
@@ -495,10 +495,10 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
             graph.remove_node(handle);
         }
     });
-    
+
     // Recreate nodes
     let mut handle_mapping: std::collections::HashMap<u32, NodeHandle> = std::collections::HashMap::new();
-    
+
     for node_info in &state.nodes {
         let (old_handle, new_handle) = match node_info {
             NodeInfoDto::Source { handle, source_id, label, .. } => {
@@ -532,7 +532,7 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
         };
         handle_mapping.insert(old_handle, new_handle);
     }
-    
+
     // Recreate edges with mapped handles
     for edge_info in &state.edges {
         let source_handle = handle_mapping
@@ -541,7 +541,7 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
         let target_handle = handle_mapping
             .get(&edge_info.target)
             .ok_or_else(|| format!("Target node {} not found in mapping", edge_info.target))?;
-        
+
         processor.add_edge(
             *source_handle,
             PortId::from(edge_info.source_port),
@@ -551,61 +551,61 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
             edge_info.muted,
         );
     }
-    
+
     Ok(())
 }
 
 #[tauri::command]
 pub async fn persist_state() -> Result<(), String> {
     use std::fs;
-    
+
     // Get app data directory
     let app_data = dirs::data_dir()
         .ok_or("Could not find app data directory")?
         .join("spectrum");
-    
+
     // Create directory if it doesn't exist
     fs::create_dir_all(&app_data)
         .map_err(|e| format!("Failed to create app data directory: {}", e))?;
-    
+
     // Save graph state
     let state = save_graph_state().await?;
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
-    
+
     let state_file = app_data.join("graph_state_v2.json");
     fs::write(&state_file, json)
         .map_err(|e| format!("Failed to write state file: {}", e))?;
-    
+
     Ok(())
 }
 
 #[tauri::command]
 pub async fn restore_state() -> Result<bool, String> {
     use std::fs;
-    
+
     // Get app data directory
     let app_data = dirs::data_dir()
         .ok_or("Could not find app data directory")?
         .join("spectrum");
-    
+
     let state_file = app_data.join("graph_state_v2.json");
-    
+
     // Check if state file exists
     if !state_file.exists() {
         return Ok(false); // No state to restore
     }
-    
+
     // Read and parse state file
     let json = fs::read_to_string(&state_file)
         .map_err(|e| format!("Failed to read state file: {}", e))?;
-    
+
     let state: GraphStateDto = serde_json::from_str(&json)
         .map_err(|e| format!("Failed to parse state file: {}", e))?;
-    
+
     // Load the state
     load_graph_state(state).await?;
-    
+
     Ok(true)
 }
 

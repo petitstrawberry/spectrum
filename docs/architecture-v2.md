@@ -1647,7 +1647,7 @@ src-tauri/src/
 | ファイル | 状態 | 内容 |
 |----------|------|------|
 | `audio/processor.rs` | ✅ | GraphProcessor スケルトン (ArcSwap lock-free) |
-| 出力コールバック統合 | ❌ | 未実装 |
+| 出力コールバック統合 | ✅ | `audio/output.rs` 実装 |
 | メータリング実装 | 🔄 | 基本構造のみ |
 
 ### Phase 4: 拡張 🔄 部分完了
@@ -1682,6 +1682,10 @@ src-tauri/src/
 8. ✅ `GraphProcessor` にノード/エッジ操作API追加 (RwLock + ArcSwap)
 9. ✅ `api/commands.rs` の全コマンド実装
 10. ✅ `uuid` crate追加
+11. ✅ State API実装 (save/load/persist/restore_state)
+12. ✅ プラグイン管理コマンド実装 (add/remove/reorder)
+13. ✅ NodeHandle::from_raw() 追加
+14. ✅ 出力コールバック統合 (audio/output.rs)
 
 ### ビルド状態
 
@@ -1726,8 +1730,7 @@ src-tauri/src/
 
 ### 次のステップ
 
-1. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
-2. **メータリング完全実装** - リアルタイムレベル計算
-3. **BusNode プラグイン統合** - AudioUnit との連携
-4. **Plugin UI コマンド** - `open_plugin_ui`, `close_plugin_ui` (AudioUnit統合後)
-5. **フロントエンド更新** - 新APIに対応したUI
+1. **メータリング完全実装** - リアルタイムレベル計算とポーリングAPI
+2. **BusNode プラグイン統合** - AudioUnit との連携
+3. **Plugin UI コマンド** - `open_plugin_ui`, `close_plugin_ui` (AudioUnit統合後)
+4. **Frontend更新** - v2 API に対応したUI

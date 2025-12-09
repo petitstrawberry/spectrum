@@ -10,6 +10,7 @@ mod meters;
 mod node;
 
 pub mod bus;
+pub mod output;
 pub mod processor;
 pub mod sink;
 pub mod source;
