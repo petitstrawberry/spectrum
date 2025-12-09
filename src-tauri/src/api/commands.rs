@@ -314,17 +314,82 @@ pub async fn add_plugin_to_bus(
     plugin_id: String,
     position: Option<usize>,
 ) -> Result<String, String> {
-    Err("Plugin management not yet implemented".to_string())
+    let handle = NodeHandle::from_raw(bus_handle);
+    let processor = get_graph_processor();
+    
+    // Get plugin info
+    let plugins = crate::audio_unit::get_effect_audio_units();
+    let plugin = plugins
+        .iter()
+        .find(|p| p.id == plugin_id)
+        .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
+    
+    // Generate unique instance ID
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let plugin_name = plugin.name.clone();
+    let plugin_id_clone = plugin_id.clone();
+    let instance_id_clone = instance_id.clone();
+    
+    processor.with_graph_mut(|graph| {
+        if let Some(node) = graph.get_node_mut(handle) {
+            if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
+                if let Some(pos) = position {
+                    // Insert at specific position - add then reorder
+                    bus.add_plugin(instance_id_clone.clone(), plugin_id_clone.clone(), plugin_name.clone());
+                    // Get current order and move new plugin to position
+                    let mut ids: Vec<String> = bus.plugins().iter().map(|p| p.instance_id.clone()).collect();
+                    if pos < ids.len() - 1 {
+                        let new_id = ids.pop().unwrap();
+                        ids.insert(pos, new_id);
+                        bus.reorder_plugins(&ids);
+                    }
+                } else {
+                    bus.add_plugin(instance_id_clone.clone(), plugin_id_clone.clone(), plugin_name.clone());
+                }
+            }
+        }
+    });
+    
+    Ok(instance_id)
 }
 
 #[tauri::command]
 pub async fn remove_plugin_from_bus(bus_handle: u32, instance_id: String) -> Result<(), String> {
-    Err("Plugin management not yet implemented".to_string())
+    let handle = NodeHandle::from_raw(bus_handle);
+    let processor = get_graph_processor();
+    
+    let mut found = false;
+    processor.with_graph_mut(|graph| {
+        if let Some(node) = graph.get_node_mut(handle) {
+            if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
+                if bus.remove_plugin(&instance_id).is_some() {
+                    found = true;
+                }
+            }
+        }
+    });
+    
+    if found {
+        Ok(())
+    } else {
+        Err(format!("Plugin instance not found: {}", instance_id))
+    }
 }
 
 #[tauri::command]
 pub async fn reorder_plugins(bus_handle: u32, instance_ids: Vec<String>) -> Result<(), String> {
-    Err("Plugin management not yet implemented".to_string())
+    let handle = NodeHandle::from_raw(bus_handle);
+    let processor = get_graph_processor();
+    
+    processor.with_graph_mut(|graph| {
+        if let Some(node) = graph.get_node_mut(handle) {
+            if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
+                bus.reorder_plugins(&instance_ids);
+            }
+        }
+    });
+    
+    Ok(())
 }
 
 #[tauri::command]

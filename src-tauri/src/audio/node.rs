@@ -21,6 +21,11 @@ impl NodeHandle {
     pub fn raw(&self) -> u32 {
         self.0
     }
+
+    /// Create from raw ID value (for deserialization)
+    pub fn from_raw(id: u32) -> Self {
+        Self(id)
+    }
 }
 
 impl From<u32> for NodeHandle {

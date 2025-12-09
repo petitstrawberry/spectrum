@@ -1707,10 +1707,11 @@ src-tauri/src/
 | | `set_edge_muted` | ✅ |
 | | `set_edge_gains_batch` | ✅ |
 | **Plugin** | `get_available_plugins` | ✅ |
-| | `add_plugin_to_bus` | ❌ (未実装) |
-| | `remove_plugin_from_bus` | ❌ (未実装) |
-| | `open_plugin_ui` | ❌ (未実装) |
-| | `close_plugin_ui` | ❌ (未実装) |
+| | `add_plugin_to_bus` | ✅ |
+| | `remove_plugin_from_bus` | ✅ |
+| | `reorder_plugins` | ✅ |
+| | `open_plugin_ui` | ❌ (AudioUnit統合待ち) |
+| | `close_plugin_ui` | ❌ (AudioUnit統合待ち) |
 | **Meter** | `get_meters` | ✅ |
 | | `get_node_meters` | ✅ |
 | | `get_edge_meters` | ✅ |
@@ -1725,8 +1726,8 @@ src-tauri/src/
 
 ### 次のステップ
 
-1. **プラグイン管理コマンド実装** - `add_plugin_to_bus`, `remove_plugin_from_bus`, `open_plugin_ui`, `close_plugin_ui`
-2. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
-3. **メータリング完全実装** - リアルタイムレベル計算
-4. **BusNode プラグイン統合** - AudioUnit との連携
+1. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
+2. **メータリング完全実装** - リアルタイムレベル計算
+3. **BusNode プラグイン統合** - AudioUnit との連携
+4. **Plugin UI コマンド** - `open_plugin_ui`, `close_plugin_ui` (AudioUnit統合後)
 5. **フロントエンド更新** - 新APIに対応したUI
