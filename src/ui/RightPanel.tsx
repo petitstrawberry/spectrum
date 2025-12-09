@@ -88,7 +88,32 @@ export default function RightPanel({ width, devices }: Props) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        <div className="text-center py-8 text-slate-600 text-xs">Outputs preview</div>
+        {!selected ? (
+          <div className="text-center py-8 text-slate-600 text-xs">Select an output device above</div>
+        ) : (() => {
+          const virtuals = (devices as any)?.virtualOutputDevices?.filter((v: any) => Number(v.parentDeviceId) === Number(selected)) || [];
+          const phys = outputDevices.find(d => d.deviceId === Number(selected));
+          if (virtuals.length === 0) {
+            // Show single entry representing full device
+            const channels = phys ? phys.channelCount : 0;
+            return (
+              <div className="text-center py-8 text-slate-600 text-xs">{channels > 0 ? `${channels}ch available` : 'No channels available'}</div>
+            );
+          }
+
+          return virtuals.map((v: any) => (
+            <div key={v.id} className={`group flex items-center gap-3 p-3 rounded-xl border border-slate-700 bg-slate-800/80 hover:border-pink-500/50 hover:bg-slate-800 cursor-pointer`}>
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center bg-slate-950 text-slate-300`}>
+                <Speaker className="w-4 h-4" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-bold text-slate-200 truncate">{v.name}</div>
+                <div className="text-[9px] text-slate-500 uppercase">{v.channels}ch • Virtual</div>
+              </div>
+              <Plus className="w-4 h-4 text-slate-600 group-hover:text-pink-400 transition-colors" />
+            </div>
+          ));
+        })()}
       </div>
     </div>
   );

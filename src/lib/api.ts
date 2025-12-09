@@ -24,6 +24,7 @@ export interface InputDeviceDto {
 export interface OutputDeviceDto {
   id: string;
   device_id: number;
+  parent_name?: string;
   name: string;
   channel_count: number;
   transport_type: string;

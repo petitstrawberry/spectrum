@@ -155,7 +155,9 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       for (const [deviceId, vs] of groups.entries()) {
         // Prefer the vout with offset 0 for base name and channel count if present
         const zero = vs.find(x => x.channelOffset === 0);
-        let baseName = zero ? zero.name : vs[0].name;
+        // Prefer aggregate (parent) name if backend provided it
+        const parentEntry = vs.find(x => (outputs.find((o: any) => o.id === x.id) || {}).parent_name);
+        let baseName = parentEntry ? ((outputs.find((o: any) => o.id === parentEntry.id) as any).parent_name) : (zero ? zero.name : vs[0].name);
         // If baseName includes " (Ch X-Y)", strip it
         baseName = baseName.replace(/\s*\(Ch\s*\d+-?\d*\)$/, '').trim();
         const totalChannels = vs.reduce((s, x) => s + x.channels, 0);

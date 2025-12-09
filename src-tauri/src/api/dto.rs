@@ -124,6 +124,12 @@ pub struct InputDeviceDto {
 pub struct OutputDeviceDto {
     pub id: String,
     pub device_id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subdevice_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_name: Option<String>,
     pub channel_offset: u8,
     pub channel_count: u8,
     pub name: String,
