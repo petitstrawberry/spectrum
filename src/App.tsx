@@ -25,7 +25,7 @@ import {
   useAudio,
   type MeterData,
 } from './hooks';
-import V1ExactLayout from './ui/V1ExactLayout';
+import SpectrumLayout from './ui/SpectrumLayout';
 import type { UINode, UIEdge } from './types/graph';
 import { getInputPorts, getOutputPorts } from './types/graph';
 
@@ -453,5 +453,5 @@ export default function App() {
     void setSelectedNodeHandle; void showSettings; void setShowSettings;
   })();
 
-  return <V1ExactLayout />;
+  return <SpectrumLayout />;
 }

@@ -123,8 +123,8 @@ interface Connection {
   stereoLinked?: boolean;
 }
 
-// The V1ExactLayout is a visual copy of the original v1 App UI.
-export default function V1ExactLayout() {
+// The visual layout component (previously V1ExactLayout)
+export default function SpectrumLayout() {
   // For visual parity we keep local state where needed, but all logic
   // calling backend APIs is preserved in-place as no-ops or safe stubs
   // to avoid accidental side-effects when rendering the UI-only component.
