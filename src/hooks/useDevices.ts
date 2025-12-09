@@ -28,6 +28,7 @@ export interface OutputDevice {
   deviceId: number;
   name: string;
   channelCount: number;
+  iconName?: string;
   transportType: string;
   isAggregate: boolean;
   subDevices: SubDevice[];
@@ -39,12 +40,14 @@ export interface VirtualOutputDevice {
   name: string;
   channelOffset: number;
   channels: number;
+  iconHint?: string;
 }
 
 export interface SubDevice {
   id: string;
   name: string;
   channelCount: number;
+  iconName?: string;
 }
 
 export interface PrismApp {
@@ -143,7 +146,8 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
           const offset = Number(m[2]);
           const name = (d as any).name ?? (d as any).label ?? rawId;
           const channels = (d as any).channel_count ?? (d as any).channelCount ?? (d as any).output_channels ?? 2;
-          const v: VirtualOutputDevice = { id: rawId, parentDeviceId: parentId, name, channelOffset: offset, channels };
+          const icon = (d as any).icon_hint ?? undefined;
+          const v: VirtualOutputDevice = { id: rawId, parentDeviceId: parentId, name, channelOffset: offset, channels, iconHint: icon };
           virtuals.push(v);
           const arr = groups.get(parentId) ?? [];
           arr.push(v);
@@ -163,10 +167,13 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         const totalChannels = vs.reduce((s, x) => s + x.channels, 0);
         const isAggregate = vs.length > 1 || vs.some(x => /(aggregate|aggregate_sub)/i.test((x as any).id));
 
+        // Choose an iconHint from parentEntry, else zero, else first
+        const iconHintSource = parentEntry ? (outputs.find((o: any) => o.id === parentEntry.id) as any).icon_hint : (zero ? zero.iconHint : vs[0].iconHint);
         const subDevices: SubDevice[] = vs.map(v => ({
           id: v.id,
           name: v.name,
           channelCount: v.channels,
+          iconName: v.iconHint,
         }));
 
         phys.push({
@@ -175,6 +182,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
           name: baseName || `Device ${deviceId}`,
           channelCount: totalChannels,
           transportType: 'Unknown',
+          iconName: iconHintSource,
           isAggregate,
           subDevices,
         });

@@ -1,6 +1,8 @@
 // @ts-nocheck
 import React, { useState, useEffect } from 'react';
-import { Workflow, Plus, Speaker } from 'lucide-react';
+import { Workflow, Plus } from 'lucide-react';
+import getIconForDevice from '../hooks/useIcons';
+import getColorForDevice from '../hooks/useColors';
 import type { UseDevicesReturn } from '../hooks/useDevices';
 
 interface Props {
@@ -68,7 +70,12 @@ export default function RightPanel({ width, devices }: Props) {
 
       <div className="p-4 border-b border-slate-800 bg-slate-900/50">
         <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2 mb-3">
-          <Speaker className="w-3 h-3" /> Output Device
+          {(() => {
+              const phys = outputDevices.find(d => d.deviceId === Number(selected));
+              const Icon = getIconForDevice(phys?.iconName, phys?.name);
+              return <Icon className="w-3 h-3" />;
+            })()}
+          Output Device
         </div>
         <div className="flex gap-2 items-center">
           <select
@@ -103,9 +110,15 @@ export default function RightPanel({ width, devices }: Props) {
 
           return virtuals.map((v: any) => (
             <div key={v.id} className={`group flex items-center gap-3 p-3 rounded-xl border border-slate-700 bg-slate-800/80 hover:border-pink-500/50 hover:bg-slate-800 cursor-pointer`}>
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center bg-slate-950 text-slate-300`}>
-                <Speaker className="w-4 h-4" />
-              </div>
+              {(() => {
+                const Icon = getIconForDevice(v.iconHint, v.name);
+                const color = getColorForDevice(v.name, v.iconHint);
+                return (
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center bg-slate-950 ${color.replace('text-', 'text-')}`}>
+                    <Icon className={`w-4 h-4 ${color}`} />
+                  </div>
+                );
+              })()}
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-bold text-slate-200 truncate">{v.name}</div>
                 <div className="text-[9px] text-slate-500 uppercase">{v.channels}ch • Virtual</div>

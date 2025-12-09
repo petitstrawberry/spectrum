@@ -27,6 +27,7 @@ export interface OutputDeviceDto {
   parent_name?: string;
   name: string;
   channel_count: number;
+  icon_hint?: string;
   transport_type: string;
   is_aggregate: boolean;
   sub_devices: SubDeviceDto[];
@@ -36,6 +37,7 @@ export interface SubDeviceDto {
   id: string;
   name: string;
   channel_count: number;
+  icon_hint?: string;
 }
 
 export interface PrismAppDto {
