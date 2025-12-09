@@ -41,8 +41,7 @@ import {
   startInputCapture,
   stopInputCapture,
   getActiveInputCaptures,
-  getPrismLevelsBinary,
-  getMixerLevelsBinary,
+  getGraphMeters,
   reserveBusId,
   openPrismApp,
   startAudioOutput,
@@ -70,6 +69,7 @@ import {
   type InputDeviceInfo,
   type ActiveCaptureInfo,
   type AudioUnitPluginInfo,
+  type GraphMetersData,
 } from './lib/prismd';
 
 // --- Types ---
@@ -1283,11 +1283,11 @@ export default function App() {
 
   // High-frequency level meter polling - Optimized: single IPC call at 30fps
   // Store latest levels in a ref so drawing can happen every frame
-  const latestLevelsRef = useRef<{ prism: any[]; devices: Record<string, any>; buses: any[]; outputs: Record<string, any> }>({
-    prism: [],
-    devices: {},
+  const latestLevelsRef = useRef<GraphMetersData>({
+    inputs: [],
     buses: [],
-    outputs: {},
+    outputs: [],
+    sends: [],
   });
 
   useEffect(() => {
@@ -1301,76 +1301,9 @@ export default function App() {
         lastFetchTime = currentTime;
         isFetchingRef.current = true;
 
-        // Collect device IDs to query
-        const activeDeviceIds = activeCaptures
-          .filter(c => !c.is_prism)
-          .map(c => String(c.device_id));
-
-        // Collect output keys from target nodes
-        const outputKeys: string[] = [];
-        const deviceKeySet = new Set<string>();
-        for (const node of nodes) {
-          if (node.type === 'target') {
-            // Get deviceId from node or parse from libraryId
-            let devId = node.deviceId;
-            if (devId == null && node.libraryId) {
-              const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
-              if (match) {
-                devId = parseInt(match[1], 10);
-              }
-            }
-            if (devId != null) {
-              const numPairs = Math.max(1, Math.floor(node.channelCount / 2));
-              for (let pairIdx = 0; pairIdx < numPairs; pairIdx++) {
-                const key = `${devId}_${pairIdx}`;
-                if (!deviceKeySet.has(key)) {
-                  deviceKeySet.add(key);
-                  outputKeys.push(key);
-                }
-              }
-            }
-          }
-        }
-
-        // Debug: log output keys collection (remove after debugging)
-        if (Math.random() < 0.01) {
-          const targetNodes = nodes.filter(n => n.type === 'target');
-          console.log('[Output Keys Debug]', {
-            nodesCount: nodes.length,
-            targetNodesCount: targetNodes.length,
-            targetNodes: targetNodes.map(n => ({ id: n.id, type: n.type, deviceId: n.deviceId, libraryId: n.libraryId, channelCount: n.channelCount })),
-            outputKeys,
-          });
-        }
-
-        // Fetch levels asynchronously
-        Promise.all([
-          getPrismLevelsBinary(),
-          getMixerLevelsBinary(activeDeviceIds, outputKeys),
-        ]).then(([prismFloats, mixerLevels]) => {
-          const prismArr: any[] = [];
-          for (let i = 0; i < prismFloats.length; i += 2) {
-            prismArr.push({
-              left_peak: prismFloats[i],
-              right_peak: prismFloats[i + 1],
-            });
-          }
-          latestLevelsRef.current = {
-            prism: prismArr,
-            devices: mixerLevels.devices || {},
-            buses: mixerLevels.buses || [],
-            outputs: mixerLevels.outputs || {},
-          };
-        // Log parsed levels for debugging alignment with backend MeterDebug
-        }).then(() => {
-          try {
-            // Print recent parsed mixer buses to renderer console for quick verification
-            // (only in development; this will be removed after debugging)
-            // eslint-disable-next-line no-console
-            console.debug('[Levels Debug] prism:', latestLevelsRef.current.prism);
-          } catch (e) {
-            // ignore
-          }
+        // Fetch all graph meters in a single call
+        getGraphMeters().then((meters) => {
+          latestLevelsRef.current = meters;
         }).catch(() => {
           // ignore fetch errors
         }).finally(() => {
@@ -1379,8 +1312,18 @@ export default function App() {
       }
 
       // 2. Draw every frame using latest data
-      const allLevels = latestLevelsRef.current;
+      const graphMeters = latestLevelsRef.current;
       const SMOOTH_FACTOR = 0.3;
+
+      // Helper: Create lookup maps for efficient access to graph meters
+      // Inputs: key by "deviceId_pairIdx" for external devices, pair_idx only for Prism (device_id=0)
+      const inputsByKey = new Map<string, { left_peak: number; right_peak: number }>();
+      for (const input of graphMeters.inputs) {
+        const key = `${input.device_id}_${input.pair_idx}`;
+        inputsByKey.set(key, { left_peak: input.left_peak, right_peak: input.right_peak });
+      }
+      // Buses: key by bus_idx
+      const busesByIdx = new Map(graphMeters.buses.map(b => [b.bus_idx, b]));
 
       // Draw mixer meters
       for (const [key, cached] of mixerCanvasCache.current.entries()) {
@@ -1424,33 +1367,46 @@ export default function App() {
         const level = conn?.sendLevel ?? 0;
         const isMuted = conn?.muted ?? false;
 
-        // Get input levels
+        // Get input levels from graph meters
         let leftDb = -60, rightDb = -60;
         if (node.type === 'source') {
+          // Get input meter for this source
+          const pairIdx = Math.floor(fromChannel / 2);
+          let inputMeter: { left_peak: number; right_peak: number } | undefined;
+
           if (node.sourceType === 'device' && node.deviceId !== undefined) {
-            const dev = allLevels.devices[String(node.deviceId)];
-            if (Array.isArray(dev) && dev.length > 0) {
-              const pairIdx = Math.floor(fromChannel / 2);
-              const ld = dev[pairIdx];
-              if (ld) {
-                leftDb = rmsToDb(ld.left_peak);
-                rightDb = rmsToDb(ld.right_peak);
+            // External device input: use device_id from node
+            const key = `${node.deviceId}_${pairIdx}`;
+            inputMeter = inputsByKey.get(key);
+          } else {
+            // Prism channel: Find Prism input in graphMeters (device_id will be non-zero Prism device ID)
+            // We need to find the input that matches this pair_idx from Prism
+            const absolutePairIdx = Math.floor(((node.channelOffset ?? 0) + fromChannel) / 2);
+            // Search for matching input by pair_idx (assume all Prism inputs share same device_id)
+            for (const input of graphMeters.inputs) {
+              if (input.pair_idx === absolutePairIdx) {
+                inputMeter = { left_peak: input.left_peak, right_peak: input.right_peak };
+                break;
               }
             }
-          } else {
-            const pairIndex = Math.floor(((node.channelOffset ?? 0) + fromChannel) / 2);
-            const ld = allLevels.prism[pairIndex];
-            if (ld) {
-              leftDb = rmsToDb(ld.left_peak ?? 0);
-              rightDb = rmsToDb(ld.right_peak ?? 0);
-            }
+          }
+
+          if (inputMeter) {
+            leftDb = rmsToDb(inputMeter.left_peak);
+            rightDb = rmsToDb(inputMeter.right_peak);
           }
         } else if (node.type === 'bus') {
-          const bl = allLevels.buses.find((b: any) => b.id === node.busId);
-          if (bl) {
-            // Use post-fader levels for mixer meters
-            leftDb = rmsToDb(bl.post_left_peak);
-            rightDb = rmsToDb(bl.post_right_peak);
+          // Get bus meter by bus_idx
+          // node.busId is like "bus_1", extract the index
+          const busIdxMatch = node.busId?.match(/^bus_(\d+)$/);
+          if (busIdxMatch) {
+            const busIdx = parseInt(busIdxMatch[1], 10);
+            const busMeter = busesByIdx.get(busIdx);
+            if (busMeter) {
+              // GraphMeters provides raw bus output levels
+              leftDb = rmsToDb(busMeter.left_peak);
+              rightDb = rmsToDb(busMeter.right_peak);
+            }
           }
         }
 
@@ -1511,6 +1467,20 @@ export default function App() {
         }
       }
 
+      // Compute hash lower 8 bits for matching (same algorithm as Rust backend)
+      // This uses simple string hash similar to Rust's DefaultHasher
+      const computeHashLower8 = (deviceId: number): number => {
+        const str = deviceId.toString();
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+          const char = str.charCodeAt(i);
+          hash = ((hash << 5) - hash + char) | 0;
+        }
+        // Rust uses different hash algorithm, so we extract from node_id instead
+        // Just return 0 for now - we'll match by finding outputs for this device
+        return hash & 0xFF;
+      };
+
       // Debug: log master meter data (remove after debugging)
       if (masterCanvasCache.current.size > 0 && Math.random() < 0.01) {
         console.log('[Master Meter Debug]', {
@@ -1518,8 +1488,8 @@ export default function App() {
           focusedTargetNode: focusedTargetNode ? { id: focusedTargetNode.id, deviceId: focusedTargetNode.deviceId, libraryId: focusedTargetNode.libraryId } : null,
           masterDeviceId,
           focusedPairIndex,
-          outputKeys: Object.keys(allLevels.outputs),
-          outputs: allLevels.outputs,
+          outputCount: graphMeters.outputs.length,
+          outputs: graphMeters.outputs.map(o => ({ pair_idx: o.pair_idx, device_hash_lower8: o.device_hash_lower8 })),
         });
       }
 
@@ -1539,11 +1509,10 @@ export default function App() {
 
         let targetDb = -60;
         if (masterDeviceId != null) {
-          const deviceKey = `${masterDeviceId}_${focusedPairIndex}`;
-          const levels = allLevels.outputs[deviceKey];
-          if (Array.isArray(levels) && levels.length > 0) {
-            const ld = levels[0];
-            targetDb = isRight ? rmsToDb(ld?.right_peak ?? 0) : rmsToDb(ld?.left_peak ?? 0);
+          // Find output meter that matches this device and pair
+          const outputMeter = graphMeters.outputs.find(o => o.pair_idx === focusedPairIndex);
+          if (outputMeter) {
+            targetDb = isRight ? rmsToDb(outputMeter.right_peak) : rmsToDb(outputMeter.left_peak);
           }
         }
 
@@ -1584,35 +1553,44 @@ export default function App() {
         // Get peak level for this node
         let peakDb = -60;
         if (node.type === 'source') {
+          // Get input meters for this source
+          const channelOffset = node.channelOffset ?? 0;
+          const numPairs = Math.max(1, Math.floor((node.channelCount ?? 2) / 2));
+
           if (node.sourceType === 'device' && node.deviceId !== undefined) {
-            const dev = allLevels.devices[String(node.deviceId)];
-            if (Array.isArray(dev) && dev.length > 0) {
-              // Find max peak across all pairs
-              for (const ld of dev) {
-                const leftDb = rmsToDb(ld?.left_peak ?? 0);
-                const rightDb = rmsToDb(ld?.right_peak ?? 0);
+            // External device input
+            for (let i = 0; i < numPairs; i++) {
+              const key = `${node.deviceId}_${i}`;
+              const inputMeter = inputsByKey.get(key);
+              if (inputMeter) {
+                const leftDb = rmsToDb(inputMeter.left_peak);
+                const rightDb = rmsToDb(inputMeter.right_peak);
                 peakDb = Math.max(peakDb, leftDb, rightDb);
               }
             }
           } else {
-            // Prism channel
-            const channelOffset = node.channelOffset ?? 0;
-            const numPairs = Math.max(1, Math.floor((node.channelCount ?? 2) / 2));
+            // Prism channel - search by pair_idx
             for (let i = 0; i < numPairs; i++) {
               const pairIndex = Math.floor(channelOffset / 2) + i;
-              const ld = allLevels.prism[pairIndex];
-              if (ld) {
-                const leftDb = rmsToDb(ld.left_peak ?? 0);
-                const rightDb = rmsToDb(ld.right_peak ?? 0);
-                peakDb = Math.max(peakDb, leftDb, rightDb);
+              for (const input of graphMeters.inputs) {
+                if (input.pair_idx === pairIndex) {
+                  const leftDb = rmsToDb(input.left_peak);
+                  const rightDb = rmsToDb(input.right_peak);
+                  peakDb = Math.max(peakDb, leftDb, rightDb);
+                  break;
+                }
               }
             }
           }
         } else if (node.type === 'bus') {
-          const bl = allLevels.buses.find((b: any) => b.id === node.busId);
-          if (bl) {
-            // Use pre-fader levels for patch view node meters
-            peakDb = Math.max(rmsToDb(bl.pre_left_peak), rmsToDb(bl.pre_right_peak));
+          // Get bus meter by bus_idx
+          const busIdxMatch = node.busId?.match(/^bus_(\d+)$/);
+          if (busIdxMatch) {
+            const busIdx = parseInt(busIdxMatch[1], 10);
+            const busMeter = busesByIdx.get(busIdx);
+            if (busMeter) {
+              peakDb = Math.max(rmsToDb(busMeter.left_peak), rmsToDb(busMeter.right_peak));
+            }
           }
         } else if (node.type === 'target') {
           // Target node: use output levels - get deviceId from node or libraryId
@@ -1626,12 +1604,11 @@ export default function App() {
           if (devId != null) {
             const numPairs = Math.max(1, Math.floor((node.channelCount ?? 2) / 2));
             for (let pairIdx = 0; pairIdx < numPairs; pairIdx++) {
-              const deviceKey = `${devId}_${pairIdx}`;
-              const levels = allLevels.outputs[deviceKey];
-              if (Array.isArray(levels) && levels.length > 0) {
-                const ld = levels[0];
-                const leftDb = rmsToDb(ld?.left_peak ?? 0);
-                const rightDb = rmsToDb(ld?.right_peak ?? 0);
+              // Find output meter for this pair
+              const outputMeter = graphMeters.outputs.find(o => o.pair_idx === pairIdx);
+              if (outputMeter) {
+                const leftDb = rmsToDb(outputMeter.left_peak);
+                const rightDb = rmsToDb(outputMeter.right_peak);
                 peakDb = Math.max(peakDb, leftDb, rightDb);
               }
             }
@@ -2383,19 +2360,19 @@ export default function App() {
         } else if (sourceNode.type === 'source' && targetNode.type === 'bus') {
           const busId = targetNode.busId;
           if (busId) {
-            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, getSendDb(level * 100, conn.muted), conn.muted).catch(console.error);
+            updateBusSend('input', sourceNode.deviceId?.toString() ?? '0', srcDevId, srcCh, 'bus', busId, tgtCh, getSendDb(level, conn.muted), conn.muted).catch(console.error);
           }
         } else if (sourceNode.type === 'bus' && targetNode.type === 'bus') {
           const srcBusId = sourceNode.busId;
           const tgtBusId = targetNode.busId;
           if (srcBusId && tgtBusId) {
-            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, getSendDb(level * 100, conn.muted), conn.muted).catch(console.error);
+            updateBusSend('bus', srcBusId, 0, srcCh, 'bus', tgtBusId, tgtCh, getSendDb(level, conn.muted), conn.muted).catch(console.error);
           }
         } else if (sourceNode.type === 'bus' && targetNode.type === 'target') {
           const srcBusId = sourceNode.busId;
           const targetData = outputTargets.find(t => t.id === targetNode.libraryId);
           if (srcBusId && targetData) {
-            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, getSendDb(level * 100, conn.muted), conn.muted).catch(console.error);
+            updateBusSend('bus', srcBusId, 0, srcCh, 'output', targetData.deviceId, tgtCh, getSendDb(level, conn.muted), conn.muted).catch(console.error);
           }
         }
       }
@@ -3522,42 +3499,40 @@ export default function App() {
                 const lv = latestLevelsRef.current;
                 if (node.type === 'source') {
                   if (isDeviceNode && node.deviceId != null) {
-                    const devLevels = lv.devices[String(node.deviceId)];
-                    if (Array.isArray(devLevels) && devLevels.length > 0) {
-                      for (const ld of devLevels) {
-                        hdrLeftDb = Math.max(hdrLeftDb, rmsToDb(ld.left_peak ?? 0));
-                        hdrRightDb = Math.max(hdrRightDb, rmsToDb(ld.right_peak ?? 0));
+                    // External device input - find matching input meters
+                    for (const input of lv.inputs) {
+                      if (input.device_id === node.deviceId) {
+                        hdrLeftDb = Math.max(hdrLeftDb, rmsToDb(input.left_peak ?? 0));
+                        hdrRightDb = Math.max(hdrRightDb, rmsToDb(input.right_peak ?? 0));
                       }
                     }
                   } else {
+                    // Prism channel - find by pair_idx
                     const channelOffset = node.channelOffset ?? 0;
                     const pairIndex = Math.floor(channelOffset / 2);
-                    const ld = lv.prism[pairIndex];
-                    if (ld) {
-                      hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
-                      hdrRightDb = rmsToDb(ld.right_peak ?? 0);
+                    const inputMeter = lv.inputs.find(i => i.pair_idx === pairIndex);
+                    if (inputMeter) {
+                      hdrLeftDb = rmsToDb(inputMeter.left_peak ?? 0);
+                      hdrRightDb = rmsToDb(inputMeter.right_peak ?? 0);
                     }
                   }
                 } else if (node.type === 'bus') {
-                  const bl = lv.buses.find((b: any) => b.id === node.busId);
-                  if (bl) {
-                    hdrLeftDb = rmsToDb(bl.pre_left_peak ?? 0);
-                    hdrRightDb = rmsToDb(bl.pre_right_peak ?? 0);
+                  // Get bus meter by bus_idx
+                  const busIdxMatch = node.busId?.match(/^bus_(\d+)$/);
+                  if (busIdxMatch) {
+                    const busIdx = parseInt(busIdxMatch[1], 10);
+                    const busMeter = lv.buses.find(b => b.bus_idx === busIdx);
+                    if (busMeter) {
+                      hdrLeftDb = rmsToDb(busMeter.left_peak ?? 0);
+                      hdrRightDb = rmsToDb(busMeter.right_peak ?? 0);
+                    }
                   }
                 } else if (node.type === 'target') {
-                  let devId = node.deviceId;
-                  if (devId == null && node.libraryId) {
-                    const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
-                    if (match) devId = parseInt(match[1], 10);
-                  }
-                  if (devId != null) {
-                    const deviceKey = `${devId}_0`;
-                    const levels = lv.outputs[deviceKey];
-                    if (Array.isArray(levels) && levels.length > 0) {
-                      const ld = levels[0];
-                      hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
-                      hdrRightDb = rmsToDb(ld.right_peak ?? 0);
-                    }
+                  // Target node - find output meter
+                  const outputMeter = lv.outputs.find(o => o.pair_idx === 0);
+                  if (outputMeter) {
+                    hdrLeftDb = rmsToDb(outputMeter.left_peak ?? 0);
+                    hdrRightDb = rmsToDb(outputMeter.right_peak ?? 0);
                   }
                 }
               } catch (e) {
@@ -4243,42 +4218,40 @@ export default function App() {
                   const lv = latestLevelsRef.current;
                   if (node.type === 'source') {
                     if (isDeviceNode && node.deviceId != null) {
-                      const devLevels = lv.devices[String(node.deviceId)];
-                      if (Array.isArray(devLevels) && devLevels.length > 0) {
-                        for (const ld of devLevels) {
-                          hdrLeftDb = Math.max(hdrLeftDb, rmsToDb(ld.left_peak ?? 0));
-                          hdrRightDb = Math.max(hdrRightDb, rmsToDb(ld.right_peak ?? 0));
+                      // External device input - find matching input meters
+                      for (const input of lv.inputs) {
+                        if (input.device_id === node.deviceId) {
+                          hdrLeftDb = Math.max(hdrLeftDb, rmsToDb(input.left_peak ?? 0));
+                          hdrRightDb = Math.max(hdrRightDb, rmsToDb(input.right_peak ?? 0));
                         }
                       }
                     } else {
+                      // Prism channel - find by pair_idx
                       const channelOffset = node.channelOffset ?? 0;
                       const pairIndex = Math.floor(channelOffset / 2);
-                      const ld = lv.prism[pairIndex];
-                      if (ld) {
-                        hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
-                        hdrRightDb = rmsToDb(ld.right_peak ?? 0);
+                      const inputMeter = lv.inputs.find(i => i.pair_idx === pairIndex);
+                      if (inputMeter) {
+                        hdrLeftDb = rmsToDb(inputMeter.left_peak ?? 0);
+                        hdrRightDb = rmsToDb(inputMeter.right_peak ?? 0);
                       }
                     }
                   } else if (node.type === 'bus') {
-                    const bl = lv.buses.find((b: any) => b.id === node.busId);
-                    if (bl) {
-                      hdrLeftDb = rmsToDb(bl.pre_left_peak ?? 0);
-                      hdrRightDb = rmsToDb(bl.pre_right_peak ?? 0);
+                    // Get bus meter by bus_idx
+                    const busIdxMatch = node.busId?.match(/^bus_(\d+)$/);
+                    if (busIdxMatch) {
+                      const busIdx = parseInt(busIdxMatch[1], 10);
+                      const busMeter = lv.buses.find(b => b.bus_idx === busIdx);
+                      if (busMeter) {
+                        hdrLeftDb = rmsToDb(busMeter.left_peak ?? 0);
+                        hdrRightDb = rmsToDb(busMeter.right_peak ?? 0);
+                      }
                     }
                   } else if (node.type === 'target') {
-                    let devId = node.deviceId;
-                    if (devId == null && node.libraryId) {
-                      const match = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
-                      if (match) devId = parseInt(match[1], 10);
-                    }
-                    if (devId != null) {
-                      const deviceKey = `${devId}_0`;
-                      const levels = lv.outputs[deviceKey];
-                      if (Array.isArray(levels) && levels.length > 0) {
-                        const ld = levels[0];
-                        hdrLeftDb = rmsToDb(ld.left_peak ?? 0);
-                        hdrRightDb = rmsToDb(ld.right_peak ?? 0);
-                      }
+                    // Target node - find output meter
+                    const outputMeter = lv.outputs.find(o => o.pair_idx === 0);
+                    if (outputMeter) {
+                      hdrLeftDb = rmsToDb(outputMeter.left_peak ?? 0);
+                      hdrRightDb = rmsToDb(outputMeter.right_peak ?? 0);
                     }
                   }
                 } catch (e) {

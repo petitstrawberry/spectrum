@@ -9,8 +9,8 @@
 //! Virtual sub-devices (from Aggregate Device) are represented in the UI
 //! but internally they're just channel ranges within the single device.
 
+use crate::audio_graph::{get_graph_manager, hash_device_id, MAX_FRAMES};
 use crate::audio_unit::get_au_manager;
-use crate::mixer::{get_mixer_state, hash_device_id, get_graph_processor, NodeId};
 use crate::vdsp::VDsp;
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_default_device_id, get_device_name, set_device_sample_rate,
@@ -29,7 +29,7 @@ use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::CFString;
 use parking_lot::RwLock;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 /// Sample rate for audio output
@@ -39,9 +39,6 @@ const SAMPLE_RATE: f64 = 48000.0;
 const kAudioObjectPropertyClass: u32 = 0x636c6173; // 'clas'
 const kAudioAggregateDeviceClassID: u32 = 0x61616767; // 'aagg'
 const kAudioAggregateDevicePropertyFullSubDeviceList: u32 = 0x67727570; // 'grup'
-
-/// Callback count for diagnostics
-static CALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Current active output device (only ONE at a time)
 static ACTIVE_OUTPUT: LazyLock<RwLock<Option<ActiveOutput>>> =
@@ -363,19 +360,12 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
     let running_callback = running.clone();
     let dev_id_hash = hash_device_id(&device_id.to_string());
-    let dev_id_for_callback = device_id;
     let out_ch = output_channels as usize;
 
-    // Pre-compute meter keys to avoid format! in callback (heap allocation)
-    let max_pairs = (output_channels as usize + 1) / 2;
-    let meter_keys: Vec<String> = (0..max_pairs)
-        .map(|pair_idx| format!("{}_{}", device_id, pair_idx))
-        .collect();
+    println!("[AudioOutput] Device {} hash={:x} hash_lower8={:x} channels={}",
+        device_id, dev_id_hash, (dev_id_hash as u16) & 0x00FF, out_ch);
 
-    println!("[AudioOutput] Device {} hash={:x} channels={}",
-        device_id, dev_id_hash, out_ch);
-
-    // Set render callback - SIMPLE: process graph directly into output buffer
+    // Set render callback - Uses new audio_graph::GraphManager
     type Args = render_callback::Args<data::Interleaved<f32>>;
 
     if let Err(e) = audio_unit.set_render_callback(move |args: Args| {
@@ -387,28 +377,23 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
         let buffer = data.buffer;
         let frames = num_frames as usize;
 
-        if frames > crate::mixer::MAX_FRAMES {
+        if frames > MAX_FRAMES {
             return Ok(());
         }
-
-        // Track callback count
-        let callback_num = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
 
         // Clear output buffer
         VDsp::clear(buffer);
 
-        // Get mixer state and graph
-        let mixer_state = get_mixer_state();
-        let snapshot = mixer_state.load_snapshot();
-        let graph = &snapshot.audio_graph;
+        // Get graph manager
+        let graph_manager = get_graph_manager();
+        let graph = graph_manager.load_graph();
 
-        if graph.processing_order.is_empty() {
+        if graph.is_empty() {
             return Ok(());
         }
 
-        // Get graph processor
-        let processor_arc = get_graph_processor();
-        let mut processor = match processor_arc.try_write() {
+        // Get processor (try_write to avoid blocking)
+        let mut processor = match graph_manager.try_processor() {
             Some(p) => p,
             None => {
                 // Lock contention - skip this callback
@@ -428,12 +413,11 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
 
         // Define plugin processor
         let au_manager = get_au_manager();
-        let buses = &graph.buses;
         let process_plugins = |bus_idx: u8, left: &mut [f32], right: &mut [f32]| {
-            if let Some(bus) = buses.get(bus_idx as usize) {
-                if !bus.plugin_ids.is_empty() {
+            if let Some(bus_data) = graph.bus_data(bus_idx) {
+                if !bus_data.plugin_ids.is_empty() {
                     au_manager.process_chain(
-                        &bus.plugin_ids,
+                        &bus_data.plugin_ids,
                         left,
                         right,
                         0.0,
@@ -442,27 +426,27 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
             }
         };
 
-        // Process the audio graph
-        processor.process(
-            graph,
-            frames,
-            callback_num,
-            read_input,
-            process_plugins,
-        );
+        // Process the audio graph (metering is computed internally)
+        processor.process(&graph, frames, read_input, process_plugins);
 
-        // Copy output node buffers directly to interleaved output buffer
-        // All output nodes target the SAME device, just different channel pairs
-        // Also calculate metering for each output node
-        for &node_id in graph.processing_order.iter() {
+        // Store meters for UI access
+        graph_manager.store_meters(processor.meters().clone());
+
+        // Copy output node buffers to interleaved output buffer
+        for &node_id in graph.processing_order() {
             if node_id.is_output() {
-                if let Some(buf) = processor.get_buffer(node_id) {
+                // Check if this output is for our device
+                if !node_id.matches_output_device(dev_id_hash) {
+                    continue;
+                }
+
+                if let Some(buf) = processor.read_buffer(node_id) {
                     if buf.valid_frames == 0 {
                         continue;
                     }
 
                     // Get target channel pair from NodeId
-                    let pair_idx = (node_id.0 & 0x0F) as usize;
+                    let pair_idx = node_id.output_pair_idx().unwrap_or(0) as usize;
                     let left_ch = pair_idx * 2;
                     let right_ch = left_ch + 1;
 
@@ -482,57 +466,12 @@ fn output_thread(device_id: u32, output_channels: u32, running: Arc<AtomicBool>)
                             }
                         }
                     }
-
-                    // Update output metering for this channel pair (non-blocking)
-                    // Use pre-computed meter key to avoid heap allocation
-                    if let Some(meter_key) = meter_keys.get(pair_idx) {
-                        let left_peak = VDsp::peak(&buf.left[..valid]);
-                        let right_peak = VDsp::peak(&buf.right[..valid]);
-
-                        mixer_state.try_update_output_levels(meter_key, crate::mixer::ChannelLevels {
-                            left_peak,
-                            right_peak,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Update bus metering
-        for (bus_idx, bus) in graph.buses.iter().enumerate() {
-            if bus.muted {
-                continue;
-            }
-            let node_id = NodeId::bus(bus_idx as u8);
-            if let Some(buf) = processor.get_buffer(node_id) {
-                if buf.valid_frames > 0 {
-                    let fader = bus.fader;
-                    // Use only the valid frames available in the buffer when computing meters
-                    let valid = buf.valid_frames.min(frames);
-                    // Pre-fader levels (for patch view node meters)
-                    let pre_left_peak = VDsp::peak(&buf.left[..valid]);
-                    let pre_right_peak = VDsp::peak(&buf.right[..valid]);
-                    // Post-fader levels (for mixer meters)
-                    let post_left_peak = pre_left_peak * fader;
-                    let post_right_peak = pre_right_peak * fader;
-                    // Update bus levels (pre/post peaks)
-                    mixer_state.update_bus_level(bus_idx, pre_left_peak, pre_right_peak, post_left_peak, post_right_peak);
-
-                    // Occasional debug log (throttled) to inspect pre/post/fader values for tracing
-                    // Avoid noisy logs by printing only every N callbacks and only for low-numbered buses
-                    const LOG_EVERY: usize = 512;
-                    if (CALLBACK_COUNT.load(Ordering::Relaxed) as usize) % LOG_EVERY == 0 && bus_idx < 8 {
-                        println!("[AudioOutput][MeterDebug] bus={} preL={:.6} preR={:.6} postL={:.6} postR={:.6} fader={:.3}",
-                            bus_idx, pre_left_peak, pre_right_peak, post_left_peak, post_right_peak, fader);
-                    }
                 }
             }
         }
 
         // Clip protection
         VDsp::clip(buffer, -1.0, 1.0);
-
-
 
         Ok(())
     }) {

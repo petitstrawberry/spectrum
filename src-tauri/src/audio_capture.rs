@@ -14,7 +14,7 @@ use coreaudio::audio_unit::macos_helpers::{
 };
 use coreaudio::sys::{
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyScopeInput,
-    kAudioDevicePropertyScopeOutput, kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyStreamConfiguration,
     kAudioObjectPropertyElementMaster, AudioBuffer, AudioBufferList,
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData,
@@ -73,6 +73,13 @@ impl OutputReadPositions {
     fn new(num_channels: usize) -> Self {
         let positions = (0..num_channels)
             .map(|_| AtomicUsize::new(0))
+            .collect();
+        Self { positions }
+    }
+
+    fn new_at_position(num_channels: usize, write_positions: &[usize]) -> Self {
+        let positions = (0..num_channels)
+            .map(|i| AtomicUsize::new(write_positions.get(i).copied().unwrap_or(0)))
             .collect();
         Self { positions }
     }
@@ -705,10 +712,15 @@ pub fn register_output_device(device_id: u32) {
     if let Some(ref audio_buffers) = *buffers {
         let mut positions = DEVICE_READ_POSITIONS.write();
         if !positions.contains_key(&device_id) {
-            // Create lock-free position storage
+            // Get current write positions for each channel
+            let write_positions: Vec<usize> = audio_buffers.channels.iter()
+                .map(|ch| ch.get_write_pos())
+                .collect();
+            
+            // Create lock-free position storage starting at current write position
             let num_channels = audio_buffers.channels.len();
-            positions.insert(device_id, Arc::new(OutputReadPositions::new(num_channels)));
-            println!("[AudioCapture] Registered output device {} for reading", device_id);
+            positions.insert(device_id, Arc::new(OutputReadPositions::new_at_position(num_channels, &write_positions)));
+            println!("[AudioCapture] Registered output device {} for reading at write_pos[0]={}", device_id, write_positions.get(0).unwrap_or(&0));
         }
     }
 }

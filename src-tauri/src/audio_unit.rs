@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 // CoreAudio bindings

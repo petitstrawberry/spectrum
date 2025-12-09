@@ -8,8 +8,8 @@
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
-use objc2::{class, msg_send, sel, MainThreadOnly, Encode, Encoding, RefEncode};
+use objc2::runtime::AnyObject;
+use objc2::{class, msg_send, MainThreadOnly, Encode, Encoding, RefEncode};
 use objc2_app_kit::{NSWindow, NSWindowStyleMask, NSApplication, NSBackingStoreType};
 use objc2_foundation::{NSRect, NSPoint, NSSize, NSString, MainThreadMarker};
 use std::collections::HashMap;

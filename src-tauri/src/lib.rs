@@ -4,17 +4,18 @@
 
 mod audio;
 mod audio_capture;
+mod audio_graph;
 mod audio_output;
 mod audio_unit;
 mod audio_unit_ui;
 mod config;
 mod mixer;
 mod prismd;
+mod route_config;
 mod router;
 mod vdsp;
 
 use serde::{Deserialize, Serialize};
-use tauri::ipc::Response;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,6 +95,53 @@ pub struct AllLevels {
     pub output: std::collections::HashMap<String, Vec<LevelData>>,
 }
 
+/// Input meter data (from audio_graph)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputMeterData {
+    pub device_id: u32,
+    pub pair_idx: u8,
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
+
+/// Bus meter data (from audio_graph)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusMeterData {
+    pub bus_idx: u8,
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
+
+/// Output meter data (from audio_graph)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputMeterData {
+    pub node_id: u16,
+    pub pair_idx: u8,
+    pub device_hash_lower8: u8, // Lower 8 bits of device hash for matching
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
+
+/// Send meter data (from audio_graph)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMeterData {
+    pub source_id: u16,
+    pub target_id: u16,
+    pub left_peak: f32,
+    pub right_peak: f32,
+    pub gain: f32,
+    pub gain_db: f32,
+}
+
+/// All graph meters response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphMetersData {
+    pub inputs: Vec<InputMeterData>,
+    pub buses: Vec<BusMeterData>,
+    pub outputs: Vec<OutputMeterData>,
+    pub sends: Vec<SendMeterData>,
+}
+
 // --- Tauri Commands ---
 
 #[tauri::command]
@@ -140,218 +188,6 @@ async fn get_audio_levels(device_id: String) -> Result<Vec<f32>, String> {
 }
 
 // --- Mixer/Router Commands ---
-
-/// Get all input levels (32 stereo pairs from Prism)
-#[tauri::command]
-fn get_input_levels() -> Vec<LevelData> {
-    // Use real audio capture if running, otherwise fallback to simulated
-    if audio_capture::is_capture_running() {
-        // Update mixer state from real capture data
-        audio_capture::update_mixer_levels();
-
-        // Get real captured levels
-        audio_capture::get_capture_levels()
-            .into_iter()
-            .map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak })
-            .collect()
-    } else {
-        // Fallback to simulated levels for testing without Prism device
-        router::simulate_levels();
-
-        let mixer_state = mixer::get_mixer_state();
-        let levels = mixer_state.get_input_levels();
-
-        levels.iter().map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak }).collect()
-    }
-}
-
-/// Get output levels for a specific device
-#[tauri::command]
-fn get_output_device_levels(device_id: String) -> Vec<LevelData> {
-    router::get_output_levels(&device_id)
-        .into_iter()
-        .map(|(left_peak, right_peak)| LevelData { left_peak, right_peak })
-        .collect()
-}
-
-/// Get output levels for multiple devices in a single call (batch API)
-#[tauri::command]
-fn get_output_device_levels_batch(device_ids: Vec<String>) -> std::collections::HashMap<String, Vec<LevelData>> {
-    router::get_output_levels_batch(&device_ids)
-        .into_iter()
-        .map(|(device_id, levels)| {
-            (device_id, levels.into_iter().map(|(left_peak, right_peak)| LevelData { left_peak, right_peak }).collect())
-        })
-        .collect()
-}
-
-/// Get all levels in a single IPC call (optimized for high-frequency polling)
-/// This reduces IPC overhead by returning all level data at once
-#[tauri::command]
-fn get_all_levels(device_ids: Vec<String>, output_keys: Vec<String>) -> AllLevelsData {
-    let mixer_state = mixer::get_mixer_state();
-
-    // 1. Prism input levels (peak-only)
-    let prism = if audio_capture::is_capture_running() {
-        audio_capture::get_capture_levels()
-            .into_iter()
-            .map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak })
-            .collect()
-    } else {
-        mixer_state.get_input_levels()
-            .iter()
-            .map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak })
-            .collect()
-    };
-
-    // 2. Input device levels
-    let mut devices = HashMap::new();
-    for device_id_str in device_ids {
-        if let Ok(device_id) = device_id_str.parse::<u32>() {
-            let levels = audio_capture::get_input_device_levels(device_id);
-            if !levels.is_empty() {
-                devices.insert(device_id_str, levels.into_iter().map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak }).collect());
-            }
-        }
-    }
-
-    // 3. Bus levels
-    let buses = mixer_state.get_bus_levels()
-        .into_iter()
-        .map(|(id, levels, _sends)| BusLevelData {
-            id,
-            pre_left_peak: levels.pre_left_peak,
-            pre_right_peak: levels.pre_right_peak,
-            post_left_peak: levels.post_left_peak,
-            post_right_peak: levels.post_right_peak,
-        })
-        .collect();
-
-    // 4. Output levels
-    let mut outputs = HashMap::new();
-    for key in output_keys {
-        let levels = mixer_state.get_output_levels(&key);
-        if !levels.is_empty() {
-            outputs.insert(key, levels.into_iter().map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak }).collect());
-        }
-    }
-
-    AllLevelsData {
-        prism,
-        devices,
-        buses,
-        outputs,
-    }
-}
-
-/// Get Prism input levels as a compact binary blob (f32 little-endian)
-/// Format: sequence of f32 values: [left_peak, right_peak] * N
-#[tauri::command]
-async fn get_prism_levels_binary() -> Result<Response, String> {
-    let mixer_state = mixer::get_mixer_state();
-
-    let prism_levels: Vec<LevelData> = if audio_capture::is_capture_running() {
-        audio_capture::get_capture_levels().into_iter().map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak }).collect()
-    } else {
-        mixer_state.get_input_levels().iter().map(|l| LevelData { left_peak: l.left_peak, right_peak: l.right_peak }).collect()
-    };
-
-    // Serialize to Vec<u8> as little-endian f32 sequence: [left_peak, right_peak] * N
-    let mut buf: Vec<u8> = Vec::with_capacity(prism_levels.len() * 2 * 4);
-    for ld in prism_levels.iter() {
-        buf.extend_from_slice(&ld.left_peak.to_le_bytes());
-        buf.extend_from_slice(&ld.right_peak.to_le_bytes());
-    }
-
-    Ok(Response::new(buf))
-}
-
-/// Get mixer/device/bus/output levels as a compact binary blob.
-/// Format:
-/// u32 num_devices
-/// for each device: u32 key_len, [key bytes], u32 count, (f32*4)*count
-/// u32 num_buses
-/// for each bus: u32 id_len, [id bytes], f32 pre_left_peak, f32 pre_right_peak, f32 post_left_peak, f32 post_right_peak
-/// u32 num_outputs
-/// for each output: u32 key_len, [key bytes], u32 count, (f32*4)*count
-#[tauri::command]
-async fn get_mixer_levels_binary(device_ids: Vec<String>, output_keys: Vec<String>) -> Result<Response, String> {
-    let mixer_state = mixer::get_mixer_state();
-
-    // Devices
-    let mut device_entries: Vec<(String, Vec<LevelData>)> = Vec::new();
-    for device_id_str in device_ids {
-        if let Ok(device_id) = device_id_str.parse::<u32>() {
-            let levels = audio_capture::get_input_device_levels(device_id);
-            if !levels.is_empty() {
-                let vec_levels = levels.into_iter().map(|l| LevelData {
-                    left_peak: l.left_peak,
-                    right_peak: l.right_peak,
-                }).collect();
-                device_entries.push((device_id_str, vec_levels));
-            }
-        }
-    }
-
-    // Buses
-    let buses = mixer_state.get_bus_levels(); // Vec<(id, levels, sends)>
-
-    // Outputs
-    let mut output_entries: Vec<(String, Vec<LevelData>)> = Vec::new();
-    for key in output_keys {
-        let levels = mixer_state.get_output_levels(&key);
-        if !levels.is_empty() {
-            let vec_levels = levels.into_iter().map(|l| LevelData {
-
-                left_peak: l.left_peak,
-                right_peak: l.right_peak,
-            }).collect();
-            output_entries.push((key, vec_levels));
-        }
-    }
-
-    let mut buf: Vec<u8> = Vec::new();
-
-    // Devices
-    buf.extend_from_slice(&(device_entries.len() as u32).to_le_bytes());
-    for (key, levels) in device_entries.iter() {
-        let key_bytes = key.as_bytes();
-        buf.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(key_bytes);
-        buf.extend_from_slice(&(levels.len() as u32).to_le_bytes());
-        for ld in levels.iter() {
-            buf.extend_from_slice(&ld.left_peak.to_le_bytes());
-            buf.extend_from_slice(&ld.right_peak.to_le_bytes());
-        }
-    }
-
-    // Buses
-    buf.extend_from_slice(&(buses.len() as u32).to_le_bytes());
-    for (id, levels, _sends) in buses.into_iter() {
-        let id_bytes = id.as_bytes();
-        buf.extend_from_slice(&(id_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(id_bytes);
-        buf.extend_from_slice(&levels.pre_left_peak.to_le_bytes());
-        buf.extend_from_slice(&levels.pre_right_peak.to_le_bytes());
-        buf.extend_from_slice(&levels.post_left_peak.to_le_bytes());
-        buf.extend_from_slice(&levels.post_right_peak.to_le_bytes());
-    }
-
-    // Outputs
-    buf.extend_from_slice(&(output_entries.len() as u32).to_le_bytes());
-    for (key, levels) in output_entries.iter() {
-        let key_bytes = key.as_bytes();
-        buf.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(key_bytes);
-        buf.extend_from_slice(&(levels.len() as u32).to_le_bytes());
-        for ld in levels.iter() {
-            buf.extend_from_slice(&ld.left_peak.to_le_bytes());
-            buf.extend_from_slice(&ld.right_peak.to_le_bytes());
-        }
-    }
-
-    Ok(Response::new(buf))
-}
 
 /// Update a send connection
 /// Update a send connection (1ch unit)
@@ -623,6 +459,73 @@ fn get_bus_levels() -> Vec<BusLevelInfo> {
         .collect()
 }
 
+/// Get all graph meters (new API using audio_graph)
+/// Returns input, bus, output, and send meters computed by GraphProcessor
+#[tauri::command]
+fn get_graph_meters() -> GraphMetersData {
+    let graph_manager = audio_graph::get_graph_manager();
+    let meters = graph_manager.load_meters();
+
+    // Convert input meters
+    let inputs: Vec<InputMeterData> = meters.inputs.iter()
+        .filter_map(|(node_id, levels)| {
+            node_id.input_info().map(|(device_id, pair_idx)| InputMeterData {
+                device_id,
+                pair_idx,
+                left_peak: levels.left_peak,
+                right_peak: levels.right_peak,
+            })
+        })
+        .collect();
+
+    // Convert bus meters
+    let buses: Vec<BusMeterData> = meters.buses.iter()
+        .map(|(&bus_idx, levels)| BusMeterData {
+            bus_idx,
+            left_peak: levels.left_peak,
+            right_peak: levels.right_peak,
+        })
+        .collect();
+
+    // Convert output meters
+    let outputs: Vec<OutputMeterData> = meters.outputs.iter()
+        .filter_map(|(node_id, levels)| {
+            node_id.output_pair_idx().map(|pair_idx| {
+                // Extract device hash lower 8 bits from NodeId
+                let device_hash_lower8 = ((node_id.0 >> 4) & 0x00FF) as u8;
+                OutputMeterData {
+                    node_id: node_id.0,
+                    pair_idx,
+                    device_hash_lower8,
+                    left_peak: levels.left_peak,
+                    right_peak: levels.right_peak,
+                }
+            })
+        })
+        .collect();
+
+    // Convert send meters
+    let sends: Vec<SendMeterData> = meters.sends.iter()
+        .flat_map(|(source_id, send_levels)| {
+            send_levels.iter().map(move |s| SendMeterData {
+                source_id: source_id.0,
+                target_id: s.target.0,
+                left_peak: s.left_peak,
+                right_peak: s.right_peak,
+                gain: s.gain,
+                gain_db: s.gain_db,
+            })
+        })
+        .collect();
+
+    GraphMetersData {
+        inputs,
+        buses,
+        outputs,
+        sends,
+    }
+}
+
 /// Reserve a bus id and mark the slot (returns e.g. "bus_1")
 #[tauri::command]
 fn reserve_bus_id() -> Option<String> {
@@ -645,6 +548,9 @@ fn update_bus_send(
     level: f32,
     muted: bool,
 ) {
+    println!("[Spectrum] update_bus_send: src_type={}, src_id={}, src_dev={}, src_ch={}, tgt_type={}, tgt_id={}, tgt_ch={}, level={}, muted={}",
+        source_type, source_id, source_device, source_channel, target_type, target_id, target_channel, level, muted);
+
     let src_type = match source_type.as_str() {
         "input" => mixer::BusSendSourceType::Input,
         "bus" => mixer::BusSendSourceType::Bus,
@@ -749,14 +655,15 @@ fn debug_list_mixer_sends() -> Result<serde_json::Value, String> {
 
     let bs = bus_sends.into_iter().map(|b| {
         json!({
-            "source_type": b.source_type,
+            "source_type": format!("{:?}", b.source_type),
+            "source_id": b.source_id,
             "source_device": b.source_device,
             "source_channel": b.source_channel,
-            "target_type": b.target_type,
-            "target_device_hash": b.target_device_hash,
+            "target_type": format!("{:?}", b.target_type),
+            "target_id": b.target_id,
             "target_channel": b.target_channel,
             "level": b.level,
-            "active": b.active,
+            "muted": b.muted,
         })
     }).collect::<Vec<_>>();
 
@@ -1354,12 +1261,6 @@ pub fn run() {
             get_driver_status,
             get_audio_levels,
             // Mixer/Router commands
-            get_input_levels,
-            get_output_device_levels,
-            get_output_device_levels_batch,
-            get_all_levels,
-            get_prism_levels_binary,
-            get_mixer_levels_binary,
             update_mixer_send,
             remove_mixer_send,
             clear_all_mixer_sends,
@@ -1394,6 +1295,7 @@ pub fn run() {
             set_bus_plugins,
             get_buses,
             get_bus_levels,
+            get_graph_meters,
             reserve_bus_id,
             update_bus_send,
             remove_bus_send,

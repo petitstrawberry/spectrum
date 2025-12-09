@@ -213,146 +213,6 @@ export interface LevelData {
 // --- Mixer/Router API Functions ---
 
 /**
- * Get all input levels (32 stereo pairs from Prism)
- */
-export async function getInputLevels(): Promise<LevelData[]> {
-  return invoke<LevelData[]>('get_input_levels');
-}
-
-/**
- * Get output levels for a specific device
- */
-export async function getOutputDeviceLevels(deviceId: string): Promise<LevelData[]> {
-  return invoke<LevelData[]>('get_output_device_levels', { deviceId });
-}
-
-/**
- * Get output levels for multiple devices in a single call (batch API)
- */
-export async function getOutputDeviceLevelsBatch(deviceIds: string[]): Promise<Record<string, LevelData[]>> {
-  return invoke<Record<string, LevelData[]>>('get_output_device_levels_batch', { deviceIds });
-}
-
-/**
- * Bus level data
- */
-export interface BusLevelData {
-  id: string;
-  pre_left_peak: number;
-  pre_right_peak: number;
-  post_left_peak: number;
-  post_right_peak: number;
-  // Per-send post levels for outgoing edges from this bus
-  sends?: BusSendLevel[];
-}
-
-export interface BusSendLevel {
-  // Compact NodeId numeric identifier (u16 from backend)
-  target: number;
-  target_ch: number;
-  post_left_peak: number;
-  post_right_peak: number;
-  send_level: number; // linear
-  send_level_db: number; // dB
-}
-
-/**
- * All levels response - combined response for all level types
- */
-export interface AllLevelsData {
-  prism: LevelData[];
-  devices: Record<string, LevelData[]>;
-  buses: BusLevelData[];
-  outputs: Record<string, LevelData[]>;
-}
-
-/**
- * Get all levels in a single IPC call (optimized for high-frequency polling)
- */
-export async function getAllLevels(deviceIds: string[], outputKeys: string[]): Promise<AllLevelsData> {
-  return invoke<AllLevelsData>('get_all_levels', { deviceIds, outputKeys });
-}
-
-/**
- * Get Prism input levels as a binary Float32Array (zero-copy when possible).
- * The backend returns a byte sequence of little-endian f32 values in the order:
- * [left_peak, right_peak] repeated for each stereo pair.
- */
-export async function getPrismLevelsBinary(): Promise<Float32Array> {
-  try {
-    const buffer = await invoke<ArrayBuffer>('get_prism_levels_binary');
-    if (!buffer || buffer.byteLength === 0) return new Float32Array(0);
-    return new Float32Array(buffer);
-  } catch (e) {
-    console.error('getPrismLevelsBinary error', e);
-    return new Float32Array(0);
-  }
-}
-
-/**
- * Get mixer/device/bus/output levels as a compact binary blob and parse to AllLevelsData.
- */
-export async function getMixerLevelsBinary(deviceIds: string[], outputKeys: string[]): Promise<AllLevelsData> {
-  try {
-    const buffer = await invoke<ArrayBuffer>('get_mixer_levels_binary', { deviceIds, outputKeys });
-    if (!buffer || buffer.byteLength === 0) return { prism: [], devices: {}, buses: [], outputs: {} };
-
-    const bytes = new Uint8Array(buffer);
-    const dv = new DataView(buffer);
-    let offset = 0;
-    const readU32 = () => { const v = dv.getUint32(offset, true); offset += 4; return v; };
-    const readF32 = () => { const v = dv.getFloat32(offset, true); offset += 4; return v; };
-    const readString = () => {
-      const len = readU32();
-      const slice = bytes.subarray(offset, offset + len);
-      const s = new TextDecoder().decode(slice);
-      offset += len;
-      return s;
-    };
-
-    const devices: Record<string, LevelData[]> = {};
-    const numDevices = readU32();
-    for (let i = 0; i < numDevices; i++) {
-      const key = readString();
-      const count = readU32();
-      const arr: LevelData[] = [];
-      for (let j = 0; j < count; j++) {
-        arr.push({ left_peak: readF32(), right_peak: readF32() });
-      }
-      devices[key] = arr;
-    }
-
-    const buses: BusLevelData[] = [];
-    const numBuses = readU32();
-    for (let i = 0; i < numBuses; i++) {
-      const id = readString();
-      const pre_left_peak = readF32();
-      const pre_right_peak = readF32();
-      const post_left_peak = readF32();
-      const post_right_peak = readF32();
-      buses.push({ id, pre_left_peak, pre_right_peak, post_left_peak, post_right_peak });
-    }
-
-    const outputs: Record<string, LevelData[]> = {};
-    const numOutputs = readU32();
-    for (let i = 0; i < numOutputs; i++) {
-      const key = readString();
-      const count = readU32();
-      const arr: LevelData[] = [];
-      for (let j = 0; j < count; j++) {
-        arr.push({ left_peak: readF32(), right_peak: readF32() });
-      }
-      outputs[key] = arr;
-    }
-
-    return { prism: [], devices, buses, outputs };
-  } catch (e) {
-    console.error('getMixerLevelsBinary error', e);
-    return { prism: [], devices: {}, buses: [], outputs: {} };
-  }
-}
-
-/**
  * Update a send connection (1ch unit)
  */
 export async function updateMixerSend(
@@ -646,6 +506,57 @@ export interface BusLevelInfo {
   pre_right_peak: number;
   post_left_peak: number;
   post_right_peak: number;
+}
+
+// --- Graph Meters API (New unified metering API) ---
+
+/** Input meter data from audio graph */
+export interface InputMeterData {
+  device_id: number;
+  pair_idx: number;
+  left_peak: number;
+  right_peak: number;
+}
+
+/** Bus meter data from audio graph */
+export interface BusMeterData {
+  bus_idx: number;
+  left_peak: number;
+  right_peak: number;
+}
+
+/** Output meter data from audio graph */
+export interface OutputMeterData {
+  node_id: number;
+  pair_idx: number;
+  left_peak: number;
+  right_peak: number;
+}
+
+/** Send meter data from audio graph */
+export interface SendMeterData {
+  source_id: number;
+  target_id: number;
+  left_peak: number;
+  right_peak: number;
+  gain: number;
+  gain_db: number;
+}
+
+/** All graph meters response */
+export interface GraphMetersData {
+  inputs: InputMeterData[];
+  buses: BusMeterData[];
+  outputs: OutputMeterData[];
+  sends: SendMeterData[];
+}
+
+/**
+ * Get all graph meters (new unified metering API)
+ * Returns input, bus, output, and send meters computed by GraphProcessor
+ */
+export async function getGraphMeters(): Promise<GraphMetersData> {
+  return invoke<GraphMetersData>('get_graph_meters');
 }
 
 // --- Bus API Functions ---
