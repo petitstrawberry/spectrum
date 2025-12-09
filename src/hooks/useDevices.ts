@@ -76,6 +76,7 @@ export interface UseDevicesReturn {
   // Output controls
   startOutput: (deviceId: number) => Promise<void>;
   stopOutput: (deviceId: number) => Promise<void>;
+  activeOutputs: number[];
 }
 
 export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
@@ -89,6 +90,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
     apps: [],
   });
   const [activeCaptures, setActiveCaptures] = useState<number[]>([]);
+  const [activeOutputs, setActiveOutputs] = useState<number[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,19 +111,29 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         transportType: d.transport_type,
       })));
 
-      setOutputDevices(outputs.map(d => ({
-        id: d.id,
-        deviceId: d.device_id,
-        name: d.name,
-        channelCount: d.channel_count,
-        transportType: d.transport_type,
-        isAggregate: d.is_aggregate,
-        subDevices: d.sub_devices.map(s => ({
-          id: s.id,
-          name: s.name,
-          channelCount: s.channel_count,
-        })),
-      })));
+      // Normalize output device DTOs from backend which may have different shapes
+      setOutputDevices(outputs.map(d => {
+        const channelCount = (d as any).channel_count ?? (d as any).channelCount ?? 0;
+        const deviceId = (d as any).device_id ?? (d as any).deviceId ?? 0;
+        const name = (d as any).name ?? (d as any).label ?? `Device ${deviceId}`;
+        // sub_devices may be absent; support backend's aggregate-sub representation
+        const subDevicesRaw = (d as any).sub_devices ?? (d as any).subDevices ?? [];
+        const subDevices = Array.isArray(subDevicesRaw) ? subDevicesRaw.map((s: any) => ({
+          id: s.id ?? s.device_id ?? `${deviceId}`,
+          name: s.name ?? s.label ?? 'SubDevice',
+          channelCount: s.channel_count ?? s.channelCount ?? 0,
+        })) : [];
+
+        return {
+          id: (d as any).id ?? `vout_${deviceId}_0`,
+          deviceId,
+          name,
+          channelCount,
+          transportType: (d as any).transport_type ?? (d as any).transportType ?? 'Unknown',
+          isAggregate: !!((d as any).is_aggregate ?? (d as any).is_aggregate_sub ?? (d as any).isAggregate),
+          subDevices,
+        };
+      }));
 
       setPrismStatus({
         connected: prism.connected,
@@ -186,6 +198,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   const startOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
       await invoke('start_audio_output', { deviceId });
+      setActiveOutputs(prev => [...prev.filter(id => id !== deviceId), deviceId]);
     } catch (e) {
       console.error('Failed to start output:', e);
     }
@@ -194,6 +207,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   const stopOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
       await invoke('stop_audio_output', { deviceId });
+      setActiveOutputs(prev => prev.filter(id => id !== deviceId));
     } catch (e) {
       console.error('Failed to stop output:', e);
     }
@@ -211,5 +225,6 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
     activeCaptures,
     startOutput,
     stopOutput,
+    activeOutputs,
   };
 }

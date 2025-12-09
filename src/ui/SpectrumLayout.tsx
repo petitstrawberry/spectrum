@@ -329,7 +329,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
-        <RightPanel width={rightSidebarWidth} />
+        <RightPanel width={rightSidebarWidth} devices={devices} />
       </div>
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
