@@ -688,3 +688,24 @@ pub fn cleanup_cached_view_controller(instance_id: &str) {
         }
     }
 }
+
+/// Open plugin UI by instance_id only
+/// 
+/// This is a convenience wrapper that looks up the AudioUnit instance
+/// and opens its UI. Must be called from main thread.
+pub fn open_plugin_ui_by_instance_id(instance_id: &str) -> Result<(), String> {
+    // Get the AudioUnit instance from manager
+    let au_instance = crate::audio_unit::get_au_manager()
+        .get_instance(instance_id)
+        .ok_or_else(|| format!("Plugin instance not found: {}", instance_id))?;
+
+    // Get the AUAudioUnit pointer
+    let au_audio_unit = au_instance
+        .get_au_audio_unit()
+        .ok_or_else(|| "AudioUnit not initialized".to_string())?;
+
+    let plugin_name = au_instance.info.name.clone();
+
+    // Open the UI
+    open_audio_unit_ui(instance_id, au_audio_unit, &plugin_name)
+}

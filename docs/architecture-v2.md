@@ -1714,8 +1714,8 @@ src-tauri/src/
 | | `add_plugin_to_bus` | ✅ |
 | | `remove_plugin_from_bus` | ✅ |
 | | `reorder_plugins` | ✅ |
-| | `open_plugin_ui` | ❌ (AudioUnit統合待ち) |
-| | `close_plugin_ui` | ❌ (AudioUnit統合待ち) |
+| | `open_plugin_ui` | ✅ |
+| | `close_plugin_ui` | ✅ |
 | **Meter** | `get_meters` | ✅ |
 | | `get_node_meters` | ✅ |
 | | `get_edge_meters` | ✅ |
@@ -1731,6 +1731,6 @@ src-tauri/src/
 ### 次のステップ
 
 1. ~~**メータリング完全実装**~~ ✅ - `processor.process()` で RMS/Peak 計算、Edge post-gain メータリング
-2. **BusNode プラグイン統合** - AudioUnit との連携
-3. **Plugin UI コマンド** - `open_plugin_ui`, `close_plugin_ui` (AudioUnit統合後)
+2. ~~**BusNode プラグイン統合**~~ ✅ - AudioUnit との連携（PluginInstance.process()）
+3. ~~**Plugin UI コマンド**~~ ✅ - `open_plugin_ui`, `close_plugin_ui` 実装完了
 4. **Frontend更新** - v2 API に対応したUI

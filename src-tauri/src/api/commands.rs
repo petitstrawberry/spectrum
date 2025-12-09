@@ -394,12 +394,43 @@ pub async fn reorder_plugins(bus_handle: u32, instance_ids: Vec<String>) -> Resu
 
 #[tauri::command]
 pub async fn open_plugin_ui(instance_id: String) -> Result<(), String> {
-    Err("Plugin UI not yet implemented".to_string())
+    // Verify the instance exists first
+    let _au_instance = crate::audio_unit::get_au_manager()
+        .get_instance(&instance_id)
+        .ok_or_else(|| format!("Plugin instance not found: {}", instance_id))?;
+
+    // UI operations must run on main thread
+    // We need to dispatch to main thread and wait for completion
+    let instance_id_clone = instance_id.clone();
+
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    // Dispatch to main thread
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::msg_send;
+        use objc2::class;
+        use block2::RcBlock;
+
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+
+        let block = RcBlock::new(move || {
+            let result = crate::audio_unit_ui::open_plugin_ui_by_instance_id(&instance_id_clone);
+            let _ = tx.send(result);
+        });
+
+        let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+    }
+
+    // Wait for result with timeout
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "Timeout waiting for UI to open".to_string())?
 }
 
 #[tauri::command]
 pub async fn close_plugin_ui(instance_id: String) -> Result<(), String> {
-    Err("Plugin UI not yet implemented".to_string())
+    crate::audio_unit_ui::close_audio_unit_ui(&instance_id);
+    Ok(())
 }
 
 // =============================================================================

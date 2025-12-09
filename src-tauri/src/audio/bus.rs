@@ -2,15 +2,84 @@
 
 use super::buffer::AudioBuffer;
 use super::node::{AudioNode, NodeType, PortId};
+use crate::audio_unit::{get_au_manager, AudioUnitInstance};
 use std::any::Any;
+use std::sync::Arc;
 
-/// Plugin instance info (placeholder - will connect to audio_unit.rs)
-#[derive(Debug, Clone)]
+/// Plugin instance info with AudioUnit integration
 pub struct PluginInstance {
     pub instance_id: String,
     pub plugin_id: String,
     pub name: String,
     pub enabled: bool,
+    /// Cached AudioUnit instance for lock-free audio processing
+    au_instance: Option<Arc<AudioUnitInstance>>,
+}
+
+impl std::fmt::Debug for PluginInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginInstance")
+            .field("instance_id", &self.instance_id)
+            .field("plugin_id", &self.plugin_id)
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("au_instance", &self.au_instance.as_ref().map(|_| "AudioUnitInstance"))
+            .finish()
+    }
+}
+
+impl Clone for PluginInstance {
+    fn clone(&self) -> Self {
+        Self {
+            instance_id: self.instance_id.clone(),
+            plugin_id: self.plugin_id.clone(),
+            name: self.name.clone(),
+            enabled: self.enabled,
+            // Re-fetch from manager to get Arc clone
+            au_instance: get_au_manager().get_instance(&self.instance_id),
+        }
+    }
+}
+
+impl PluginInstance {
+    /// Create a new plugin instance
+    pub fn new(instance_id: String, plugin_id: String, name: String) -> Self {
+        // Try to get the AudioUnit instance from the manager
+        let au_instance = get_au_manager().get_instance(&instance_id);
+        Self {
+            instance_id,
+            plugin_id,
+            name,
+            enabled: true,
+            au_instance,
+        }
+    }
+
+    /// Process audio through this plugin
+    ///
+    /// Returns true if processing was applied, false if bypassed/disabled
+    pub fn process(&self, left: &mut [f32], right: &mut [f32]) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        if let Some(ref au) = self.au_instance {
+            // Process through AudioUnit
+            if let Err(e) = au.process(left, right, 0.0) {
+                // Log but don't fail - just bypass
+                eprintln!("[BusNode] Plugin {} process error: {}", self.instance_id, e);
+                return false;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Refresh the AudioUnit instance reference
+    pub fn refresh_au_instance(&mut self) {
+        self.au_instance = get_au_manager().get_instance(&self.instance_id);
+    }
 }
 
 /// エフェクトバスノード
@@ -65,12 +134,7 @@ impl BusNode {
 
     /// Add a plugin to the chain
     pub fn add_plugin(&mut self, instance_id: String, plugin_id: String, name: String) {
-        self.plugin_chain.push(PluginInstance {
-            instance_id,
-            plugin_id,
-            name,
-            enabled: true,
-        });
+        self.plugin_chain.push(PluginInstance::new(instance_id, plugin_id, name));
     }
 
     /// Remove a plugin from the chain
@@ -138,16 +202,30 @@ impl AudioNode for BusNode {
             self.output_buffers[i].set_valid_frames(frames);
         }
 
-        // TODO: プラグインチェーンを通す
-        // for plugin in &mut self.plugin_chain {
-        //     if plugin.enabled {
-        //         plugin.process(&mut self.output_buffers, frames);
-        //     }
-        // }
+        // プラグインチェーンを通す（ステレオ処理）
+        if self.output_buffers.len() >= 2 && !self.plugin_chain.is_empty() {
+            // Get raw pointers for left and right channels
+            // We need to process both channels together for stereo plugins
+            let left_ptr = self.output_buffers[0].samples_mut().as_mut_ptr();
+            let right_ptr = self.output_buffers[1].samples_mut().as_mut_ptr();
 
-        // Update peak levels
+            // Process through each enabled plugin in the chain
+            for plugin in &self.plugin_chain {
+                if plugin.enabled {
+                    // Create slices from pointers for this iteration
+                    // SAFETY: We have mutable access to output_buffers and frames is valid
+                    unsafe {
+                        let left = std::slice::from_raw_parts_mut(left_ptr, frames);
+                        let right = std::slice::from_raw_parts_mut(right_ptr, frames);
+                        plugin.process(left, right);
+                    }
+                }
+            }
+        }
+
+        // Update peak levels and RMS
         for buf in &mut self.output_buffers {
-            buf.update_peak();
+            buf.update_meters();
         }
     }
 
