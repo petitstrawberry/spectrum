@@ -3,6 +3,9 @@
 use super::dto::*;
 use crate::audio::processor::get_graph_processor;
 use crate::audio::{AudioNode, Edge, EdgeId, NodeHandle, PortId};
+use crate::audio::source::SourceNode;
+use crate::audio::bus::BusNode;
+use crate::audio::sink::SinkNode;
 
 // =============================================================================
 // Device Commands
@@ -164,41 +167,74 @@ pub async fn get_graph() -> Result<GraphDto, String> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
-        // Collect nodes - need type-specific info
-        // For now, we create a basic representation
+        // Collect nodes with type-specific info
         for handle in graph.node_handles() {
             if let Some(node) = graph.get_node(handle) {
-                // Create NodeInfoDto based on node type
-                // Note: We need additional methods on nodes to get full info
-                // This is a simplified version
                 let info = match node.node_type() {
                     crate::audio::NodeType::Source => {
-                        NodeInfoDto::Source {
-                            handle: handle.raw(),
-                            source_id: SourceIdDto::PrismChannel { channel: 0 }, // TODO: Get actual source_id
-                            port_count: node.output_port_count() as u8,
-                            label: node.label().to_string(),
+                        // Downcast to SourceNode to get source_id
+                        if let Some(source_node) = node.as_any().downcast_ref::<SourceNode>() {
+                            NodeInfoDto::Source {
+                                handle: handle.raw(),
+                                source_id: SourceIdDto::from(source_node.source_id().clone()),
+                                port_count: node.output_port_count() as u8,
+                                label: node.label().to_string(),
+                            }
+                        } else {
+                            // Fallback if downcast fails
+                            NodeInfoDto::Source {
+                                handle: handle.raw(),
+                                source_id: SourceIdDto::PrismChannel { channel: 0 },
+                                port_count: node.output_port_count() as u8,
+                                label: node.label().to_string(),
+                            }
                         }
                     }
                     crate::audio::NodeType::Bus => {
-                        NodeInfoDto::Bus {
-                            handle: handle.raw(),
-                            bus_id: "unknown".to_string(), // TODO: Get actual bus_id
-                            label: node.label().to_string(),
-                            port_count: node.input_port_count() as u8,
-                            plugins: Vec::new(), // TODO: Get plugins
+                        // Downcast to BusNode to get bus_id and plugins
+                        if let Some(bus_node) = node.as_any().downcast_ref::<BusNode>() {
+                            NodeInfoDto::Bus {
+                                handle: handle.raw(),
+                                bus_id: bus_node.bus_id().to_string(),
+                                label: node.label().to_string(),
+                                port_count: node.input_port_count() as u8,
+                                plugins: bus_node.plugins().iter().map(|p| PluginInstanceDto {
+                                    instance_id: p.instance_id.clone(),
+                                    plugin_id: p.plugin_id.clone(),
+                                    name: p.name.clone(),
+                                    enabled: p.enabled,
+                                }).collect(),
+                            }
+                        } else {
+                            NodeInfoDto::Bus {
+                                handle: handle.raw(),
+                                bus_id: "unknown".to_string(),
+                                label: node.label().to_string(),
+                                port_count: node.input_port_count() as u8,
+                                plugins: Vec::new(),
+                            }
                         }
                     }
                     crate::audio::NodeType::Sink => {
-                        NodeInfoDto::Sink {
-                            handle: handle.raw(),
-                            sink: OutputSinkDto {
-                                device_id: 0, // TODO: Get actual device_id
-                                channel_offset: 0,
-                                channel_count: node.input_port_count() as u8,
-                            },
-                            port_count: node.input_port_count() as u8,
-                            label: node.label().to_string(),
+                        // Downcast to SinkNode to get sink_id
+                        if let Some(sink_node) = node.as_any().downcast_ref::<SinkNode>() {
+                            NodeInfoDto::Sink {
+                                handle: handle.raw(),
+                                sink: OutputSinkDto::from(sink_node.sink_id().clone()),
+                                port_count: node.input_port_count() as u8,
+                                label: node.label().to_string(),
+                            }
+                        } else {
+                            NodeInfoDto::Sink {
+                                handle: handle.raw(),
+                                sink: OutputSinkDto {
+                                    device_id: 0,
+                                    channel_offset: 0,
+                                    channel_count: node.input_port_count() as u8,
+                                },
+                                port_count: node.input_port_count() as u8,
+                                label: node.label().to_string(),
+                            }
                         }
                     }
                 };
@@ -372,17 +408,140 @@ pub async fn get_edge_meters(ids: Vec<u32>) -> Result<Vec<EdgeMeterDto>, String>
 
 #[tauri::command]
 pub async fn save_graph_state() -> Result<GraphStateDto, String> {
-    Err("State persistence not yet implemented".to_string())
+    let graph_dto = get_graph().await?;
+    
+    Ok(GraphStateDto {
+        version: 1,
+        nodes: graph_dto.nodes,
+        edges: graph_dto.edges,
+        ui_state: None, // UI state is managed by frontend
+    })
 }
 
 #[tauri::command]
 pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
-    Err("State persistence not yet implemented".to_string())
+    let processor = get_graph_processor();
+    
+    // Clear existing graph and rebuild from state
+    processor.with_graph_mut(|graph| {
+        // Clear existing nodes and edges
+        let handles: Vec<_> = graph.node_handles().collect();
+        for handle in handles {
+            graph.remove_node(handle);
+        }
+    });
+    
+    // Recreate nodes
+    let mut handle_mapping: std::collections::HashMap<u32, NodeHandle> = std::collections::HashMap::new();
+    
+    for node_info in &state.nodes {
+        let (old_handle, new_handle) = match node_info {
+            NodeInfoDto::Source { handle, source_id, label, .. } => {
+                let node: Box<dyn AudioNode> = match source_id {
+                    SourceIdDto::PrismChannel { channel } => {
+                        Box::new(SourceNode::new_prism(*channel, label.clone()))
+                    }
+                    SourceIdDto::InputDevice { device_id, channel } => {
+                        Box::new(SourceNode::new_device(*device_id, *channel, label.clone()))
+                    }
+                };
+                (*handle, processor.add_node(node))
+            }
+            NodeInfoDto::Bus { handle, bus_id, label, port_count, plugins } => {
+                let mut bus = BusNode::new(bus_id.clone(), label.clone(), *port_count as usize);
+                // Add plugins
+                for plugin in plugins {
+                    bus.add_plugin(
+                        plugin.instance_id.clone(),
+                        plugin.plugin_id.clone(),
+                        plugin.name.clone(),
+                    );
+                }
+                (*handle, processor.add_node(Box::new(bus)))
+            }
+            NodeInfoDto::Sink { handle, sink, label, .. } => {
+                let sink_id = crate::audio::sink::SinkId::from(sink.clone());
+                let node = SinkNode::new(sink_id, label.clone());
+                (*handle, processor.add_node(Box::new(node)))
+            }
+        };
+        handle_mapping.insert(old_handle, new_handle);
+    }
+    
+    // Recreate edges with mapped handles
+    for edge_info in &state.edges {
+        let source_handle = handle_mapping
+            .get(&edge_info.source)
+            .ok_or_else(|| format!("Source node {} not found in mapping", edge_info.source))?;
+        let target_handle = handle_mapping
+            .get(&edge_info.target)
+            .ok_or_else(|| format!("Target node {} not found in mapping", edge_info.target))?;
+        
+        processor.add_edge(
+            *source_handle,
+            PortId::from(edge_info.source_port),
+            *target_handle,
+            PortId::from(edge_info.target_port),
+            edge_info.gain,
+            edge_info.muted,
+        );
+    }
+    
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn persist_state() -> Result<(), String> {
-    Err("State persistence not yet implemented".to_string())
+    use std::fs;
+    
+    // Get app data directory
+    let app_data = dirs::data_dir()
+        .ok_or("Could not find app data directory")?
+        .join("spectrum");
+    
+    // Create directory if it doesn't exist
+    fs::create_dir_all(&app_data)
+        .map_err(|e| format!("Failed to create app data directory: {}", e))?;
+    
+    // Save graph state
+    let state = save_graph_state().await?;
+    let json = serde_json::to_string_pretty(&state)
+        .map_err(|e| format!("Failed to serialize state: {}", e))?;
+    
+    let state_file = app_data.join("graph_state_v2.json");
+    fs::write(&state_file, json)
+        .map_err(|e| format!("Failed to write state file: {}", e))?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_state() -> Result<bool, String> {
+    use std::fs;
+    
+    // Get app data directory
+    let app_data = dirs::data_dir()
+        .ok_or("Could not find app data directory")?
+        .join("spectrum");
+    
+    let state_file = app_data.join("graph_state_v2.json");
+    
+    // Check if state file exists
+    if !state_file.exists() {
+        return Ok(false); // No state to restore
+    }
+    
+    // Read and parse state file
+    let json = fs::read_to_string(&state_file)
+        .map_err(|e| format!("Failed to read state file: {}", e))?;
+    
+    let state: GraphStateDto = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to parse state file: {}", e))?;
+    
+    // Load the state
+    load_graph_state(state).await?;
+    
+    Ok(true)
 }
 
 // =============================================================================

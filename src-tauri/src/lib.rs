@@ -117,6 +117,7 @@ pub use api::get_edge_meters;
 pub use api::save_graph_state;
 pub use api::load_graph_state;
 pub use api::persist_state;
+pub use api::restore_state;
 
 // System Commands
 pub use api::start_audio;
@@ -342,6 +343,7 @@ pub fn run() {
             save_graph_state,
             load_graph_state,
             persist_state,
+            restore_state,
             // v2 API - System
             start_audio,
             stop_audio,

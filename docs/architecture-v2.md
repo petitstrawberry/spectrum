@@ -1714,9 +1714,10 @@ src-tauri/src/
 | **Meter** | `get_meters` | ✅ |
 | | `get_node_meters` | ✅ |
 | | `get_edge_meters` | ✅ |
-| **State** | `save_graph_state` | ❌ (未実装) |
-| | `load_graph_state` | ❌ (未実装) |
-| | `persist_state` | ❌ (未実装) |
+| **State** | `save_graph_state` | ✅ |
+| | `load_graph_state` | ✅ |
+| | `persist_state` | ✅ |
+| | `restore_state` | ✅ |
 | **System** | `start_audio` | ✅ |
 | | `stop_audio` | ✅ |
 | | `get_system_status` | ✅ |
@@ -1724,8 +1725,8 @@ src-tauri/src/
 
 ### 次のステップ
 
-1. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
-2. **メータリング完全実装** - リアルタイムレベル計算
-3. **BusNode プラグイン統合** - AudioUnit との連携
-4. **State API実装** - グラフ状態の保存/復元
+1. **プラグイン管理コマンド実装** - `add_plugin_to_bus`, `remove_plugin_from_bus`, `open_plugin_ui`, `close_plugin_ui`
+2. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
+3. **メータリング完全実装** - リアルタイムレベル計算
+4. **BusNode プラグイン統合** - AudioUnit との連携
 5. **フロントエンド更新** - 新APIに対応したUI

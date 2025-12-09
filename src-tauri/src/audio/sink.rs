@@ -3,6 +3,7 @@
 use super::buffer::AudioBuffer;
 use super::node::{AudioNode, NodeType, PortId};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 /// 出力先の識別
 ///
@@ -148,5 +149,13 @@ impl AudioNode for SinkNode {
 
     fn output_peak_levels(&self) -> Vec<f32> {
         Vec::new() // シンクは出力なし
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

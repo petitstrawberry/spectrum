@@ -3,6 +3,7 @@
 use super::buffer::AudioBuffer;
 use super::node::{AudioNode, NodeType, PortId};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 /// ソースの識別
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,5 +115,13 @@ impl AudioNode for SourceNode {
             .iter()
             .map(|b| b.cached_peak())
             .collect()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

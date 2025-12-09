@@ -1,6 +1,7 @@
 //! AudioNode trait and core types
 
 use super::buffer::AudioBuffer;
+use std::any::Any;
 
 /// Node の一意識別子
 ///
@@ -112,4 +113,10 @@ pub trait AudioNode: Send + Sync {
 
     /// 出力ピークレベルを取得（メータリング用）
     fn output_peak_levels(&self) -> Vec<f32>;
+
+    /// Anyトレイトへのダウンキャスト用
+    fn as_any(&self) -> &dyn Any;
+
+    /// Anyトレイトへのダウンキャスト用（可変）
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }

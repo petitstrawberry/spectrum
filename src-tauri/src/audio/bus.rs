@@ -2,6 +2,7 @@
 
 use super::buffer::AudioBuffer;
 use super::node::{AudioNode, NodeType, PortId};
+use std::any::Any;
 
 /// Plugin instance info (placeholder - will connect to audio_unit.rs)
 #[derive(Debug, Clone)]
@@ -168,5 +169,13 @@ impl AudioNode for BusNode {
             .iter()
             .map(|b| b.cached_peak())
             .collect()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
