@@ -67,12 +67,12 @@ export interface UseDevicesReturn {
   isLoading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  
+
   // Input capture controls
   startCapture: (deviceId: number) => Promise<boolean>;
   stopCapture: (deviceId: number) => Promise<void>;
   activeCaptures: number[];
-  
+
   // Output controls
   startOutput: (deviceId: number) => Promise<void>;
   stopOutput: (deviceId: number) => Promise<void>;
@@ -80,7 +80,7 @@ export interface UseDevicesReturn {
 
 export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   const { pollInterval = 2000 } = options;
-  
+
   const [inputDevices, setInputDevices] = useState<InputDevice[]>([]);
   const [outputDevices, setOutputDevices] = useState<OutputDevice[]>([]);
   const [prismStatus, setPrismStatus] = useState<PrismStatus>({
@@ -91,7 +91,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   const [activeCaptures, setActiveCaptures] = useState<number[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   const refresh = useCallback(async () => {
     try {
       const [inputs, outputs, prism] = await Promise.all([
@@ -99,7 +99,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         getOutputDevices(),
         getPrismStatus(),
       ]);
-      
+
       setInputDevices(inputs.map(d => ({
         id: d.id,
         deviceId: d.device_id,
@@ -108,7 +108,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         isPrism: d.is_prism,
         transportType: d.transport_type,
       })));
-      
+
       setOutputDevices(outputs.map(d => ({
         id: d.id,
         deviceId: d.device_id,
@@ -122,7 +122,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
           channelCount: s.channel_count,
         })),
       })));
-      
+
       setPrismStatus({
         connected: prism.connected,
         channels: prism.channels,
@@ -132,13 +132,20 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
           channelOffset: a.channel_offset,
         })),
       });
-      
+      // DEBUG: Log prism apps so we can verify which app is assigned to which channel
+      try {
+        // eslint-disable-next-line no-console
+        console.log('useDevices: prism.apps:', prism.apps);
+      } catch (e) {
+        // ignore
+      }
+
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch devices');
     }
   }, []);
-  
+
   // Initial fetch and polling
   useEffect(() => {
     const init = async () => {
@@ -147,11 +154,11 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       setIsLoading(false);
     };
     init();
-    
+
     const interval = setInterval(refresh, pollInterval);
     return () => clearInterval(interval);
   }, [refresh, pollInterval]);
-  
+
   // Capture controls (using legacy commands for now)
   const startCapture = useCallback(async (deviceId: number): Promise<boolean> => {
     try {
@@ -165,7 +172,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       return false;
     }
   }, []);
-  
+
   const stopCapture = useCallback(async (deviceId: number): Promise<void> => {
     try {
       await invoke('stop_input_capture', { deviceId });
@@ -174,7 +181,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       console.error('Failed to stop capture:', e);
     }
   }, []);
-  
+
   // Output controls
   const startOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
@@ -183,7 +190,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       console.error('Failed to start output:', e);
     }
   }, []);
-  
+
   const stopOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
       await invoke('stop_audio_output', { deviceId });
@@ -191,7 +198,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       console.error('Failed to stop output:', e);
     }
   }, []);
-  
+
   return {
     inputDevices,
     outputDevices,

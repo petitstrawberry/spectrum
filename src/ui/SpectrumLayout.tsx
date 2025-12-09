@@ -139,6 +139,8 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   // For visual parity we keep local state where needed
   const [showSettings, setShowSettings] = useState(false);
   const [showPluginBrowser, setShowPluginBrowser] = useState(false);
+  // debug overlay state removed
+  const [fallbackPrismApps, setFallbackPrismApps] = useState<any[] | null>(null);
   // Minimal placeholders for the big UI to render without wiring
   const isRefreshing = devices?.isLoading ?? false;
   const [driverStatus, setDriverStatus] = useState<any | null>(null);
@@ -147,12 +149,25 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   const [inputSourceMode, setInputSourceMode] = useState<'prism' | 'devices'>('prism');
   const selectedInputDevice = prismDevice;
   // Build 32 stereo channel pairs (64 channels) like v1
-  const _prismApps = devices?.prismStatus?.apps || [];
+  // Prefer backend prismStatus.apps (from get_prism_status). If empty, fall back to getPrismApps() results.
+  const _prismAppsFromStatus = devices?.prismStatus?.apps || [];
+  const _prismApps: any[] = (_prismAppsFromStatus && _prismAppsFromStatus.length > 0)
+    ? _prismAppsFromStatus
+    : (fallbackPrismApps || []);
   const channelSources: any[] = [];
   for (let i = 0; i < 32; i++) {
     const offset = i * 2;
-    const assigned = _prismApps.filter((a: any) => (a.channelOffset ?? 0) === offset);
-    const apps = assigned.map((a: any) => ({ name: a.name, icon: Music, color: 'text-cyan-400', pid: a.pid, clientCount: a.clientCount ?? 1 }));
+    // backend `prismStatus.apps` uses `channelOffset` (stereo-pair index)
+    // fallback `getPrismApps()` returns AppSource with `channelOffsets` array; normalize both shapes
+    const assigned = _prismApps.filter((a: any) => {
+      // If a.channelOffset is a single number, it's the stereo-pair index (from get_prism_status)
+      if (typeof a.channelOffset === 'number') return (a.channelOffset ?? 0) === i;
+      // If a.channelOffsets is an array (from getPrismApps()), treat entries as absolute channel indices
+      // and convert to stereo-pair index by Math.floor(channelIndex / 2).
+      if (Array.isArray(a.channelOffsets)) return a.channelOffsets.some((co: number) => Math.floor(co / 2) === i);
+      return false;
+    });
+    const apps = assigned.map((a: any) => ({ name: a.name, icon: Music, color: a.color || 'text-cyan-400', pid: a.pid, clientCount: (a.clients ? a.clients.length : (a.clientCount ?? 1)) }));
     channelSources.push({
       id: `ch_${offset}`,
       channelOffset: offset,
@@ -221,6 +236,31 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
     const id = setInterval(poll, 2000);
     return () => { running = false; clearInterval(id); };
   }, []);
+
+  // If backend prismStatus.apps is empty, poll grouped apps periodically as a fallback
+  useEffect(() => {
+    let mounted = true;
+    let id: NodeJS.Timeout | number | null = null;
+    const poll = async () => {
+      // If status provides apps, clear fallback and skip polling work
+      if (devices?.prismStatus?.apps && devices.prismStatus.apps.length > 0) {
+        if (mounted) setFallbackPrismApps([]);
+        return;
+      }
+      try {
+        const apps = await getPrismApps();
+        if (!mounted) return;
+        setFallbackPrismApps(apps || []);
+      } catch (e) {
+        // ignore transient errors
+      }
+    };
+    // initial fetch
+    poll();
+    // poll every 2s to keep UI in sync
+    id = setInterval(poll, 2000);
+    return () => { mounted = false; if (id) clearInterval(id as any); };
+  }, [devices?.prismStatus?.apps]);
   const setNodes = (fn: any) => {};
   const setPluginBrowserTargetBusId = (id: string | null) => {};
   const setAvailablePlugins = (p: any[]) => {};
@@ -245,6 +285,8 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   const setContextMenu = () => {};
   const contextMenu: any = null;
 
+  // CopyPrismButton removed
+
   return (
     <div className="flex flex-col h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden select-none" onClick={() => {}}>
       {/* HEADER */}
@@ -254,7 +296,9 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
             <Workflow className="w-6 h-6 text-cyan-400" />
             <div>
               <div className="font-black text-lg tracking-tighter bg-gradient-to-r from-cyan-400 to-fuchsia-500 bg-clip-text text-transparent leading-none">Spectrum</div>
-              <div className="text-[8px] text-slate-500 font-mono tracking-wider uppercase">Audio Mixer & Router</div>
+              <div className="flex items-center gap-2">
+                <div className="text-[8px] text-slate-500 font-mono tracking-wider uppercase">Audio Mixer & Router</div>
+              </div>
             </div>
           </div>
         </div>
@@ -264,6 +308,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
+        {/* debug overlay removed */}
         <LeftSidebar
           width={leftSidebarWidth}
           isRefreshing={isRefreshing}

@@ -51,14 +51,17 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
         {/* Prism mode: Show channel list */}
-        {inputSourceMode === 'prism' && prismDevice ? (
+        {inputSourceMode === 'prism' && (prismDevice || channelSources.some(c => c.hasApps) || driverStatus?.connected) ? (
           <>
             <button
               onClick={() => onOpenPrismApp?.()}
               className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 mb-2 rounded-md bg-slate-800/50 border border-slate-700/50 hover:border-slate-600 hover:bg-slate-800 text-slate-400 hover:text-slate-300 text-[10px] transition-all"
             >
               <ExternalLink className="w-3 h-3" />
-              <span>Configure routing in Prism</span>
+              <span>
+                Configure routing in Prism
+                {prismDevice && prismDevice.name ? ` — ${prismDevice.name}` : ''}
+              </span>
             </button>
 
             {channelSources.map(channel => {
@@ -75,8 +78,8 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                     (isUsed
                       ? 'border-transparent bg-slate-900/30 opacity-40 cursor-default'
                       : hasApps
-                        ? 'border-slate-700/50 bg-slate-800/60 hover:border-cyan-500/50 hover:bg-slate-800 cursor-grab active:cursor-grabbing'
-                        : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 cursor-grab active:cursor-grabbing')
+                        ? 'border-slate-700/50 bg-slate-800/60 hover:border-cyan-500/50 hover:bg-slate-800 hover:ring-2 hover:ring-cyan-500/30 cursor-grab active:cursor-grabbing'
+                        : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 hover:ring-2 hover:ring-slate-700/20 cursor-grab active:cursor-grabbing')
                   }
                 >
                   <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'}`}>
@@ -101,7 +104,15 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                         <FirstIcon className="w-3 h-3" />
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="text-[10px] text-slate-300 truncate">{channel.apps.map((a: any) => a.name).join(', ')}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-[10px] text-slate-300 truncate" title={channel.apps.map((a: any) => a.name).join(', ')}>
+                            {channel.apps.map((a: any) => a.name).join(', ')}
+                          </div>
+                          {/* PID badge removed per request */}
+                          {(channel.apps[0]?.clientCount ?? 0) > 1 && (
+                            <div className="text-[9px] text-slate-400 bg-slate-900/40 px-1 rounded">{channel.apps[0]?.clientCount}x</div>
+                          )}
+                        </div>
                         {channel.apps.length > 1 && (<div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>)}
                       </div>
                     </div>
