@@ -318,6 +318,10 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           onChangeInputSourceMode={(m) => setInputSourceMode(m)}
           channelSources={channelSources}
           prismDevice={prismDevice}
+          otherInputDevices={otherInputDevices}
+          activeCaptures={devices?.activeCaptures || []}
+          startCapture={devices?.startCapture}
+          stopCapture={devices?.stopCapture}
           isLibraryItemUsed={() => false}
           handleLibraryMouseDown={(e: any, t: string, id: string) => { /* presentational only */ }}
           onOpenPrismApp={() => openPrismApp().catch(console.error)}

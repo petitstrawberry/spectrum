@@ -1,4 +1,4 @@
-import { LogOut, RefreshCw, ExternalLink, Music, Volume2 } from 'lucide-react';
+import { LogOut, RefreshCw, ExternalLink, Music, Volume2, Mic, Plus } from 'lucide-react';
 
 interface Props {
   width: number;
@@ -19,9 +19,13 @@ interface Props {
   isLibraryItemUsed?: (id: string) => boolean;
   handleLibraryMouseDown?: (e: React.MouseEvent, type: string, id: string) => void;
   onOpenPrismApp?: () => void;
+  otherInputDevices?: Array<{ deviceId: number; name: string; channelCount: number }>;
+  activeCaptures?: number[];
+  startCapture?: (deviceId: number) => Promise<boolean>;
+  stopCapture?: (deviceId: number) => Promise<void>;
 }
 
-export default function LeftSidebar({ width, isRefreshing, inputSourceMode, handleRefresh, driverStatus, onChangeInputSourceMode, channelSources = [], prismDevice = null, isLibraryItemUsed = () => false, handleLibraryMouseDown, onOpenPrismApp }: Props) {
+export default function LeftSidebar({ width, isRefreshing, inputSourceMode, handleRefresh, driverStatus, onChangeInputSourceMode, channelSources = [], prismDevice = null, isLibraryItemUsed = () => false, handleLibraryMouseDown, onOpenPrismApp, otherInputDevices = [] }: Props) {
   return (
     <div className="bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" style={{ width }} onClick={e => e.stopPropagation()}>
       <div className="p-4 border-b border-slate-800 bg-slate-900/50">
@@ -126,12 +130,58 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                       </div>
                     </div>
                   )}
+                  {!isUsed && (
+                    <Plus className="w-3 h-3 text-slate-600 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />
+                  )}
                 </div>
               );
             })}
           </>
         ) : (
-          <div className="text-center py-8 text-slate-600 text-xs">Library preview</div>
+          // Devices mode: Show all non-Prism devices as a simple draggable list (v1 style)
+          inputSourceMode === 'devices' ? (
+            otherInputDevices.length > 0 ? (
+              otherInputDevices.map(device => {
+                const deviceLibraryId = `dev_${device.deviceId}`;
+                const isUsed = isLibraryItemUsed(deviceLibraryId);
+
+                return (
+                  <div
+                    key={deviceLibraryId}
+                    onMouseDown={!isUsed ? (e) => handleLibraryMouseDown && handleLibraryMouseDown(e, 'lib_source', deviceLibraryId) : undefined}
+                    className={
+                      `
+                        group flex items-center gap-2 p-2 rounded-lg border transition-all relative overflow-hidden
+                        ${isUsed
+                          ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-default'
+                          : 'border-slate-700/30 bg-slate-800/60 hover:border-amber-500/50 hover:bg-slate-800 cursor-grab active:cursor-grabbing'
+                        }
+                      `
+                    }
+                  >
+                    <div className="w-6 h-6 rounded-md flex items-center justify-center relative z-10 bg-slate-800 text-slate-500 group-hover:bg-amber-900/50 group-hover:text-amber-400">
+                        <Mic className="w-3 h-3" />
+                    </div>
+                    <div className="flex-1 min-w-0 relative z-10">
+                      <div className="text-[10px] font-medium truncate text-slate-300">
+                        {device.name}
+                      </div>
+                      <div className="text-[8px] text-slate-600">{device.channelCount}ch</div>
+                    </div>
+                    {!isUsed && (
+                      <Plus className="w-3 h-3 text-slate-600 group-hover:text-amber-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />
+                    )}
+                  </div>
+                );
+              })
+            ) : (
+              <div className="text-center py-8 text-slate-600 text-xs">
+                No input devices available
+              </div>
+            )
+          ) : (
+            <div className="text-center py-8 text-slate-600 text-xs">Library preview</div>
+          )
         )}
       </div>
     </div>
