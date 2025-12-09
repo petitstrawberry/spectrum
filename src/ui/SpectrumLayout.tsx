@@ -146,14 +146,22 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   // Default to 'prism' tab per v1 behaviour
   const [inputSourceMode, setInputSourceMode] = useState<'prism' | 'devices'>('prism');
   const selectedInputDevice = prismDevice;
-  const channelSources: any[] = (devices?.prismStatus?.apps || []).map((a: any, i: number) => ({
-    id: `ch_${(a.channelOffset ?? (i * 2))}`,
-    channelOffset: a.channelOffset ?? (i * 2),
-    channelLabel: `${(a.channelOffset ?? (i * 2)) + 1}-${(a.channelOffset ?? (i * 2)) + 2}`,
-    apps: [{ name: a.name, icon: Music, color: 'text-cyan-400', pid: a.pid, clientCount: 1 }],
-    hasApps: !!a.name,
-    isMain: (a.channelOffset ?? (i * 2)) === 0,
-  }));
+  // Build 32 stereo channel pairs (64 channels) like v1
+  const _prismApps = devices?.prismStatus?.apps || [];
+  const channelSources: any[] = [];
+  for (let i = 0; i < 32; i++) {
+    const offset = i * 2;
+    const assigned = _prismApps.filter((a: any) => (a.channelOffset ?? 0) === offset);
+    const apps = assigned.map((a: any) => ({ name: a.name, icon: Music, color: 'text-cyan-400', pid: a.pid, clientCount: a.clientCount ?? 1 }));
+    channelSources.push({
+      id: `ch_${offset}`,
+      channelOffset: offset,
+      channelLabel: `${offset + 1}-${offset + 2}`,
+      apps,
+      hasApps: apps.length > 0,
+      isMain: offset === 0,
+    });
+  }
   const otherInputDevices: any[] = (devices?.inputDevices || []).filter((d: any) => !d.isPrism);
   const leftSidebarWidth = 300;
   const rightSidebarWidth = 300;
@@ -263,6 +271,11 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           handleRefresh={handleRefresh}
           driverStatus={driverStatus}
           onChangeInputSourceMode={(m) => setInputSourceMode(m)}
+          channelSources={channelSources}
+          prismDevice={prismDevice}
+          isLibraryItemUsed={() => false}
+          handleLibraryMouseDown={(e: any, t: string, id: string) => { /* presentational only */ }}
+          onOpenPrismApp={() => openPrismApp().catch(console.error)}
         />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} />
