@@ -242,6 +242,18 @@ export interface BusLevelData {
   pre_right_peak: number;
   post_left_peak: number;
   post_right_peak: number;
+  // Per-send post levels for outgoing edges from this bus
+  sends?: BusSendLevel[];
+}
+
+export interface BusSendLevel {
+  // Compact NodeId numeric identifier (u16 from backend)
+  target: number;
+  target_ch: number;
+  post_left_peak: number;
+  post_right_peak: number;
+  send_level: number; // linear
+  send_level_db: number; // dB
 }
 
 /**

@@ -164,6 +164,16 @@ export interface BusLevelInfo {
   pre_right_peak: number;
   post_left_peak: number;
   post_right_peak: number;
+  sends?: BusSendLevel[];
+}
+
+export interface BusSendLevel {
+  target: number; // NodeId numeric
+  target_ch: number;
+  post_left_peak: number;
+  post_right_peak: number;
+  send_level: number;
+  send_level_db: number;
 }
 
 export async function getBusLevels(): Promise<BusLevelInfo[]> {

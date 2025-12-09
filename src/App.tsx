@@ -28,6 +28,7 @@ import {
   getPrismApps,
   getDriverStatus,
   getAudioDevices,
+  getBusLevels,
   updateMixerSend,
   removeMixerSend,
   setOutputVolume,
@@ -357,21 +358,7 @@ function dbToFader(db: number): number {
   return Math.max(0, 8.2 * (1 + (db + 40) / 60));
 }
 
-// Convert UI fader position (0-100) to linear gain (1.0 = 0dB)
-function faderToGain(faderValue: number): number {
-  if (!isFinite(faderValue) || faderValue <= 0) return 0;
-  // Convert fader (0-100) -> dB using existing scale, then to linear gain
-  const db = faderToDb(faderValue);
-  if (!isFinite(db) || db <= -100) return 0;
-  return Math.pow(10, db / 20);
-}
-
-// Convert fader percent (0-100) to linear gain (0.0-1.0)
-function faderPercentToLinear(percent: number): number {
-  const db = faderToDb(percent);
-  if (!isFinite(db) || db <= -100) return 0;
-  return Math.pow(10, db / 20);
-}
+// (Removed unused fader helper wrappers)
 
 // Convert UI fader percent (0-100) and muted flag to dB for backend.
 // Returns clamped dB (<= -100 used to represent silent/muted).
@@ -551,7 +538,7 @@ export default function App() {
   // Refs for node line meters (thin horizontal bar at bottom of header)
   const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Refs for node header numeric readouts (container div containing L/R spans)
-  const nodeHeaderNumberRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // (numeric header readouts removed) -- keep placeholder ref map removed
   // Refs for mixer meters (per-mixer channel canvases)
   const mixerMeterRefs = useRef<Map<string, HTMLCanvasElement>>(new Map());
   // Refs for master meters (L/R canvases in master section)
@@ -565,6 +552,9 @@ export default function App() {
   // Keep ResizeObservers so we can disconnect if element removed
   const mixerROs = useRef<Map<string, ResizeObserver>>(new Map());
   const masterROs = useRef<Map<string, ResizeObserver>>(new Map());
+
+  // Per-bus per-send data fetched at lower frequency
+  const busSendsRef = useRef<Record<string, any[]>>({});
 
   // Callback ref for mixer meters
   const setMixerCanvasRef = useCallback((el: HTMLCanvasElement | null, key: string) => {
@@ -605,14 +595,7 @@ export default function App() {
     mixerROs.current.set(key, ro);
   }, []);
 
-  // Callback ref for node header numeric elements
-  const setNodeHeaderNumberRef = useCallback((el: HTMLDivElement | null, key: string) => {
-    if (!el) {
-      nodeHeaderNumberRefs.current.delete(key);
-      return;
-    }
-    nodeHeaderNumberRefs.current.set(key, el);
-  }, []);
+  // node header numeric readouts removed per user request
 
   // Callback ref for master numeric DOM elements
   const setMasterNumberRef = useCallback((el: HTMLDivElement | null, key: string) => {
@@ -1662,13 +1645,16 @@ export default function App() {
 
         el.style.width = `${smoothedPct}%`;
         // Update numeric readout inside node line meter (create if missing)
-          // node numeric readout removed per user request
-        // Update header L/R numeric readout
-        try {
-          const headerEl = nodeHeaderNumberRefs.current.get(nodeId);
-            // header numeric L/R readouts removed per user request
-        } catch (e) {
-          // ignore
+        // node numeric readout removed per user request
+        // header numeric L/R readouts removed per user request
+        // Attach per-send count for bus nodes so UI can show per-route meters
+        if (node.type === 'bus' && node.busId) {
+          const sends = busSendsRef.current[node.busId] || [];
+          try {
+            el.setAttribute('data-send-count', String(sends.length));
+          } catch (e) {
+            // ignore DOM exceptions
+          }
         }
       }
 
@@ -1678,6 +1664,29 @@ export default function App() {
     animationFrame = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrame);
   }, [activeCaptures, nodes, nodesById, connections, focusedOutputId, selectedBusId, focusedPairIndex]);
+
+  // Poll `getBusLevels` at a lower frequency to obtain per-send post peaks
+  useEffect(() => {
+    let running = true;
+    const poll = async () => {
+      try {
+        const busInfos = await getBusLevels() as any[];
+        const map: Record<string, any[]> = {};
+        for (const b of busInfos) {
+          map[b.id] = b.sends || [];
+        }
+        busSendsRef.current = map;
+        if (Math.random() < 0.01) console.debug('[BusSends] keys=', Object.keys(map));
+      } catch (e) {
+        // ignore transient IPC errors
+      }
+    };
+
+    // Initial poll then interval
+    poll();
+    const id = setInterval(() => { if (running) poll(); }, 250);
+    return () => { running = false; clearInterval(id); };
+  }, []);
 
   // Channel-based source type for UI (32 stereo pairs = 64 channels)
   type ChannelSource = {

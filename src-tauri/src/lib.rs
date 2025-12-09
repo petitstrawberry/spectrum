@@ -218,7 +218,7 @@ fn get_all_levels(device_ids: Vec<String>, output_keys: Vec<String>) -> AllLevel
     // 3. Bus levels
     let buses = mixer_state.get_bus_levels()
         .into_iter()
-        .map(|(id, levels)| BusLevelData {
+        .map(|(id, levels, _sends)| BusLevelData {
             id,
             pre_left_peak: levels.pre_left_peak,
             pre_right_peak: levels.pre_right_peak,
@@ -294,7 +294,7 @@ async fn get_mixer_levels_binary(device_ids: Vec<String>, output_keys: Vec<Strin
     }
 
     // Buses
-    let buses = mixer_state.get_bus_levels(); // Vec<(id, levels)>
+    let buses = mixer_state.get_bus_levels(); // Vec<(id, levels, sends)>
 
     // Outputs
     let mut output_entries: Vec<(String, Vec<LevelData>)> = Vec::new();
@@ -327,7 +327,7 @@ async fn get_mixer_levels_binary(device_ids: Vec<String>, output_keys: Vec<Strin
 
     // Buses
     buf.extend_from_slice(&(buses.len() as u32).to_le_bytes());
-    for (id, levels) in buses.into_iter() {
+    for (id, levels, _sends) in buses.into_iter() {
         let id_bytes = id.as_bytes();
         buf.extend_from_slice(&(id_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(id_bytes);
@@ -550,6 +550,8 @@ pub struct BusLevelInfo {
     pub pre_right_peak: f32,
     pub post_left_peak: f32,
     pub post_right_peak: f32,
+    /// Per-send post levels for outgoing edges from this bus
+    pub sends: Vec<crate::mixer::BusSendLevel>,
 }
 
 /// Add a new bus
@@ -610,12 +612,13 @@ fn get_bus_levels() -> Vec<BusLevelInfo> {
     let mixer_state = mixer::get_mixer_state();
     mixer_state.get_bus_levels()
         .into_iter()
-        .map(|(id, levels)| BusLevelInfo {
+        .map(|(id, levels, sends)| BusLevelInfo {
             id,
             pre_left_peak: levels.pre_left_peak,
             pre_right_peak: levels.pre_right_peak,
             post_left_peak: levels.post_left_peak,
             post_right_peak: levels.post_right_peak,
+            sends,
         })
         .collect()
 }
