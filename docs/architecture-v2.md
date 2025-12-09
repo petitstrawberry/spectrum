@@ -62,7 +62,7 @@ Node は処理のみを行い、レベル制御の責務を持たない。
 
 ```rust
 /// Node の一意識別子
-/// 
+///
 /// 重要: NodeHandle は不透明なIDであり、ノードの種類を示さない。
 /// ノードの種類はノード自体が持つ。これにより呼び出し側は
 /// 統一されたインターフェースでノードを扱える。
@@ -92,7 +92,7 @@ impl PortId {
     pub fn new(index: u8) -> Self {
         Self(index)
     }
-    
+
     pub fn index(&self) -> usize {
         self.0 as usize
     }
@@ -107,41 +107,41 @@ impl PortId {
 
 ```rust
 /// オーディオノードの統一インターフェース
-/// 
+///
 /// すべてのノード種類（Source, Bus, Sink）がこのトレイトを実装する。
 /// これにより、グラフは具体的なノード種類を知らずに処理できる。
 pub trait AudioNode: Send + Sync {
     /// ノードの種類を返す
     fn node_type(&self) -> NodeType;
-    
+
     /// 入力ポート数を返す
     fn input_port_count(&self) -> usize;
-    
+
     /// 出力ポート数を返す
     fn output_port_count(&self) -> usize;
-    
+
     /// 入力バッファへの参照を取得
     fn input_buffer(&self, port: PortId) -> Option<&AudioBuffer>;
-    
+
     /// 入力バッファへの可変参照を取得
     fn input_buffer_mut(&mut self, port: PortId) -> Option<&mut AudioBuffer>;
-    
+
     /// 出力バッファへの参照を取得
     fn output_buffer(&self, port: PortId) -> Option<&AudioBuffer>;
-    
+
     /// 出力バッファへの可変参照を取得
     fn output_buffer_mut(&mut self, port: PortId) -> Option<&mut AudioBuffer>;
-    
+
     /// ノードの処理を実行
-    /// 
+    ///
     /// - Source: 入力デバイスから読み込み → 出力バッファへ
     /// - Bus: 入力バッファ → プラグイン処理 → 出力バッファ
     /// - Sink: 入力バッファ → 出力デバイスへ書き込み
     fn process(&mut self, frames: usize);
-    
+
     /// バッファをクリア
     fn clear_buffers(&mut self, frames: usize);
-    
+
     /// ピークレベルを取得（メータリング用）
     fn peak_levels(&self) -> Vec<f32>;
 }
@@ -170,20 +170,20 @@ impl AudioBuffer {
             valid_frames: 0,
         }
     }
-    
+
     pub fn clear(&mut self, frames: usize) {
         self.data[..frames].fill(0.0);
         self.valid_frames = frames;
     }
-    
+
     pub fn samples(&self) -> &[f32] {
         &self.data[..self.valid_frames]
     }
-    
+
     pub fn samples_mut(&mut self) -> &mut [f32] {
         &mut self.data[..self.valid_frames]
     }
-    
+
     /// 別のバッファからゲイン付きで加算
     pub fn mix_from(&mut self, source: &AudioBuffer, gain: f32) {
         let frames = self.valid_frames.min(source.valid_frames);
@@ -200,7 +200,7 @@ impl AudioBuffer {
 
 ```rust
 /// 入力ソースノード
-/// 
+///
 /// Prism チャンネルまたは外部入力デバイスから音声を取得
 pub struct SourceNode {
     /// ソースの識別情報
@@ -221,7 +221,7 @@ impl AudioNode for SourceNode {
     fn node_type(&self) -> NodeType { NodeType::Source }
     fn input_port_count(&self) -> usize { 0 }  // ソースは入力なし
     fn output_port_count(&self) -> usize { self.output_buffers.len() }
-    
+
     fn process(&mut self, frames: usize) {
         match &self.source_id {
             SourceId::PrismChannel { channel } => {
@@ -241,7 +241,7 @@ impl AudioNode for SourceNode {
 
 ```rust
 /// エフェクトバスノード
-/// 
+///
 /// 注意: fader/mute を持たない（Sends-on-Fader 原則）
 /// レベル制御は入力/出力の Edge で行う
 pub struct BusNode {
@@ -261,7 +261,7 @@ impl AudioNode for BusNode {
     fn node_type(&self) -> NodeType { NodeType::Bus }
     fn input_port_count(&self) -> usize { self.input_buffers.len() }
     fn output_port_count(&self) -> usize { self.output_buffers.len() }
-    
+
     fn process(&mut self, frames: usize) {
         // 入力 → 出力にコピー
         for (i, out_buf) in self.output_buffers.iter_mut().enumerate() {
@@ -269,7 +269,7 @@ impl AudioNode for BusNode {
                 out_buf.samples_mut().copy_from_slice(in_buf.samples());
             }
         }
-        
+
         // プラグインチェーンを通す
         for plugin in &mut self.plugin_chain {
             plugin.process(&mut self.output_buffers, frames);
@@ -283,7 +283,7 @@ impl AudioNode for BusNode {
 
 ```rust
 /// 出力先ノード
-/// 
+///
 /// 物理デバイスまたは仮想デバイスへの出力
 pub struct SinkNode {
     /// 出力先の識別情報
@@ -293,7 +293,7 @@ pub struct SinkNode {
 }
 
 /// 出力先の識別
-/// 
+///
 /// 重要: 仮想デバイスの概念はここで実装
 /// - 集約デバイスのサブデバイスは個別の SinkId として表現
 /// - 通常デバイスは channel_offset = 0
@@ -314,7 +314,7 @@ impl AudioNode for SinkNode {
     fn node_type(&self) -> NodeType { NodeType::Sink }
     fn input_port_count(&self) -> usize { self.input_buffers.len() }
     fn output_port_count(&self) -> usize { 0 }  // シンクは出力なし
-    
+
     fn process(&mut self, _frames: usize) {
         // 処理は output callback で行う
         // ここでは入力バッファを保持するのみ
@@ -329,7 +329,7 @@ impl AudioNode for SinkNode {
 
 ```rust
 /// エッジ（送り）
-/// 
+///
 /// ソースノードの出力ポートからターゲットノードの入力ポートへの接続。
 /// すべてのレベル制御はここで行う（Sends-on-Fader の核心）。
 #[derive(Debug, Clone)]
@@ -367,7 +367,7 @@ impl Edge {
 
 ```rust
 /// オーディオグラフ
-/// 
+///
 /// ノードとエッジを管理し、トポロジカルソートで処理順序を決定
 pub struct AudioGraph {
     /// ノード格納
@@ -391,7 +391,7 @@ impl AudioGraph {
         self.rebuild_order();
         handle
     }
-    
+
     /// ノードを削除
     pub fn remove_node(&mut self, handle: NodeHandle) {
         self.nodes.remove(&handle);
@@ -399,7 +399,7 @@ impl AudioGraph {
         self.edges.retain(|e| e.source != handle && e.target != handle);
         self.rebuild_order();
     }
-    
+
     /// エッジを追加
     pub fn add_edge(&mut self, edge: Edge) -> EdgeId {
         let id = EdgeId(self.next_edge_id);
@@ -410,31 +410,31 @@ impl AudioGraph {
         self.rebuild_order();
         id
     }
-    
+
     /// エッジを削除
     pub fn remove_edge(&mut self, id: EdgeId) {
         self.edges.retain(|e| e.id != id);
     }
-    
+
     /// エッジのゲインを更新（リビルド不要）
     pub fn set_edge_gain(&mut self, id: EdgeId, gain: f32) {
         if let Some(edge) = self.edges.iter_mut().find(|e| e.id == id) {
             edge.gain = gain;
         }
     }
-    
+
     /// エッジのミュートを更新（リビルド不要）
     pub fn set_edge_muted(&mut self, id: EdgeId, muted: bool) {
         if let Some(edge) = self.edges.iter_mut().find(|e| e.id == id) {
             edge.muted = muted;
         }
     }
-    
+
     /// 処理順序を再計算
     fn rebuild_order(&mut self) {
         self.processing_order = self.topological_sort();
     }
-    
+
     /// トポロジカルソート
     fn topological_sort(&self) -> Vec<NodeHandle> {
         // Kahn's algorithm
@@ -449,7 +449,7 @@ impl AudioGraph {
 
 ```rust
 /// グラフプロセッサ
-/// 
+///
 /// オーディオコールバックから呼び出され、グラフ全体を処理
 pub struct GraphProcessor {
     graph: Arc<ArcSwap<AudioGraph>>,
@@ -460,22 +460,22 @@ impl GraphProcessor {
     /// オーディオ処理を実行
     pub fn process(&self, frames: usize) {
         let graph = self.graph.load();
-        
+
         // 1. すべてのノードのバッファをクリア
         for handle in graph.processing_order.iter() {
             if let Some(node) = graph.nodes.get(handle) {
                 node.clear_buffers(frames);
             }
         }
-        
+
         // 2. トポロジカル順でノードを処理
         for handle in graph.processing_order.iter() {
             // 2a. このノードへの入力を集約（エッジからミックス）
             for edge in graph.edges.iter().filter(|e| e.target == *handle && e.is_active()) {
-                if let (Some(source_node), Some(target_node)) = 
-                    (graph.nodes.get(&edge.source), graph.nodes.get_mut(&edge.target)) 
+                if let (Some(source_node), Some(target_node)) =
+                    (graph.nodes.get(&edge.source), graph.nodes.get_mut(&edge.target))
                 {
-                    if let (Some(src_buf), Some(tgt_buf)) = 
+                    if let (Some(src_buf), Some(tgt_buf)) =
                         (source_node.output_buffer(edge.source_port),
                          target_node.input_buffer_mut(edge.target_port))
                     {
@@ -483,17 +483,17 @@ impl GraphProcessor {
                     }
                 }
             }
-            
+
             // 2b. ノードの処理を実行
             if let Some(node) = graph.nodes.get_mut(handle) {
                 node.process(frames);
             }
         }
-        
+
         // 3. メーターを更新
         self.update_meters(&graph);
     }
-    
+
     /// シンクノードの出力を取得（出力コールバック用）
     pub fn read_sink_output(&self, handle: NodeHandle, output: &mut [f32], channels: usize) {
         // ...
@@ -821,9 +821,9 @@ async function closePluginUI(instanceId: string): Promise<void>;
 
 // --- Meter API ---
 
-/** 
+/**
  * メーターを取得
- * 
+ *
  * ポーリング用。60fps程度で呼び出すことを想定。
  * オーディオスレッドからの読み取りはlock-free。
  */
@@ -1138,12 +1138,12 @@ function ConnectionPanel({ edge }: { edge: ConnectionFader }) {
   return (
     <div>
       <div>{edge.source.node.label}:{edge.source.port}</div>
-      <Fader 
+      <Fader
         value={edge.gain}
         meter={edge.meter.peak}
         onChange={(g) => setEdgeGain(edge.edgeId, g)}
       />
-      <MuteButton 
+      <MuteButton
         muted={edge.muted}
         onClick={() => setEdgeMuted(edge.edgeId, !edge.muted)}
       />
@@ -1466,7 +1466,7 @@ pub struct SystemStatusDto {
   │    → SinkId::OutputDevice { device_id: 200, channel_offset: 0, channel_count: 2 }
   │    → UI: "vout_200_0"
   │
-  ├─ SubDevice B: "Monitor" (ch 2-3)  
+  ├─ SubDevice B: "Monitor" (ch 2-3)
   │    → SinkId::OutputDevice { device_id: 200, channel_offset: 2, channel_count: 2 }
   │    → UI: "vout_200_2"
   │
@@ -1481,12 +1481,12 @@ pub struct SystemStatusDto {
 /// 出力デバイスを取得（仮想デバイス展開済み）
 pub fn get_output_devices() -> Vec<OutputDeviceDto> {
     let mut result = Vec::new();
-    
+
     for device in get_audio_devices() {
         if !device.is_output {
             continue;
         }
-        
+
         if is_aggregate_device(device.id) {
             // 集約デバイス: サブデバイスを仮想デバイスとして展開
             let mut offset = 0u8;
@@ -1515,7 +1515,7 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
             });
         }
     }
-    
+
     result
 }
 ```
@@ -1544,7 +1544,7 @@ src-tauri/src/
 │   ├── mod.rs
 │   ├── node.rs          # AudioNode trait + NodeHandle
 │   ├── source.rs        # SourceNode 実装
-│   ├── bus.rs           # BusNode 実装  
+│   ├── bus.rs           # BusNode 実装
 │   ├── sink.rs          # SinkNode 実装
 │   ├── edge.rs          # Edge + EdgeId
 │   ├── graph.rs         # AudioGraph
@@ -1618,3 +1618,78 @@ src-tauri/src/
 5. **API の整理**: CRUD 操作が明確
 
 これにより、設計の矛盾がなくなり、コードの見通しが良くなります。
+
+---
+
+## 実装進捗 (2025-12-09 更新)
+
+### Phase 1: 基盤 ✅ 完了
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `audio/mod.rs` | ✅ | モジュールエクスポート |
+| `audio/node.rs` | ✅ | AudioNode trait, NodeHandle, PortId, NodeType |
+| `audio/buffer.rs` | ✅ | AudioBuffer (vDSP統合、MAX_FRAMES=4096) |
+| `audio/edge.rs` | ✅ | Edge, EdgeId (Sends-on-Fader の核心) |
+| `audio/meters.rs` | ✅ | PortMeter, NodeMeter, EdgeMeter, GraphMeters |
+
+### Phase 2: ノード実装 ✅ 完了
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `audio/source.rs` | ✅ | SourceNode (PrismChannel, InputDevice) |
+| `audio/bus.rs` | ✅ | BusNode (プラグインチェーン、fader/mute なし) |
+| `audio/sink.rs` | ✅ | SinkNode (device_id, channel_offset, channel_count) |
+| `audio/graph.rs` | ✅ | AudioGraph (HashMap, トポロジカルソート) |
+
+### Phase 3: 処理エンジン 🔄 進行中
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `audio/processor.rs` | ✅ | GraphProcessor スケルトン (ArcSwap lock-free) |
+| 出力コールバック統合 | ❌ | 未実装 |
+| メータリング実装 | 🔄 | 基本構造のみ |
+
+### Phase 4: 拡張 🔄 部分完了
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `capture/mod.rs` | ✅ | レガシー audio_capture ラッパー |
+| `capture/ring_buffer.rs` | ✅ | ロックフリー RingBuffer |
+| `device/mod.rs` | ✅ | デバイスモジュール |
+| `device/enumerate.rs` | ✅ | 出力デバイス列挙 (aggregate対応) |
+| BusNode プラグイン統合 | ❌ | 未実装 |
+
+### Phase 5: API + UI 🔄 部分完了
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `api/mod.rs` | ✅ | APIモジュール |
+| `api/dto.rs` | ✅ | 全DTO定義 (設計書通り) |
+| `api/commands.rs` | 🔄 | Tauriコマンド スケルトン (ほとんど未実装) |
+| `lib.rs` | ✅ | v2モジュール + レガシー互換 |
+| UI更新 | ❌ | 未着手 |
+
+### 修正済みの問題
+
+1. ✅ `audio.rs` と `audio/mod.rs` のモジュール競合を解決
+2. ✅ `audio_capture.rs` の `mixer` 依存を解消 (ローカル型定義)
+3. ✅ `api/mod.rs` で `dto` をpublic化
+4. ✅ `prismd.rs` に `get_processes()` 関数追加
+5. ✅ `audio_unit::get_effect_audio_units()` を使用するよう修正
+6. ✅ `processor` モジュールをpublic化
+7. ✅ `graph.rs` の lifetime エラー修正
+
+### ビルド状態
+
+```
+✅ cargo build 成功 (警告あり、エラーなし)
+```
+
+### 次のステップ
+
+1. **API コマンドの実装** - `api/commands.rs` の各関数を実装
+2. **出力コールバック統合** - GraphProcessor と出力デバイスの接続
+3. **メータリング完全実装** - リアルタイムレベル計算
+4. **BusNode プラグイン統合** - AudioUnit との連携
+5. **フロントエンド更新** - 新APIに対応したUI

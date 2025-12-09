@@ -7,8 +7,17 @@
 //! - Multiple consumers (output callbacks) can read the SAME data independently
 //! - Each output device has its own read position via triple buffering
 
-use crate::mixer::{ChannelLevels, PRISM_CHANNELS};
 use crate::vdsp::VDsp;
+
+/// Number of Prism channels (64 mono = 32 stereo pairs)
+pub const PRISM_CHANNELS: usize = 64;
+
+/// Level data for a stereo pair
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelLevels {
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_device_name, set_device_sample_rate,
 };
@@ -818,21 +827,6 @@ pub fn pop_channel_audio(
 ) -> usize {
     // Use device_id 0 as a fallback for legacy callers
     read_channel_audio(0, left_ch, right_ch, left_out, right_out)
-}
-
-/// Update mixer state with captured levels
-pub fn update_mixer_levels() {
-    use crate::mixer::get_mixer_state;
-
-    let levels = get_capture_levels();
-    let mixer_state = get_mixer_state();
-    let mut input_levels = mixer_state.input_levels.write();
-
-    for (i, level) in levels.iter().enumerate() {
-        if i < input_levels.len() {
-            input_levels[i] = *level;
-        }
-    }
 }
 
 // ============================================================================
