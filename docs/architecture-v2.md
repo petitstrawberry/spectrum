@@ -1733,4 +1733,46 @@ src-tauri/src/
 1. ~~**メータリング完全実装**~~ ✅ - `processor.process()` で RMS/Peak 計算、Edge post-gain メータリング
 2. ~~**BusNode プラグイン統合**~~ ✅ - AudioUnit との連携（PluginInstance.process()）
 3. ~~**Plugin UI コマンド**~~ ✅ - `open_plugin_ui`, `close_plugin_ui` 実装完了
-4. **Frontend更新** - v2 API に対応したUI
+4. ~~**v2 API クライアント**~~ ✅ - `src/lib/api.ts` 作成完了
+5. **Frontend移行** 🔄 - App.tsx を v2 API に段階的移行
+
+### フロントエンド移行状況
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `src/lib/api.ts` | ✅ 新規作成 | v2 API TypeScriptクライアント (全型定義・全関数) |
+| `src/lib/prismd.ts` | 🔄 レガシー | v1 API (現在App.tsxが使用中) |
+| `src/App.tsx` | 🔄 レガシー | prismd.ts を使用中、段階的移行が必要 |
+| `src/lib/prismd.v1.ts.bak` | 📦 バックアップ | prismd.ts のバックアップ |
+| `src/App.v1.tsx.bak` | 📦 バックアップ | App.tsx のバックアップ |
+
+### v2 API クライアント (api.ts) 実装内容
+
+**型定義:**
+- `InputDeviceDto`, `OutputDeviceDto`, `SubDeviceDto`
+- `PrismAppDto`, `PrismStatusDto`
+- `SourceIdDto` (discriminated union: `prism_channel` | `input_device`)
+- `OutputSinkDto`
+- `PluginInstanceDto`, `NodeInfoDto` (discriminated union)
+- `EdgeInfoDto`, `GraphDto`
+- `PluginInfoDto`
+- `PortMeterDto`, `NodeMeterDto`, `EdgeMeterDto`, `GraphMetersDto`
+- `GraphStateDto`, `SystemStatusDto`, `EdgeGainUpdate`
+
+**関数:**
+- Device: `getInputDevices`, `getOutputDevices`, `getPrismStatus`
+- Graph: `addSourceNode`, `addBusNode`, `addSinkNode`, `removeNode`, `addEdge`, `removeEdge`, `getGraph`
+- Edge: `setEdgeGain`, `setEdgeMuted`, `setEdgeGainsBatch`
+- Plugin: `getAvailablePlugins`, `addPluginToBus`, `removePluginFromBus`, `reorderPlugins`, `openPluginUI`, `closePluginUI`
+- Meter: `getMeters`, `getNodeMeters`, `getEdgeMeters`
+- State: `saveGraphState`, `loadGraphState`, `persistState`, `restoreState`
+- System: `startAudio`, `stopAudio`, `getSystemStatus`, `setBufferSize`
+- Helpers: `dbToGain`, `gainToDb`, `rmsToDb`, `dbToMeterPercent`
+
+### バックエンド互換性
+
+現在の `lib.rs` は両方のAPIをサポート:
+- ✅ v2 API (`api::*` コマンド) - 新しいグラフベースAPI
+- ✅ レガシーコマンド - 現在のフロントエンドとの後方互換性
+
+これにより、フロントエンドの段階的移行が可能。

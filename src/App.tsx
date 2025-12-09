@@ -1467,20 +1467,6 @@ export default function App() {
         }
       }
 
-      // Compute hash lower 8 bits for matching (same algorithm as Rust backend)
-      // This uses simple string hash similar to Rust's DefaultHasher
-      const computeHashLower8 = (deviceId: number): number => {
-        const str = deviceId.toString();
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-          const char = str.charCodeAt(i);
-          hash = ((hash << 5) - hash + char) | 0;
-        }
-        // Rust uses different hash algorithm, so we extract from node_id instead
-        // Just return 0 for now - we'll match by finding outputs for this device
-        return hash & 0xFF;
-      };
-
       // Debug: log master meter data (remove after debugging)
       if (masterCanvasCache.current.size > 0 && Math.random() < 0.01) {
         console.log('[Master Meter Debug]', {
@@ -1489,7 +1475,7 @@ export default function App() {
           masterDeviceId,
           focusedPairIndex,
           outputCount: graphMeters.outputs.length,
-          outputs: graphMeters.outputs.map(o => ({ pair_idx: o.pair_idx, device_hash_lower8: o.device_hash_lower8 })),
+          outputs: graphMeters.outputs.map(o => ({ pair_idx: o.pair_idx, node_id: o.node_id })),
         });
       }
 

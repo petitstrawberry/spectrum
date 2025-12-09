@@ -1,0 +1,374 @@
+//! Spectrum - Prism Audio Mixer & Router
+//!
+//! v2 Architecture: Pure Sends-on-Fader Design
+//!
+//! This is the library entry point for Tauri.
+
+// =============================================================================
+// v2 Modules (New Architecture)
+// =============================================================================
+
+pub mod audio;      // AudioGraph, AudioNode, Edge, Meters
+pub mod api;        // Tauri commands and DTOs
+pub mod capture;    // Input audio capture
+pub mod device;     // Device enumeration
+
+// =============================================================================
+// Legacy Modules (To be deprecated/refactored)
+// =============================================================================
+
+mod audio_capture;  // Legacy capture (wrapped by capture module)
+mod audio_unit;     // AudioUnit plugin management
+mod audio_unit_ui;  // AudioUnit UI
+pub mod config;     // Configuration persistence
+pub mod prismd;     // Prism daemon communication
+mod vdsp;           // vDSP hardware acceleration
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// Re-export prismd types
+pub use prismd::{ClientInfo, ClientRoutingUpdate, RoutingUpdate};
+
+// =============================================================================
+// Legacy Types (For backward compatibility)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+    pub channels: u32,
+    pub is_input: bool,
+    pub is_output: bool,
+    pub device_type: String,
+    pub input_channels: u32,
+    pub output_channels: u32,
+    pub transport_type: String,
+    #[serde(default)]
+    pub is_aggregate: bool,
+    #[serde(default)]
+    pub sub_devices: Vec<SubDeviceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SubDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub output_channels: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriverStatus {
+    pub connected: bool,
+    pub sample_rate: u32,
+    pub buffer_size: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LevelData {
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllLevels {
+    pub input: Vec<LevelData>,
+    pub output: HashMap<String, Vec<LevelData>>,
+}
+
+// =============================================================================
+// v2 API Commands (New)
+// =============================================================================
+
+// Device Commands
+pub use api::get_input_devices;
+pub use api::get_output_devices;
+pub use api::get_prism_status;
+
+// Graph Commands
+pub use api::add_source_node;
+pub use api::add_bus_node;
+pub use api::add_sink_node;
+pub use api::remove_node;
+pub use api::add_edge;
+pub use api::remove_edge;
+pub use api::get_graph;
+
+// Edge Commands (Hot Path)
+pub use api::set_edge_gain;
+pub use api::set_edge_muted;
+pub use api::set_edge_gains_batch;
+
+// Plugin Commands
+pub use api::get_available_plugins;
+pub use api::add_plugin_to_bus;
+pub use api::remove_plugin_from_bus;
+pub use api::reorder_plugins;
+pub use api::open_plugin_ui;
+pub use api::close_plugin_ui;
+
+// Meter Commands
+pub use api::get_meters;
+pub use api::get_node_meters;
+pub use api::get_edge_meters;
+
+// State Commands
+pub use api::save_graph_state;
+pub use api::load_graph_state;
+pub use api::persist_state;
+pub use api::restore_state;
+
+// System Commands
+pub use api::start_audio;
+pub use api::stop_audio;
+pub use api::get_system_status;
+pub use api::set_buffer_size;
+
+// =============================================================================
+// Legacy Commands (For backward compatibility)
+// =============================================================================
+
+#[tauri::command]
+async fn get_prism_clients() -> Result<Vec<ClientInfo>, String> {
+    prismd::get_clients().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_routing(pid: i32, offset: u32) -> Result<RoutingUpdate, String> {
+    prismd::set_routing(pid, offset)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_app_routing(app_name: String, offset: u32) -> Result<Vec<RoutingUpdate>, String> {
+    prismd::set_app_routing(app_name, offset)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_client_routing(client_id: u32, offset: u32) -> Result<ClientRoutingUpdate, String> {
+    prismd::set_client_routing(client_id, offset)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_driver_status() -> Result<DriverStatus, String> {
+    let connected = prismd::is_connected() || capture::is_capture_running();
+
+    Ok(DriverStatus {
+        connected,
+        sample_rate: 48000, // TODO: Get from config
+        buffer_size: capture::get_io_buffer_size() as u32,
+    })
+}
+
+#[tauri::command]
+fn start_audio_capture() -> Result<bool, String> {
+    capture::start_capture().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn stop_audio_capture() {
+    capture::stop_capture();
+}
+
+#[tauri::command]
+fn is_audio_capture_running() -> bool {
+    capture::is_capture_running()
+}
+
+#[tauri::command]
+fn is_prism_available() -> bool {
+    capture::find_prism_device().is_some()
+}
+
+// Input device commands (using new capture module)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputDeviceInfo {
+    pub device_id: u32,
+    pub name: String,
+    pub channels: u32,
+    pub is_prism: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveCaptureInfo {
+    pub device_id: u32,
+    pub name: String,
+    pub channel_count: usize,
+    pub is_prism: bool,
+}
+
+#[tauri::command]
+fn get_input_devices_legacy() -> Vec<InputDeviceInfo> {
+    capture::get_input_devices()
+        .into_iter()
+        .map(|(id, name, channels, is_prism)| InputDeviceInfo {
+            device_id: id,
+            name,
+            channels,
+            is_prism,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn start_input_capture(device_id: u32) -> Result<bool, String> {
+    capture::start_input_capture(device_id)
+}
+
+#[tauri::command]
+fn stop_input_capture(device_id: u32) {
+    capture::stop_input_capture(device_id);
+}
+
+#[tauri::command]
+fn get_active_captures() -> Vec<ActiveCaptureInfo> {
+    capture::get_active_captures()
+        .into_iter()
+        .map(|(id, name, ch, is_prism)| ActiveCaptureInfo {
+            device_id: id,
+            name,
+            channel_count: ch,
+            is_prism,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn is_device_capturing(device_id: u32) -> bool {
+    capture::is_device_capturing(device_id)
+}
+
+// Buffer size commands
+
+#[tauri::command]
+fn set_io_buffer_size(size: u32) -> Result<(), String> {
+    capture::set_io_buffer_size(size as usize);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_io_buffer_size() -> u32 {
+    capture::get_io_buffer_size() as u32
+}
+
+// Plugin commands (legacy wrappers)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    pub manufacturer: String,
+    pub component_type: String,
+}
+
+#[tauri::command]
+fn get_plugins() -> Vec<PluginInfo> {
+    audio_unit::get_effect_audio_units()
+        .into_iter()
+        .map(|p| PluginInfo {
+            id: p.id,
+            name: p.name,
+            manufacturer: p.manufacturer,
+            component_type: p.plugin_type,
+        })
+        .collect()
+}
+
+// Prism process info
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrismProcess {
+    pub pid: u32,
+    pub name: String,
+    pub channel_offset: u32,
+}
+
+#[tauri::command]
+fn get_processes() -> Vec<PrismProcess> {
+    prismd::get_processes()
+        .into_iter()
+        .map(|p| PrismProcess {
+            pid: p.pid,
+            name: p.name,
+            channel_offset: p.channel_offset,
+        })
+        .collect()
+}
+
+// =============================================================================
+// Tauri App Builder
+// =============================================================================
+
+/// Generate Tauri command handlers
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            // v2 API - Device
+            get_input_devices,
+            get_output_devices,
+            get_prism_status,
+            // v2 API - Graph
+            add_source_node,
+            add_bus_node,
+            add_sink_node,
+            remove_node,
+            add_edge,
+            remove_edge,
+            get_graph,
+            // v2 API - Edge
+            set_edge_gain,
+            set_edge_muted,
+            set_edge_gains_batch,
+            // v2 API - Plugin
+            get_available_plugins,
+            add_plugin_to_bus,
+            remove_plugin_from_bus,
+            reorder_plugins,
+            open_plugin_ui,
+            close_plugin_ui,
+            // v2 API - Meter
+            get_meters,
+            get_node_meters,
+            get_edge_meters,
+            // v2 API - State
+            save_graph_state,
+            load_graph_state,
+            persist_state,
+            restore_state,
+            // v2 API - System
+            start_audio,
+            stop_audio,
+            get_system_status,
+            set_buffer_size,
+            // Legacy commands
+            get_prism_clients,
+            set_routing,
+            set_app_routing,
+            set_client_routing,
+            get_driver_status,
+            start_audio_capture,
+            stop_audio_capture,
+            is_audio_capture_running,
+            is_prism_available,
+            get_input_devices_legacy,
+            start_input_capture,
+            stop_input_capture,
+            get_active_captures,
+            is_device_capturing,
+            set_io_buffer_size,
+            get_io_buffer_size,
+            get_plugins,
+            get_processes,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
