@@ -143,7 +143,8 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   const isRefreshing = devices?.isLoading ?? false;
   const [driverStatus, setDriverStatus] = useState<any | null>(null);
   const prismDevice = devices?.inputDevices?.find((d: any) => d.isPrism) ?? null;
-  const inputSourceMode = devices?.prismStatus?.connected ? 'prism' : 'devices';
+  // Default to 'prism' tab per v1 behaviour
+  const [inputSourceMode, setInputSourceMode] = useState<'prism' | 'devices'>('prism');
   const selectedInputDevice = prismDevice;
   const channelSources: any[] = (devices?.prismStatus?.apps || []).map((a: any, i: number) => ({
     id: `ch_${(a.channelOffset ?? (i * 2))}`,
@@ -255,7 +256,14 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <LeftSidebar width={leftSidebarWidth} isRefreshing={isRefreshing} inputSourceMode={inputSourceMode} handleRefresh={handleRefresh} driverStatus={driverStatus} />
+        <LeftSidebar
+          width={leftSidebarWidth}
+          isRefreshing={isRefreshing}
+          inputSourceMode={inputSourceMode}
+          handleRefresh={handleRefresh}
+          driverStatus={driverStatus}
+          onChangeInputSourceMode={(m) => setInputSourceMode(m)}
+        />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />

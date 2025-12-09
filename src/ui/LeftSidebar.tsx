@@ -6,9 +6,10 @@ interface Props {
   inputSourceMode: string;
   handleRefresh: () => void | Promise<void>;
   driverStatus?: { connected: boolean; sample_rate?: number; buffer_size?: number } | null;
+  onChangeInputSourceMode?: (mode: 'prism' | 'devices') => void;
 }
 
-export default function LeftSidebar({ width, isRefreshing, inputSourceMode, handleRefresh, driverStatus }: Props) {
+export default function LeftSidebar({ width, isRefreshing, inputSourceMode, handleRefresh, driverStatus, onChangeInputSourceMode }: Props) {
   return (
     <div className="bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" style={{ width }} onClick={e => e.stopPropagation()}>
       <div className="p-4 border-b border-slate-800 bg-slate-900/50">
@@ -26,8 +27,14 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
           </button>
         </div>
         <div className="flex gap-1 mb-2">
-          <button className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors ${inputSourceMode === 'prism' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>Prism</button>
-          <button className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors ${inputSourceMode === 'devices' ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>Devices</button>
+          <button
+            onClick={() => onChangeInputSourceMode?.('prism')}
+            className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors ${inputSourceMode === 'prism' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+          >Prism</button>
+          <button
+            onClick={() => onChangeInputSourceMode?.('devices')}
+            className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors ${inputSourceMode === 'devices' ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+          >Devices</button>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
