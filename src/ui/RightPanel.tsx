@@ -89,9 +89,6 @@ export default function RightPanel({ width, devices }: Props) {
             ))}
           </select>
         </div>
-        <div className="mt-2 text-xs text-slate-400">
-          <div className="mt-1 text-[11px] text-slate-400">Select an output device from the pulldown</div>
-        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
