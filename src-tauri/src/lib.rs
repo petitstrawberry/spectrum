@@ -124,6 +124,7 @@ pub use api::start_audio;
 pub use api::stop_audio;
 pub use api::get_system_status;
 pub use api::set_buffer_size;
+pub use api::get_app_icon_by_pid;
 
 // =============================================================================
 // Legacy Commands (For backward compatibility)
@@ -348,6 +349,7 @@ pub fn run() {
             start_audio,
             stop_audio,
             get_system_status,
+            get_app_icon_by_pid,
             set_buffer_size,
             // Legacy commands
             get_prism_clients,

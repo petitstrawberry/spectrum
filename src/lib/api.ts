@@ -325,6 +325,7 @@ export async function getSystemStatus(): Promise<SystemStatusDto> {
   return invoke<SystemStatusDto>('get_system_status');
 }
 
+
 export async function setBufferSize(size: number): Promise<void> {
   return invoke('set_buffer_size', { size });
 }

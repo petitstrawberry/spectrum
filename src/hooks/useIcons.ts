@@ -1,4 +1,4 @@
-import { Headphones, Speaker, Monitor, Radio, Cast, Video, Volume2 } from 'lucide-react';
+import { Headphones, Speaker, Monitor, Radio, Cast, Video, Volume2, Gamepad2, Globe, MessageSquare, Music } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export function getIconForDevice(iconHint?: string | null, name?: string): LucideIcon {
@@ -25,3 +25,13 @@ export function getIconForDevice(iconHint?: string | null, name?: string): Lucid
 }
 
 export default getIconForDevice;
+
+export function getIconForApp(name?: string): LucideIcon {
+  if (!name) return Music;
+  const lower = name.toLowerCase();
+  if (/valorant|minecraft|steam|game|epic|battle\.net|origin|riot|apex|fortnite/.test(lower)) return Gamepad2;
+  if (/chrome|firefox|safari|edge|opera|brave|arc/.test(lower)) return Globe;
+  if (/spotify|music|itunes|ableton|logic|fl studio|audacity|garageband|apple music/.test(lower)) return Music;
+  if (/discord|slack|zoom|teams|facetime|skype|telegram|signal/.test(lower)) return MessageSquare;
+  return Monitor;
+}

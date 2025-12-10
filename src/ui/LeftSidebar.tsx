@@ -1,4 +1,7 @@
+import React from 'react';
 import { LogOut, RefreshCw, ExternalLink, Music, Volume2, Mic, Plus } from 'lucide-react';
+import { getIconForApp } from '../hooks/useIcons';
+import { useChannelColors } from '../hooks/useChannelColors';
 
 interface Props {
   width: number;
@@ -26,6 +29,8 @@ interface Props {
 }
 
 export default function LeftSidebar({ width, isRefreshing, inputSourceMode, handleRefresh, driverStatus, onChangeInputSourceMode, channelSources = [], prismDevice = null, isLibraryItemUsed = () => false, handleLibraryMouseDown, onOpenPrismApp, otherInputDevices = [] }: Props) {
+  const channelColors = useChannelColors(channelSources || []);
+
   return (
     <div className="bg-[#111827] border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" style={{ width }} onClick={e => e.stopPropagation()}>
       <div className="p-4 border-b border-slate-800 bg-slate-900/50">
@@ -54,8 +59,8 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-        {/* Prism mode: Show channel list */}
-        {inputSourceMode === 'prism' && (prismDevice || channelSources.some(c => c.hasApps) || driverStatus?.connected) ? (
+        {/* Prism mode: Show channel list (always show channels even when empty) */}
+        {inputSourceMode === 'prism' ? (
           <>
             <button
               onClick={() => onOpenPrismApp?.()}
@@ -71,7 +76,7 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
             {channelSources.map(channel => {
               const isUsed = isLibraryItemUsed(channel.id);
               const hasApps = channel.hasApps;
-              const FirstIcon = (channel.apps && channel.apps[0] && channel.apps[0].icon) || Music;
+              const FirstIcon = (channel.apps && channel.apps[0] && channel.apps[0].icon) || getIconForApp(channel.apps[0]?.name) || Music;
 
               return (
                 <div
@@ -86,31 +91,31 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                         : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 hover:ring-2 hover:ring-slate-700/20 cursor-grab active:cursor-grabbing')
                   }
                 >
-                  <div className={`w-10 text-[10px] font-mono font-bold ${hasApps ? 'text-cyan-400' : 'text-slate-600'}`}>
-                    {channel.channelLabel}
-                  </div>
+                  <div className={`w-10 text-[10px] font-mono font-bold`} style={{ color: channel.isMain ? '#06b6d4' : (channelColors[channel.channelOffset] || undefined) }}>
+                            {channel.channelLabel}
+                          </div>
 
                   {channel.isMain ? (
                     <div className="flex-1 flex items-center gap-2 min-w-0">
-                      <div className="w-5 h-5 rounded flex items-center justify-center bg-cyan-900/50 text-cyan-400">
-                        <Volume2 className="w-3 h-3" />
-                      </div>
+                      <div className="w-5 h-5 rounded flex items-center justify-center bg-slate-950">
+                          <Volume2 className="w-3 h-3" style={{ color: '#06b6d4' }} />
+                        </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-[10px] text-cyan-300">MAIN</div>
-                        {channel.apps.length > 0 && (
+                        {channel.apps.length > 1 && (
                           <div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>
                         )}
                       </div>
                     </div>
                   ) : hasApps ? (
                     <div className="flex-1 flex items-center gap-2 min-w-0">
-                      <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950 ${channel.apps[0]?.color || ''}`}>
-                        <FirstIcon className="w-3 h-3" />
+                      <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950`}>
+                        <FirstIcon className="w-3 h-3" style={{ color: channelColors[channel.channelOffset] || undefined }} />
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <div className="text-[10px] text-slate-300 truncate" title={channel.apps.map((a: any) => a.name).join(', ')}>
-                            {channel.apps.map((a: any) => a.name).join(', ')}
+                            {channel.apps[0]?.name}
                           </div>
                           {/* PID badge removed per request */}
                           {(channel.apps[0]?.clientCount ?? 0) > 1 && (

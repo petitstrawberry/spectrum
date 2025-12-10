@@ -675,3 +675,22 @@ pub async fn set_buffer_size(size: u32) -> Result<(), String> {
     crate::capture::set_io_buffer_size(size as usize);
     Ok(())
 }
+
+// =============================================================================
+// App Icon (macOS)
+// =============================================================================
+
+#[tauri::command]
+pub async fn get_app_icon_by_pid(_pid: u32) -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Icon retrieval by PID is disabled for now.
+        // The UI should continue using type/category icons (same as V1).
+        Err("get_app_icon_by_pid is temporarily disabled; use type icons".to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("get_app_icon_by_pid is only supported on macOS".to_string())
+    }
+}

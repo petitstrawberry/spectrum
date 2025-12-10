@@ -167,7 +167,20 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       if (Array.isArray(a.channelOffsets)) return a.channelOffsets.some((co: number) => Math.floor(co / 2) === i);
       return false;
     });
-    const apps = assigned.map((a: any) => ({ name: a.name, icon: Music, color: a.color || 'text-cyan-400', pid: a.pid, clientCount: (a.clients ? a.clients.length : (a.clientCount ?? 1)) }));
+    // Deduplicate apps by name and aggregate client counts. Do not assign a placeholder icon
+    // here so the LeftSidebar can pick a category icon via `getIconForApp`.
+    const appMap = new Map<string, { name: string; color?: string; pid?: number; clientCount: number }>();
+    for (const a of assigned) {
+      const name = a.name || 'Unknown';
+      const existing = appMap.get(name);
+      const clients = a.clients ? a.clients.length : (a.clientCount ?? 1);
+      if (existing) {
+        existing.clientCount += clients;
+      } else {
+        appMap.set(name, { name, color: a.color || 'text-cyan-400', pid: a.pid, clientCount: clients });
+      }
+    }
+    const apps = Array.from(appMap.values()).map(a => ({ name: a.name, icon: undefined, color: a.color, pid: a.pid, clientCount: a.clientCount }));
     channelSources.push({
       id: `ch_${offset}`,
       channelOffset: offset,
