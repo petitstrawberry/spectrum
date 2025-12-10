@@ -77,6 +77,7 @@ import LeftSidebar from './LeftSidebar';
 import CanvasView from './CanvasView';
 import RightPanel from './RightPanel';
 import MixerPanel from './MixerPanel';
+import { addSourceNode } from '../lib/api';
 
 // --- Types ---
 
@@ -215,6 +216,110 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   const outputTargets: any[] = [];
   const libraryDrag: any = null;
 
+  // Nodes placed on the canvas (local UI state for visual feedback)
+  const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
+
+  // Handle drag from library items in LeftSidebar
+  const handleLibraryMouseDown = useCallback((e: React.MouseEvent, type: 'lib_source' | 'lib_target', id: string) => {
+    // Only support lib_source for now
+    if (type !== 'lib_source') return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    // Create ghost element (show v1-like label while dragging)
+    const ghost = document.createElement('div');
+    ghost.className = 'pointer-events-none fixed z-50 bg-slate-800/80 border border-slate-700 text-xs text-slate-200 rounded p-2';
+    ghost.style.left = `${startX}px`;
+    ghost.style.top = `${startY}px`;
+
+    // Build v1-style display text
+    let ghostLabel = id;
+    let ghostSub = '';
+    if (id.startsWith('ch_')) {
+      const offset = Number(id.slice(3));
+      ghostLabel = `Ch ${offset + 1}-${offset + 2}`;
+      const ch = channelSources.find((c: any) => c.id === id);
+      if (ch) {
+        ghostSub = ch.isMain ? 'MAIN' : (ch.apps && ch.apps.length > 0 ? ch.apps.map((a: any) => a.name).join(', ') : 'Empty');
+      }
+    } else if (id.startsWith('dev_')) {
+      const deviceId = Number(id.slice(4));
+      const dev = otherInputDevices.find((d: any) => Number(d.device_id) === deviceId) || null;
+      ghostLabel = dev ? dev.name : `Device ${deviceId}`;
+      ghostSub = dev ? `${dev.channels}ch` : '';
+    }
+
+    ghost.innerHTML = `<div class="font-bold text-sm">${ghostLabel}</div>` + (ghostSub ? `<div class="text-[10px] text-slate-400 mt-1">${ghostSub}</div>` : '');
+    document.body.appendChild(ghost);
+
+    const onMove = (ev: MouseEvent) => {
+      ghost.style.left = `${ev.clientX + 8}px`;
+      ghost.style.top = `${ev.clientY + 8}px`;
+    };
+
+    const finish = async (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', finish);
+      try {
+        // Determine drop target: if over canvas, create node
+        if (canvasRef.current) {
+          const rect = canvasRef.current.getBoundingClientRect();
+          if (ev.clientX >= rect.left && ev.clientX <= rect.right && ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+            // Compute canvas-local coordinates (no pan/zoom applied currently)
+            const canvasX = (ev.clientX - rect.left);
+            const canvasY = (ev.clientY - rect.top);
+
+            // Build sourceId for v2 API based on library id format
+            let sourceId: any = null;
+            let label = id;
+            if (id.startsWith('ch_')) {
+              // id format: ch_<offset> where offset is the first channel of the stereo pair (0-based)
+              const offset = Number(id.slice(3));
+              sourceId = { type: 'prism_channel', channel: offset };
+              // v1 displays stereo pairs as "1-2", "3-4" etc. and node label as "Ch 1-2"
+              const displayLabel = `${offset + 1}-${offset + 2}`;
+              label = `Ch ${displayLabel}`;
+            } else if (id.startsWith('dev_')) {
+              const deviceId = Number(id.slice(4));
+              sourceId = { type: 'input_device', device_id: deviceId, channel: 0 };
+              // Use the device name like v1 instead of generic "Device N"
+              const dev = otherInputDevices.find((d: any) => Number(d.device_id) === deviceId) || null;
+              label = dev ? dev.name : `Device ${deviceId}`;
+            }
+
+            if (sourceId) {
+              try {
+                const handle = await addSourceNode(sourceId, label);
+                // Add a simple visual node to placedNodes
+                setPlacedNodes(prev => [...prev, {
+                  id: `node_${handle}`,
+                  libraryId: id,
+                  type: 'source',
+                  label,
+                  icon: Music,
+                  color: 'text-cyan-400',
+                  x: canvasX,
+                  y: canvasY,
+                  volume: 1,
+                  muted: false,
+                  channelCount: 2,
+                  channelMode: 'stereo'
+                }]);
+              } catch (err) {
+                console.error('addSourceNode failed', err);
+              }
+            }
+          }
+        }
+      } finally {
+        if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+      }
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', finish);
+  }, [canvasRef]);
+
   // No-op handlers to satisfy JSX bindings
   const handleRefresh = async () => { if (devices?.refresh) await devices.refresh(); };
   const handleResizeStart: any = () => {};
@@ -226,7 +331,6 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   const handleNodeMouseDown = () => {};
   const deleteNode = () => {};
   const toggleChannelMode = () => {};
-  const handleLibraryMouseDown = () => {};
   // Use the real openPrismApp from ../lib/prismd (imported above)
   // openPrismApp is imported; call it directly where needed
   const reserveBusIdStub = async () => 'bus_1';
@@ -336,11 +440,11 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           startCapture={devices?.startCapture}
           stopCapture={devices?.stopCapture}
           isLibraryItemUsed={() => false}
-          handleLibraryMouseDown={(e: any, t: string, id: string) => { /* presentational only */ }}
+          handleLibraryMouseDown={handleLibraryMouseDown}
           onOpenPrismApp={() => openPrismApp().catch(console.error)}
         />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
-        <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} />
+        <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} nodes={placedNodes} />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <RightPanel width={rightSidebarWidth} devices={devices} />
       </div>

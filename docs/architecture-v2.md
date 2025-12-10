@@ -1667,7 +1667,7 @@ src-tauri/src/
 | `api/mod.rs` | ✅ | APIモジュール |
 | `api/dto.rs` | ✅ | 全DTO定義 (設計書通り) |
 | `api/commands.rs` | ✅ | Tauriコマンド実装 (Graph/Edge/Meter/System) |
-| `lib.rs` | ✅ | v2モジュール + レガシー互換 |
+| `lib.rs` | ✅ | v2モジュール |
 | UI更新 | ❌ | 未着手 |
 
 ### 修正済みの問題
@@ -1768,22 +1768,5 @@ src-tauri/src/
 - State: `saveGraphState`, `loadGraphState`, `persistState`, `restoreState`
 - System: `startAudio`, `stopAudio`, `getSystemStatus`, `setBufferSize`
 - Helpers: `dbToGain`, `gainToDb`, `rmsToDb`, `dbToMeterPercent`
-
-### バックエンド互換性
-
-現在の `lib.rs` は両方のAPIをサポート:
-- ✅ v2 API (`api::*` コマンド) - 新しいグラフベースAPI
-- ✅ レガシーコマンド - 現在のフロントエンドとの後方互換性
-
-これにより、フロントエンドの段階的移行が可能。
-
----
-
-## 作業ログ (2025-12-09)
-
-- **更新**: `src/ui/V1ExactLayout.tsx` を追加し、`src/App.tsx` を変更して `V1ExactLayout` をレンダーするようにしました。
-- **目的**: v1 の UI を見た目の面で正確に再現し、UI（presentational）とロジック（hooks/データ層）を分離する土台を作成します。
-- **現在の状態**: 型チェックをローカルで実行し、`pnpm tsc --noEmit` は合格しています。
-- **注意点**: `src/ui/V1ExactLayout.tsx` は暫定的に `// @ts-nocheck` を付与しており、`src/App.tsx` には一時的な未使用参照が入っています。次のステップで `V1ExactLayout` をサブコンポーネントに分割し、`App.tsx` の hooks と段階的に props 接続して、これらの一時措置を除去します。
 
 ---
