@@ -223,6 +223,11 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   // Nodes placed on the canvas (local UI state for visual feedback)
   const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
 
+  // Compute whether a library item is used (i.e., already placed on the canvas)
+  const isLibraryItemUsed = useCallback((id: string) => {
+    return placedNodes.some(p => p.libraryId === id);
+  }, [placedNodes]);
+
   // Handle drag from library items in LeftSidebar
   const handleLibraryMouseDown = useCallback((e: React.MouseEvent, type: 'lib_source' | 'lib_target', id: string) => {
     // Only support lib_source for now
@@ -521,7 +526,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           activeCaptures={devices?.activeCaptures || []}
           startCapture={devices?.startCapture}
           stopCapture={devices?.stopCapture}
-          isLibraryItemUsed={() => false}
+          isLibraryItemUsed={isLibraryItemUsed}
           handleLibraryMouseDown={handleLibraryMouseDown}
           onOpenPrismApp={() => openPrismApp().catch(console.error)}
         />
