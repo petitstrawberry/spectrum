@@ -35,57 +35,33 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
           </div>
         </div>
         <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
-          {channelSources.map((ch: any) => {
-            const isMain = ch?.isMain;
-            const hasApps = ch?.hasApps;
-            const apps = ch?.apps || [];
-            const FirstIcon = (apps[0] && apps[0].icon) || getIconForApp(apps[0]?.name) || Music;
-
-            return (
-              <div key={ch.id} className="w-32 bg-slate-900 border rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
-                <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
-                  {isMain ? (
-                    <div className="w-6 h-6 rounded-lg bg-slate-950 border border-slate-600 flex items-center justify-center shadow-lg" style={{ color: '#06b6d4' }}>
-                      <Volume2 className="w-3 h-3" />
-                    </div>
-                  ) : hasApps ? (
-                    <div className={`w-6 h-6 rounded-lg bg-slate-950 border border-slate-600 flex items-center justify-center ${apps[0]?.color || ''}`}>
-                      <FirstIcon className="w-3 h-3" />
-                    </div>
-                  ) : (
-                    <div className="w-6 h-6 rounded-lg bg-slate-950 border border-slate-600" />
-                  )}
-                </div>
-                <div className="w-full px-1 text-center mb-2">
-                  <div className={`text-[7px] font-mono ${hasApps ? 'text-cyan-400' : 'text-slate-500'}`}>{ch?.channelLabel || '—'}</div>
-                  {isMain ? (
-                    <div className="text-[9px] font-bold truncate text-cyan-300">MAIN</div>
-                  ) : hasApps ? (
-                    <div className="text-[9px] font-bold truncate text-slate-300">{apps.map((a: any) => a.name).join(', ')}</div>
-                  ) : (
-                    <div className="text-[9px] italic text-slate-600">Empty</div>
-                  )}
-                  {apps.length > 1 && <div className="text-[8px] text-slate-500">{apps.length} apps</div>}
-                </div>
-                <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
-                  <div className="relative mr-2">
-                    <div className="absolute -left-7 top-0 bottom-0 w-7 flex flex-col text-[7px] text-slate-400 font-mono select-none"></div>
-                    <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
-                      <div className="absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10" style={{ bottom: `calc(${50}% - 5px)` }}></div>
-                    </div>
-                  </div>
-                  <div className="flex gap-0.5 relative">
-                    <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950" />
-                    <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5" />
-                  </div>
-                </div>
-                <div className="text-[8px] font-mono text-slate-500 mt-1">0.0dB</div>
-                <div className="flex gap-1 mt-1 w-full px-1">
-                  <button className="flex-1 h-4 rounded text-[8px] font-bold border bg-slate-800 border-slate-700 text-slate-500">M</button>
+          <div className="w-32 bg-slate-900 border rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
+            <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
+              <div className="w-6 h-6 rounded-lg bg-slate-950 border border-slate-600 flex items-center justify-center shadow-lg text-cyan-400">
+                <Volume2 className="w-3 h-3" />
+              </div>
+            </div>
+            <div className="w-full px-1 text-center mb-2">
+              <div className="text-[7px] font-mono text-slate-500">1-2</div>
+              <div className="text-[9px] font-bold truncate text-slate-300">MAIN</div>
+            </div>
+            <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
+              <div className="relative mr-2">
+                <div className="absolute -left-7 top-0 bottom-0 w-7 flex flex-col text-[7px] text-slate-400 font-mono select-none"></div>
+                <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
+                  <div className="absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10" style={{ bottom: `calc(${50}% - 5px)` }}></div>
                 </div>
               </div>
-            );
-          })}
+              <div className="flex gap-0.5 relative">
+                <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950" />
+                <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5" />
+              </div>
+            </div>
+            <div className="text-[8px] font-mono text-slate-500 mt-1">0.0dB</div>
+            <div className="flex gap-1 mt-1 w-full px-1">
+              <button className="flex-1 h-4 rounded text-[8px] font-bold border bg-slate-800 border-slate-700 text-slate-500">M</button>
+            </div>
+          </div>
         </div>
       </div>
 
