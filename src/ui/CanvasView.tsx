@@ -9,9 +9,10 @@ interface Props {
   nodes?: any[];
   onMoveNode?: (id: string, x: number, y: number) => void;
   onDeleteNode?: (id: string) => void;
+  channelColors?: Record<number, string>;
 }
 
-export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode }: Props) {
+export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode, channelColors }: Props) {
   const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -82,7 +83,18 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
           const isUnavailable = node.available === false;
           const portCount = node.channelCount || 2;
           const nodeHeight = 36 + 16 + (portCount * 24);
-          const dynamicColor = node.color || 'text-cyan-400';
+          // Determine effective color for this node.
+          // MAIN (ch_0) should always be cyan; other Prism channels prefer live channelColors.
+          let dynamicColor = node.color || 'text-cyan-400';
+          if (node.libraryId && typeof node.libraryId === 'string' && node.libraryId.startsWith('ch_')) {
+            const off = Number(node.libraryId.slice(3));
+            if (off === 0) {
+              dynamicColor = 'text-cyan-400';
+            } else {
+              const chCol = channelColors && (channelColors[off] || channelColors[node.channelOffset || 0]);
+              if (chCol && chCol !== 'transparent') dynamicColor = chCol;
+            }
+          }
           const dynamicLabel = node.label;
           const dynamicSubLabel = node.subLabel;
 
@@ -105,13 +117,14 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
                   {node.type === 'target' && node.channelMode === 'stereo' ? (
                     <LinkIcon className="w-3 h-3 text-cyan-400" />
                   ) : (
-                    <div className={`w-2 h-2 rounded-full ${dynamicColor} shadow-[0_0_8px_currentColor]`}></div>
+                    // Indicator stays neutral (no coloring)
+                    <div className="w-2 h-2 rounded-full bg-slate-500" />
                   )}
                 </div>
-                {/* Icon: use inline style if node.color is rgb(...), otherwise use className */}
+                {/* Icon: prefer live channel color for Prism channels; support rgb(...) or CSS class */}
                 {(() => {
-                  if (!isUnavailable && typeof node.color === 'string' && node.color.startsWith('rgb')) {
-                    return <NodeIcon className="w-4 h-4" style={{ color: node.color, filter: `drop-shadow(0 0 8px ${node.color})` }} />;
+                  if (!isUnavailable && typeof dynamicColor === 'string' && dynamicColor.startsWith && dynamicColor.startsWith('rgb')) {
+                    return <NodeIcon className="w-4 h-4" style={{ color: dynamicColor, filter: `drop-shadow(0 0 8px ${dynamicColor})` }} />;
                   }
                   return <NodeIcon className={`w-4 h-4 ${isUnavailable ? 'text-slate-500' : dynamicColor}`} />;
                 })()}

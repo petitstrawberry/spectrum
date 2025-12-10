@@ -557,6 +557,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           isPanning={isPanning}
           canvasTransform={canvasTransform}
           nodes={placedNodes}
+          channelColors={channelColors}
           onMoveNode={(id: string, x: number, y: number) => {
             setPlacedNodes(prev => prev.map(n => n.id === id ? { ...n, x, y } : n));
           }}
