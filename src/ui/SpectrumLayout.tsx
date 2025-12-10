@@ -347,7 +347,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
 
-      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} />
+      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} />
     </div>
   );
 }

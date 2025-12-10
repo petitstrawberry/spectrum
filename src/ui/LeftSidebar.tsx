@@ -91,9 +91,9 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                         : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 hover:ring-2 hover:ring-slate-700/20 cursor-grab active:cursor-grabbing')
                   }
                 >
-                  <div className={`w-10 text-[10px] font-mono font-bold`} style={{ color: channel.isMain ? '#06b6d4' : (channelColors[channel.channelOffset] || undefined) }}>
-                            {channel.channelLabel}
-                          </div>
+                  <div className={`w-10 text-[10px] font-mono font-bold ${!channel.hasApps ? 'text-slate-600' : (channel.isMain ? 'text-cyan-400' : 'text-cyan-400')}`}>
+                    {channel.channelLabel}
+                  </div>
 
                   {channel.isMain ? (
                     <div className="flex-1 flex items-center gap-2 min-w-0">
@@ -126,15 +126,11 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                       </div>
                     </div>
                   ) : (
-                    <div className="flex-1 flex items-center gap-2 min-w-0">
-                      <div className="w-5 h-5 rounded flex items-center justify-center bg-slate-950 text-slate-500">
-                        <Music className="w-3 h-3" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[10px] text-slate-400 truncate">Empty</div>
-                      </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[10px] text-slate-600 italic truncate">Empty</div>
                     </div>
-                  )}
+                  )
+                  }
                   {!isUsed && (
                     <Plus className="w-3 h-3 text-slate-600 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />
                   )}
