@@ -7,14 +7,51 @@ interface Props {
   isPanning: boolean;
   canvasTransform: { x: number; y: number; scale: number };
   nodes?: any[];
+  onMoveNode?: (id: string, x: number, y: number) => void;
+  onDeleteNode?: (id: string) => void;
 }
 
-export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [] }: Props) {
+export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode }: Props) {
   const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  const handleNodeMouseDown = (_e: any, _id: string) => {};
-  const deleteNode = (_id: string) => {};
+  const handleNodeMouseDown = (e: any, id: string) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    const el = nodeRefs.current.get(id);
+    if (!el || !canvasRef.current) return;
+    e.preventDefault();
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scale = (canvasTransform && canvasTransform.scale) ? canvasTransform.scale : 1;
+    const tx = (canvasTransform && canvasTransform.x) ? canvasTransform.x : 0;
+    const ty = (canvasTransform && canvasTransform.y) ? canvasTransform.y : 0;
+    const startCanvasX = (e.clientX - rect.left - tx) / scale;
+    const startCanvasY = (e.clientY - rect.top - ty) / scale;
+    // find node's current position from DOM or nodes prop
+    const node = nodes.find((n: any) => n.id === id);
+    if (!node) return;
+    const offsetX = startCanvasX - node.x;
+    const offsetY = startCanvasY - node.y;
+
+    const onMove = (ev: MouseEvent) => {
+      const curCanvasX = (ev.clientX - rect.left - tx) / scale;
+      const curCanvasY = (ev.clientY - rect.top - ty) / scale;
+      const newX = curCanvasX - offsetX;
+      const newY = curCanvasY - offsetY;
+      if (typeof onMoveNode === 'function') onMoveNode(id, newX, newY);
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+  const deleteNode = (id: string) => {
+    if (typeof onDeleteNode === 'function') onDeleteNode(id);
+  };
   const endWire = (_e: any, _nodeId: string, _portIdx: number) => {};
   const startWire = (_e: any, _nodeId: string, _portIdx: number) => {};
 
@@ -103,7 +140,7 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
                     <span className="text-xs font-bold text-slate-200 truncate block">{node.label}</span>
                   )}
                 </div>
-                <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
+                      <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
               </div>
 
               <div className="h-[2px] bg-slate-800 relative overflow-hidden">

@@ -80,7 +80,7 @@ import MixerPanel from './MixerPanel';
 import { getIconForApp } from '../hooks/useIcons';
 import { useChannelColors } from '../hooks/useChannelColors';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { addSourceNode } from '../lib/api';
+import { addSourceNode, removeNode } from '../lib/api';
 
 // --- Types ---
 
@@ -363,6 +363,20 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
                         }
 
               try {
+                // If this is a physical input device (not Prism), ensure input capture is started
+                if (id.startsWith('dev_')) {
+                  const deviceId = Number(id.slice(4));
+                  try {
+                    if (devices?.startCapture && !((devices?.activeCaptures || []).includes(deviceId))) {
+                      const started = await devices.startCapture(deviceId);
+                      console.debug('startCapture result', deviceId, started);
+                      if (!started) console.warn('startCapture failed for device', deviceId);
+                    }
+                  } catch (e) {
+                    console.error('startCapture error', e);
+                  }
+                }
+
                 const handle = await addSourceNode(sourceId, label);
                 // Add a simple visual node to placedNodes
                 setPlacedNodes(prev => [...prev, {
@@ -412,7 +426,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', finish);
-  }, [canvasRef, channelSources, otherInputDevices]);
+  }, [canvasRef, channelSources, otherInputDevices, devices, devices?.activeCaptures]);
 
   // No-op handlers to satisfy JSX bindings
   const handleRefresh = async () => { if (devices?.refresh) await devices.refresh(); };
@@ -538,7 +552,41 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           onOpenPrismApp={() => openPrismApp().catch(console.error)}
         />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
-        <CanvasView canvasRef={canvasRef} isPanning={isPanning} canvasTransform={canvasTransform} nodes={placedNodes} />
+        <CanvasView
+          canvasRef={canvasRef}
+          isPanning={isPanning}
+          canvasTransform={canvasTransform}
+          nodes={placedNodes}
+          onMoveNode={(id: string, x: number, y: number) => {
+            setPlacedNodes(prev => prev.map(n => n.id === id ? { ...n, x, y } : n));
+          }}
+          onDeleteNode={async (id: string) => {
+            // find node to determine if it's a device-backed node
+            const node = placedNodes.find(n => n.id === id);
+            // stop capture if this node represents a physical input device
+            if (node && node.libraryId && node.libraryId.startsWith('dev_')) {
+              const deviceId = Number(node.libraryId.slice(4));
+              try {
+                if (devices?.stopCapture) await devices.stopCapture(deviceId);
+              } catch (e) {
+                console.error('stopCapture failed', e);
+              }
+            }
+            // remove locally
+            setPlacedNodes(prev => prev.filter(n => n.id !== id));
+            // if it's a backend node (id like `node_<handle>`), call removeNode
+            if (id && id.startsWith('node_')) {
+              const handle = Number(id.slice(5));
+              if (!Number.isNaN(handle)) {
+                try {
+                  await removeNode(handle);
+                } catch (e) {
+                  console.error('removeNode failed', e);
+                }
+              }
+            }
+          }}
+        />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <RightPanel width={rightSidebarWidth} devices={devices} />
       </div>
