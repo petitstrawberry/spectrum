@@ -77,6 +77,9 @@ import LeftSidebar from './LeftSidebar';
 import CanvasView from './CanvasView';
 import RightPanel from './RightPanel';
 import MixerPanel from './MixerPanel';
+import { getIconForApp } from '../hooks/useIcons';
+import { useChannelColors } from '../hooks/useChannelColors';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { addSourceNode } from '../lib/api';
 
 // --- Types ---
@@ -192,6 +195,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
     });
   }
   const otherInputDevices: any[] = (devices?.inputDevices || []).filter((d: any) => !d.isPrism);
+  const channelColors = useChannelColors(channelSources || []);
   const leftSidebarWidth = 300;
   const rightSidebarWidth = 300;
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -232,24 +236,47 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
     ghost.style.left = `${startX}px`;
     ghost.style.top = `${startY}px`;
 
-    // Build v1-style display text
+    // Build v1-style display text + icon (render icon to SVG string)
     let ghostLabel = id;
     let ghostSub = '';
+    let GhostIcon: any = null;
     if (id.startsWith('ch_')) {
       const offset = Number(id.slice(3));
       ghostLabel = `Ch ${offset + 1}-${offset + 2}`;
       const ch = channelSources.find((c: any) => c.id === id);
       if (ch) {
-        ghostSub = ch.isMain ? 'MAIN' : (ch.apps && ch.apps.length > 0 ? ch.apps.map((a: any) => a.name).join(', ') : 'Empty');
+        ghostSub = ch.isMain ? 'MAIN' : (ch.apps && ch.apps.length > 0 ? ch.apps[0].name : 'Empty');
+        GhostIcon = ch.isMain ? Volume2 : ((ch.apps && ch.apps[0] && ch.apps[0].icon) || getIconForApp(ch.apps[0]?.name) || Music);
+      } else {
+        GhostIcon = Music;
       }
     } else if (id.startsWith('dev_')) {
       const deviceId = Number(id.slice(4));
-      const dev = otherInputDevices.find((d: any) => Number(d.device_id) === deviceId) || null;
+      const dev = otherInputDevices.find((d: any) => Number(d.deviceId ?? d.device_id) === deviceId) || null;
       ghostLabel = dev ? dev.name : `Device ${deviceId}`;
-      ghostSub = dev ? `${dev.channels}ch` : '';
+      ghostSub = dev ? `${dev.channelCount ?? dev.channels ?? ''}ch` : '';
+      GhostIcon = Mic;
     }
 
-    ghost.innerHTML = `<div class="font-bold text-sm">${ghostLabel}</div>` + (ghostSub ? `<div class="text-[10px] text-slate-400 mt-1">${ghostSub}</div>` : '');
+    const iconSvg = GhostIcon ? renderToStaticMarkup(React.createElement(GhostIcon, { className: 'w-4 h-4', style: { verticalAlign: 'middle' } })) : '';
+    // If we have an app name for a Prism channel, prefer showing the app name larger than the "Ch X-Y" label.
+    let titleHtml = `<div class="font-bold text-sm">${ghostLabel}</div>`;
+    let subtitleHtml = ghostSub ? `<div class="text-[10px] text-slate-400 mt-1">${ghostSub}</div>` : '';
+    if (id.startsWith('ch_') && ghostSub && ghostSub !== 'Empty') {
+      // show app name as title, channel as muted subtitle
+      titleHtml = `<div class="font-bold text-sm">${ghostSub}</div>`;
+      subtitleHtml = `<div class="text-[10px] text-slate-400 mt-1">${ghostLabel}</div>`;
+    }
+
+    ghost.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;vertical-align:middle">
+        <div style="width:20px;height:20px;display:flex;align-items:center;justify-content:center">${iconSvg}</div>
+        <div>
+          ${titleHtml}
+          ${subtitleHtml}
+        </div>
+      </div>
+    `;
     document.body.appendChild(ghost);
 
     const onMove = (ev: MouseEvent) => {
@@ -263,11 +290,15 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       try {
         // Determine drop target: if over canvas, create node
         if (canvasRef.current) {
-          const rect = canvasRef.current.getBoundingClientRect();
-          if (ev.clientX >= rect.left && ev.clientX <= rect.right && ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
-            // Compute canvas-local coordinates (no pan/zoom applied currently)
-            const canvasX = (ev.clientX - rect.left);
-            const canvasY = (ev.clientY - rect.top);
+            const rect = canvasRef.current.getBoundingClientRect();
+            if (ev.clientX >= rect.left && ev.clientX <= rect.right && ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+              // Compute canvas-local coordinates and account for pan/zoom (canvasTransform)
+              // screen -> canvas content: subtract container origin, then reverse translate and scale
+              const scale = (canvasTransform && canvasTransform.scale) ? canvasTransform.scale : 1;
+              const tx = (canvasTransform && canvasTransform.x) ? canvasTransform.x : 0;
+              const ty = (canvasTransform && canvasTransform.y) ? canvasTransform.y : 0;
+              const canvasX = (ev.clientX - rect.left - tx) / scale;
+              const canvasY = (ev.clientY - rect.top - ty) / scale;
 
             // Build sourceId for v2 API based on library id format
             let sourceId: any = null;
@@ -288,6 +319,39 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
             }
 
             if (sourceId) {
+              console.debug('drop detected', { id, canvasX, canvasY, sourceId, label });
+              // derive a human-friendly subLabel and icon/channelCount to match LeftSidebar
+              let subLabel = '';
+              let nodeIcon: any = Music;
+              let nodeChannels = 2;
+              if (id.startsWith('ch_')) {
+                const ch = channelSources.find((c: any) => c.id === id);
+                if (ch) {
+                  subLabel = ch.isMain ? 'MAIN' : (ch.apps && ch.apps.length > 0 ? ch.apps[0].name : 'Empty');
+                  // LeftSidebar picks the first app icon or falls back to getIconForApp/name or Music
+                  const FirstIcon = (ch.apps && ch.apps[0] && ch.apps[0].icon) || getIconForApp(ch.apps[0]?.name) || Music;
+                  nodeIcon = ch.isMain ? Volume2 : FirstIcon;
+                  // Prefer the channel color calculated by useChannelColors
+                  const chColor = channelColors && (channelColors[ch.channelOffset ?? ch.channelOffset] || channelColors[ch.channelOffset ?? 0]);
+                  // If chColor exists it's a rgb(...) string, otherwise fall back to CSS class
+                  nodeChannels = 2;
+                  // assign later when building node object
+                  // store as colorValue
+                  var colorValue = chColor || 'text-cyan-400';
+                } else {
+                  nodeIcon = Music;
+                  var colorValue = 'text-cyan-400';
+                }
+                nodeChannels = 2;
+              } else if (id.startsWith('dev_')) {
+                const deviceId = Number(id.slice(4));
+                const dev = otherInputDevices.find((d: any) => Number(d.deviceId ?? d.device_id) === deviceId) || null;
+                subLabel = dev ? `${dev.channelCount ?? dev.channels ?? ''}ch` : '';
+                nodeIcon = Mic;
+                nodeChannels = dev ? (dev.channelCount ?? dev.channels ?? 2) : 2;
+                var colorValue = 'text-amber-200';
+              }
+
               try {
                 const handle = await addSourceNode(sourceId, label);
                 // Add a simple visual node to placedNodes
@@ -296,17 +360,35 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
                   libraryId: id,
                   type: 'source',
                   label,
-                  icon: Music,
-                  color: 'text-cyan-400',
+                  subLabel,
+                  icon: nodeIcon,
+                  // use computed colorValue when available
+                  color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
                   x: canvasX,
                   y: canvasY,
                   volume: 1,
                   muted: false,
-                  channelCount: 2,
+                  channelCount: nodeChannels,
                   channelMode: 'stereo'
                 }]);
               } catch (err) {
-                console.error('addSourceNode failed', err);
+                console.error('addSourceNode failed, falling back to local node', err);
+                // Fallback: still show a local visual node so UI feedback is visible
+                setPlacedNodes(prev => [...prev, {
+                  id: `node_local_${Date.now()}`,
+                  libraryId: id,
+                  type: 'source',
+                  label,
+                  subLabel,
+                  icon: nodeIcon,
+                  color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
+                  x: canvasX,
+                  y: canvasY,
+                  volume: 1,
+                  muted: false,
+                  channelCount: nodeChannels,
+                  channelMode: 'stereo'
+                }]);
               }
             }
           }
@@ -318,7 +400,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', finish);
-  }, [canvasRef]);
+  }, [canvasRef, channelSources, otherInputDevices]);
 
   // No-op handlers to satisfy JSX bindings
   const handleRefresh = async () => { if (devices?.refresh) await devices.refresh(); };
