@@ -117,10 +117,7 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                           <div className="text-[10px] text-slate-300 truncate" title={channel.apps.map((a: any) => a.name).join(', ')}>
                             {channel.apps[0]?.name}
                           </div>
-                          {/* PID badge removed per request */}
-                          {(channel.apps[0]?.clientCount ?? 0) > 1 && (
-                            <div className="text-[9px] text-slate-400 bg-slate-900/40 px-1 rounded">{channel.apps[0]?.clientCount}x</div>
-                          )}
+                          {/* client multiplicity badge removed */}
                         </div>
                         {channel.apps.length > 1 && (<div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>)}
                       </div>
