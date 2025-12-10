@@ -194,7 +194,12 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       isMain: offset === 0,
     });
   }
-  const otherInputDevices: any[] = (devices?.inputDevices || []).filter((d: any) => !d.isPrism);
+  const rawOtherInputDevices: any[] = (devices?.inputDevices || []).filter((d: any) => !d.isPrism);
+  const otherInputDevices: any[] = rawOtherInputDevices.map((d: any) => ({
+    deviceId: Number(d.deviceId ?? d.device_id ?? d.id ?? NaN),
+    name: d.name ?? d.deviceName ?? d.displayName ?? 'Device',
+    channelCount: d.channelCount ?? d.channels ?? d.channels_count ?? d.channelsCount ?? 2,
+  }));
   const channelColors = useChannelColors(channelSources || []);
   const leftSidebarWidth = 300;
   const rightSidebarWidth = 300;
@@ -319,7 +324,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
               const deviceId = Number(id.slice(4));
               sourceId = { type: 'input_device', device_id: deviceId, channel: 0 };
               // Use the device name like v1 instead of generic "Device N"
-              const dev = otherInputDevices.find((d: any) => Number(d.device_id) === deviceId) || null;
+              const dev = otherInputDevices.find((d: any) => Number(d.deviceId) === deviceId) || null;
               label = dev ? dev.name : `Device ${deviceId}`;
             }
 
@@ -348,14 +353,14 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
                   var colorValue = 'text-cyan-400';
                 }
                 nodeChannels = 2;
-              } else if (id.startsWith('dev_')) {
-                const deviceId = Number(id.slice(4));
-                const dev = otherInputDevices.find((d: any) => Number(d.deviceId ?? d.device_id) === deviceId) || null;
-                subLabel = dev ? `${dev.channelCount ?? dev.channels ?? ''}ch` : '';
-                nodeIcon = Mic;
-                nodeChannels = dev ? (dev.channelCount ?? dev.channels ?? 2) : 2;
-                var colorValue = 'text-amber-200';
-              }
+                      } else if (id.startsWith('dev_')) {
+                          const deviceId = Number(id.slice(4));
+                          const dev = otherInputDevices.find((d: any) => Number(d.deviceId) === deviceId) || null;
+                          subLabel = dev ? `${dev.channelCount ?? ''}ch` : '';
+                          nodeIcon = Mic;
+                          nodeChannels = dev ? (dev.channelCount ?? 2) : 2;
+                          var colorValue = 'text-amber-200';
+                        }
 
               try {
                 const handle = await addSourceNode(sourceId, label);
@@ -369,6 +374,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
                   icon: nodeIcon,
                   // use computed colorValue when available
                   color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
+                  deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
                   x: canvasX,
                   y: canvasY,
                   volume: 1,
@@ -387,6 +393,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
                   subLabel,
                   icon: nodeIcon,
                   color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
+                  deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
                   x: canvasX,
                   y: canvasY,
                   volume: 1,
