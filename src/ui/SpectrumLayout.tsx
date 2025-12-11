@@ -25,53 +25,7 @@ import {
   ExternalLink,
   Cast,
 } from 'lucide-react';
-import {
-  getPrismApps,
-  getDriverStatus,
-  getAudioDevices,
-  getBusLevels,
-  updateMixerSend,
-  removeMixerSend,
-  setOutputVolume,
-  getBufferSize,
-  setBufferSize,
-  getAppState,
-  saveAppState,
-  restartApp,
-  getInputDevices,
-  startInputCapture,
-  stopInputCapture,
-  getActiveInputCaptures,
-  getGraphMeters,
-  reserveBusId,
-  openPrismApp,
-  startAudioOutput,
-  stopAudioOutput,
-  // Bus API
-  addBus,
-  removeBus as removeBusApi,
-  updateBusSend,
-  removeBusSend,
-  // AudioUnit API
-  getEffectAudioUnits,
-  listAudioUnitInstances,
-  createAudioUnitInstance,
-  removeAudioUnitInstance,
-  openAudioUnitUI,
-  isAudioUnitUIOpen,
-  getAudioUnitState,
-  setAudioUnitState,
-  setBusPlugins,
-  // setRouting, // TODO: Re-enable when channel routing is implemented
-  type AppSource,
-  type DriverStatus,
-  type AudioDevice,
-  type AppState,
-  type InputDeviceInfo,
-  type ActiveCaptureInfo,
-  type AudioUnitPluginInfo,
-  type GraphMetersData,
-} from '../lib/prismd';
+// Legacy `prismd` usage removed in favor of v2 hooks (useDevices, useAudio, etc.).
 
 import LeftSidebar from './LeftSidebar';
 import CanvasView from './CanvasView';
@@ -507,31 +461,23 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
   const reserveBusIdStub = async () => 'bus_1';
   const addBusStub = async () => {};
   const getActiveInputCaptures = async () => [];
-  // Fetch driver status periodically (to mirror v1 behavior)
+  // Mirror driver status from devices hook
   useEffect(() => {
-    let running = true;
-    const poll = async () => {
-      try {
-        const s = await getDriverStatus();
-        if (!running) return;
-        setDriverStatus(s);
-      } catch (e) {
-        console.debug('getDriverStatus failed', e);
-        setDriverStatus({ connected: false, sample_rate: 0, buffer_size: 0 });
-      }
-    };
-    poll();
-    const id = setInterval(poll, 2000);
-    return () => { running = false; clearInterval(id); };
-  }, []);
+    const s = devices?.prismStatus;
+    if (s) {
+      setDriverStatus({ connected: !!s.connected, sample_rate: (s.channels || 0) * 0 + 48000, buffer_size: 0 });
+    } else {
+      setDriverStatus({ connected: false, sample_rate: 0, buffer_size: 0 });
+    }
+  }, [devices?.prismStatus]);
 
   // On first mount, start audio in "auto" mode (deviceId 0) and refresh device list
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        // startAudioOutput will invoke backend start_audio (deviceId==0 => auto)
-        await startAudioOutput(0);
+        // Use v2 devices hook to start the default audio runtime (deviceId==0 => auto)
+        if (devices?.startOutput) await devices.startOutput(0);
         // Give backend a short moment then refresh device list so UI can pick up active output
         await new Promise(r => setTimeout(r, 200));
         if (mounted && devices && devices.refresh) await devices.refresh();
@@ -540,30 +486,12 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       }
     })();
     return () => { mounted = false; };
-  }, []);
-  // If backend prismStatus.apps is empty, poll grouped apps periodically as a fallback
+  }, [devices]);
+  // Fallback: if devices hook has no prism apps yet, keep local fallback empty.
   useEffect(() => {
-    let mounted = true;
-    let id: NodeJS.Timeout | number | null = null;
-    const poll = async () => {
-      // If status provides apps, clear fallback and skip polling work
-      if (devices?.prismStatus?.apps && devices.prismStatus.apps.length > 0) {
-        if (mounted) setFallbackPrismApps([]);
-        return;
-      }
-      try {
-        const apps = await getPrismApps();
-        if (!mounted) return;
-        setFallbackPrismApps(apps || []);
-      } catch (e) {
-        // ignore transient errors
-      }
-    };
-    // initial fetch
-    poll();
-    // poll every 2s to keep UI in sync
-    id = setInterval(poll, 2000);
-    return () => { mounted = false; if (id) clearInterval(id as any); };
+    if (devices?.prismStatus?.apps && devices.prismStatus.apps.length > 0) {
+      setFallbackPrismApps([]);
+    }
   }, [devices?.prismStatus?.apps]);
   const setNodes = (fn: any) => {};
   const setPluginBrowserTargetBusId = (id: string | null) => {};
@@ -628,7 +556,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           stopCapture={devices?.stopCapture}
           isLibraryItemUsed={isLibraryItemUsed}
           handleLibraryMouseDown={handleLibraryMouseDown}
-          onOpenPrismApp={() => openPrismApp().catch(console.error)}
+          onOpenPrismApp={() => { if (devices?.refresh) devices.refresh().catch(console.error); }}
         />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <CanvasView
