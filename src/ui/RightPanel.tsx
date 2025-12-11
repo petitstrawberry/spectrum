@@ -8,9 +8,11 @@ import type { UseDevicesReturn } from '../hooks/useDevices';
 interface Props {
   width: number;
   devices?: UseDevicesReturn | null;
+  isLibraryItemUsed?: (id: string) => boolean;
+  handleLibraryMouseDown?: (e: React.MouseEvent, type: string, id: string) => void;
 }
 
-export default function RightPanel({ width, devices }: Props) {
+export default function RightPanel({ width, devices, isLibraryItemUsed, handleLibraryMouseDown }: Props) {
   const outputDevices = devices?.outputDevices || [];
   const startOutput = devices?.startOutput;
   const stopOutput = devices?.stopOutput;
@@ -43,11 +45,25 @@ export default function RightPanel({ width, devices }: Props) {
     (async () => {
       try {
         if (!mounted) return;
+        // Debug: log transition and available control functions
+        try { console.debug('RightPanel: output change', { prev, cur, activeOutputs: (devices as any)?.activeOutputs, hasStop: !!stopOutput, hasStart: !!startOutput }); } catch (e) {}
         if (prev !== '' && prev !== cur && stopOutput) {
-          await stopOutput(Number(prev));
+          try {
+            console.debug('RightPanel: calling stopOutput', prev);
+            await stopOutput(Number(prev));
+            console.debug('RightPanel: stopOutput resolved', prev);
+          } catch (e) {
+            console.error('RightPanel: stopOutput failed', e);
+          }
         }
         if (cur !== '' && startOutput) {
-          await startOutput(Number(cur));
+          try {
+            console.debug('RightPanel: calling startOutput', cur);
+            await startOutput(Number(cur));
+            console.debug('RightPanel: startOutput resolved', cur);
+          } catch (e) {
+            console.error('RightPanel: startOutput failed', e);
+          }
         }
       } catch (e) {
         console.error(e);
@@ -105,8 +121,10 @@ export default function RightPanel({ width, devices }: Props) {
             );
           }
 
-          return virtuals.map((v: any) => (
-            <div key={v.id} className={`group flex items-center gap-3 p-3 rounded-xl border border-slate-700 bg-slate-800/80 hover:border-pink-500/50 hover:bg-slate-800 cursor-pointer`}>
+          return virtuals.map((v: any) => {
+            const isUsed = isLibraryItemUsed ? isLibraryItemUsed(v.id) : false;
+            return (
+              <div key={v.id} onMouseDown={!isUsed && handleLibraryMouseDown ? (e) => handleLibraryMouseDown(e, 'lib_target', v.id) : undefined} className={`group flex items-center gap-3 p-3 rounded-xl border border-slate-700 bg-slate-800/80 hover:border-pink-500/50 hover:bg-slate-800 ${isUsed ? 'cursor-default opacity-40' : 'cursor-grab active:cursor-grabbing'}`}>
               {(() => {
                 const Icon = getIconForDevice(v.iconHint, v.name);
                 const color = getColorForDevice(v.name, v.iconHint);
@@ -120,9 +138,10 @@ export default function RightPanel({ width, devices }: Props) {
                 <div className="text-xs font-bold text-slate-200 truncate">{v.name}</div>
                 <div className="text-[9px] text-slate-500 uppercase">{v.channels}ch • Virtual</div>
               </div>
-              <Plus className="w-4 h-4 text-slate-600 group-hover:text-pink-400 transition-colors" />
-            </div>
-          ));
+                <Plus className="w-4 h-4 text-slate-600 group-hover:text-pink-400 transition-colors" />
+              </div>
+            );
+          });
         })()}
       </div>
     </div>

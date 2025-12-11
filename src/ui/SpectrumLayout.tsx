@@ -77,10 +77,11 @@ import LeftSidebar from './LeftSidebar';
 import CanvasView from './CanvasView';
 import RightPanel from './RightPanel';
 import MixerPanel from './MixerPanel';
-import { getIconForApp } from '../hooks/useIcons';
+import { getIconForApp, getIconForDevice } from '../hooks/useIcons';
 import { useChannelColors } from '../hooks/useChannelColors';
+import getColorForDevice from '../hooks/useColors';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { addSourceNode, removeNode } from '../lib/api';
+import { addSourceNode, addSinkNode, removeNode } from '../lib/api';
 
 // --- Types ---
 
@@ -235,8 +236,8 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
 
   // Handle drag from library items in LeftSidebar
   const handleLibraryMouseDown = useCallback((e: React.MouseEvent, type: 'lib_source' | 'lib_target', id: string) => {
-    // Only support lib_source for now
-    if (type !== 'lib_source') return;
+    // Support lib_source (sources/inputs) and lib_target (sinks/outputs)
+    if (type !== 'lib_source' && type !== 'lib_target') return;
     const startX = e.clientX;
     const startY = e.clientY;
 
@@ -266,6 +267,17 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
       ghostLabel = dev ? dev.name : `Device ${deviceId}`;
       ghostSub = dev ? `${dev.channelCount ?? dev.channels ?? ''}ch` : '';
       GhostIcon = Mic;
+    } else if (id.startsWith('vout_')) {
+      // virtual output entry like "vout_<device>_<offset>"
+      const m = id.match(/^vout_(\d+)_(\d+)$/);
+      if (m) {
+        const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === id);
+        const name = vEntry ? vEntry.name : `Out ${m[2]}`;
+        const channels = vEntry ? (vEntry.channels || vEntry.channelCount || 0) : 0;
+        ghostLabel = name;
+        ghostSub = channels ? `${channels}ch` : 'Virtual';
+        GhostIcon = Monitor;
+      }
     }
 
     const iconSvg = GhostIcon ? renderToStaticMarkup(React.createElement(GhostIcon, { className: 'w-4 h-4', style: { verticalAlign: 'middle' } })) : '';
@@ -417,6 +429,57 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
                 }]);
               }
             }
+            // handle virtual output sinks (id like 'vout_<device>_<offset>')
+            if (!sourceId && typeof id === 'string' && id.startsWith('vout_')) {
+              const m = id.match(/^vout_(\d+)_(\d+)$/);
+              if (m && canvasRef.current) {
+                const parentDeviceId = Number(m[1]);
+                const offset = Number(m[2]);
+                // Lookup virtual output metadata from devices hook
+                const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === id);
+                const nodeChannelsLocal = vEntry ? (vEntry.channels || vEntry.channelCount || 2) : (typeof nodeChannels === 'number' ? nodeChannels : 2);
+                // Prefer device-specific icon + name to match RightPanel
+                const nodeIconLocal = getIconForDevice(vEntry?.iconHint, vEntry?.name) || Monitor;
+                const colorValueLocal = vEntry ? getColorForDevice(vEntry?.name, vEntry?.iconHint) : (typeof colorValue !== 'undefined' ? colorValue : 'text-pink-400');
+                const sink = { device_id: parentDeviceId, channel_offset: offset, channel_count: nodeChannelsLocal };
+                const labelText = vEntry ? vEntry.name : `Out ${offset + 1}-${offset + nodeChannelsLocal}`;
+                try {
+                  const handle = await addSinkNode(sink, labelText);
+                  setPlacedNodes(prev => [...prev, {
+                    id: `node_${handle}`,
+                    libraryId: id,
+                    type: 'target',
+                    label: labelText,
+                    subLabel: `${nodeChannelsLocal}ch Output`,
+                    icon: nodeIconLocal,
+                    color: colorValueLocal,
+                    x: canvasX,
+                    y: canvasY,
+                    volume: 1,
+                    muted: false,
+                    channelCount: nodeChannelsLocal,
+                    channelMode: 'stereo',
+                  }]);
+                } catch (err) {
+                  console.error('addSinkNode failed, falling back to local sink node', err);
+                  setPlacedNodes(prev => [...prev, {
+                    id: `node_local_${Date.now()}`,
+                    libraryId: id,
+                    type: 'target',
+                    label: labelText,
+                    subLabel: `${nodeChannelsLocal}ch Output`,
+                    icon: nodeIconLocal,
+                    color: colorValueLocal,
+                    x: canvasX,
+                    y: canvasY,
+                    volume: 1,
+                    muted: false,
+                    channelCount: nodeChannelsLocal,
+                    channelMode: 'stereo',
+                  }]);
+                }
+              }
+            }
           }
         }
       } finally {
@@ -558,6 +621,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           canvasTransform={canvasTransform}
           nodes={placedNodes}
           channelColors={channelColors}
+          systemActiveOutputs={devices?.activeOutputs || []}
           onMoveNode={(id: string, x: number, y: number) => {
             setPlacedNodes(prev => prev.map(n => n.id === id ? { ...n, x, y } : n));
           }}
@@ -589,7 +653,7 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           }}
         />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
-        <RightPanel width={rightSidebarWidth} devices={devices} />
+        <RightPanel width={rightSidebarWidth} devices={devices} isLibraryItemUsed={isLibraryItemUsed} handleLibraryMouseDown={handleLibraryMouseDown} />
       </div>
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />

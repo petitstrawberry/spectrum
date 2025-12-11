@@ -289,14 +289,16 @@ export async function isPrismAvailable(): Promise<boolean> {
  * Start audio output to a specific device
  */
 export async function startAudioOutput(deviceId: number): Promise<void> {
-  return invoke('start_audio_output', { deviceId });
+  // v2 API: start global audio (device selection handled elsewhere)
+  return invoke('start_audio');
 }
 
 /**
  * Stop audio output to a specific device
  */
 export async function stopAudioOutput(deviceId: number): Promise<void> {
-  return invoke('stop_audio_output', { deviceId });
+  // v2 API: stop global audio
+  return invoke('stop_audio');
 }
 
 /**

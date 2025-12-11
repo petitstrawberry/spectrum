@@ -10,9 +10,10 @@ interface Props {
   onMoveNode?: (id: string, x: number, y: number) => void;
   onDeleteNode?: (id: string) => void;
   channelColors?: Record<number, string>;
+  systemActiveOutputs?: number[];
 }
 
-export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode, channelColors }: Props) {
+export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode, channelColors, systemActiveOutputs = [] }: Props) {
   const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -81,6 +82,20 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
           const NodeIcon = node.icon || (() => null);
           const isDeviceNode = node.sourceType === 'device' || (node.libraryId && node.libraryId.startsWith('dev_'));
           const isUnavailable = node.available === false;
+          // If this node corresponds to a virtual output (libraryId like 'vout_<device>_<offset>'),
+          // and the system has an active output that doesn't match the parent device, mark disabled.
+          let isSystemDisabled = false;
+          if (node.libraryId && typeof node.libraryId === 'string' && node.libraryId.startsWith('vout_')) {
+            const m = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
+            if (m) {
+              const parentId = Number(m[1]);
+              // systemActiveOutputs may be numbers or strings; normalize to numbers
+              const activeNums = Array.isArray(systemActiveOutputs) ? systemActiveOutputs.map((v: any) => Number(v)).filter((n: any) => !Number.isNaN(n)) : [];
+              if (activeNums.length > 0 && !activeNums.includes(parentId)) {
+                isSystemDisabled = true;
+              }
+            }
+          }
           const portCount = node.channelCount || 2;
           const nodeHeight = 36 + 16 + (portCount * 24);
           // Determine effective color for this node.
@@ -104,12 +119,13 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
 
           const style: React.CSSProperties = { left: node.x, top: node.y, height: nodeHeight };
 
+          const disabled = isUnavailable || isSystemDisabled;
           return (
             <div
               key={node.id}
               ref={el => { if (el) nodeRefs.current.set(node.id, el); }}
-              onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
-              className={`canvas-node absolute w-[180px] ${isUnavailable ? 'bg-slate-900/50' : 'bg-slate-800'} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${isUnavailable ? 'opacity-50' : ''}`}
+              onMouseDown={(e) => { if (!disabled) handleNodeMouseDown(e, node.id); }}
+              className={`canvas-node absolute w-[180px] ${disabled ? 'bg-slate-900/30' : (isUnavailable ? 'bg-slate-900/50' : 'bg-slate-800')} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${disabled ? 'opacity-40 pointer-events-none' : ''}`}
               style={style}
             >
               <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing">
