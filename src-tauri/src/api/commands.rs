@@ -649,7 +649,14 @@ pub async fn restore_state() -> Result<bool, String> {
 pub async fn start_audio(device_id: u32) -> Result<(), String> {
     crate::capture::start_capture()?;
 
-    if start_output_v2(device_id) .is_err() {
+    // If device_id == 0 treat as "auto": prefer aggregate device, otherwise system default.
+    let target_device = if device_id == 0 {
+        crate::device::find_preferred_output_device().unwrap_or(device_id)
+    } else {
+        device_id
+    };
+
+    if start_output_v2(target_device).is_err() {
         crate::capture::stop_capture();
         return Err("Failed to start output runtime".to_string());
     }

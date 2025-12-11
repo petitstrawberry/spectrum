@@ -525,6 +525,22 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
     return () => { running = false; clearInterval(id); };
   }, []);
 
+  // On first mount, start audio in "auto" mode (deviceId 0) and refresh device list
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        // startAudioOutput will invoke backend start_audio (deviceId==0 => auto)
+        await startAudioOutput(0);
+        // Give backend a short moment then refresh device list so UI can pick up active output
+        await new Promise(r => setTimeout(r, 200));
+        if (mounted && devices && devices.refresh) await devices.refresh();
+      } catch (e) {
+        console.error('Failed to start default audio on startup', e);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
   // If backend prismStatus.apps is empty, poll grouped apps periodically as a fallback
   useEffect(() => {
     let mounted = true;

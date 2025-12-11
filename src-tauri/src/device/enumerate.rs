@@ -138,6 +138,10 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
         Err(_) => return result,
     };
 
+    // Determine Prism device ID (if present) and exclude it by id to avoid
+    // accidentally filtering other devices whose name contains "prism".
+    let prism_device_id = crate::capture::find_prism_device();
+
     for device_id in device_ids {
         let output_channels = get_device_output_channels(device_id);
         if output_channels == 0 {
@@ -145,6 +149,13 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
         }
 
         let name = get_device_name(device_id).unwrap_or_else(|_| format!("Device {}", device_id));
+
+        // Exclude the Prism virtual device by id (if present)
+        if let Some(pid) = prism_device_id {
+            if pid == device_id {
+                continue;
+            }
+        }
 
         if is_aggregate_device(device_id) {
             // Expand aggregate device into its active sub-devices when possible
@@ -231,6 +242,45 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
     }
 
     result
+}
+
+/// Find a preferred output device to use as the default runtime target.
+/// Preference: the first aggregate device found, otherwise the system default output device.
+pub fn find_preferred_output_device() -> Option<u32> {
+    // Prefer aggregate devices
+    if let Ok(ids) = get_audio_device_ids() {
+        for id in ids.iter() {
+            if is_aggregate_device(*id) {
+                return Some(*id);
+            }
+        }
+    }
+
+    // Fallback: query system default output device
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut device_id: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut device_id as *mut u32 as *mut _,
+        )
+    };
+
+    if status == 0 && device_id != 0 {
+        return Some(device_id);
+    }
+
+    None
 }
 
 /// Find a specific output device by ID

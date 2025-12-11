@@ -321,6 +321,10 @@ export async function stopAudio(): Promise<void> {
   return invoke('stop_audio');
 }
 
+export async function getOutputRuntime(): Promise<number | null> {
+  return invoke<number | null>('get_output_runtime');
+}
+
 export async function getSystemStatus(): Promise<SystemStatusDto> {
   return invoke<SystemStatusDto>('get_system_status');
 }

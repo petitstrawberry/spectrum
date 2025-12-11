@@ -289,15 +289,15 @@ export async function isPrismAvailable(): Promise<boolean> {
 /**
  * Start audio output to a specific device
  */
-export async function startAudioOutput(deviceId: number): Promise<void> {
+export async function startAudioOutput(_deviceId: number): Promise<void> {
   // v2 API: start global audio (device selection handled elsewhere)
-  return startAudio();
+  return startAudio(0);
 }
 
 /**
  * Stop audio output to a specific device
  */
-export async function stopAudioOutput(deviceId: number): Promise<void> {
+export async function stopAudioOutput(_deviceId: number): Promise<void> {
   // v2 API: stop global audio
   return invoke('stop_audio');
 }
@@ -326,7 +326,7 @@ export async function findOutputDevice(name: string): Promise<number | null> {
  */
 export async function startDefaultOutput(): Promise<void> {
   // v2: start system audio (capture + any output already configured)
-  return startAudio();
+  return startAudio(0);
 }
 
 // --- Generic Input Device Capture Types ---

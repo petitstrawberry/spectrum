@@ -89,7 +89,7 @@ export function useAudio(options: UseAudioOptions = {}): UseAudioReturn {
   const start = useCallback(async (): Promise<boolean> => {
     try {
       isTransitioning.current = true;
-      await startAudio();
+      await startAudio(0);
       setStatus(prev => ({ ...prev, isRunning: true }));
       isTransitioning.current = false;
       return true;

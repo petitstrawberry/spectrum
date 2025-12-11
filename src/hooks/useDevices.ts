@@ -7,6 +7,7 @@ import {
   getInputDevices,
   getOutputDevices,
   getPrismStatus,
+  getOutputRuntime,
 } from '../lib/api';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -190,6 +191,18 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
 
       setOutputDevices(phys);
       setVirtualOutputDevices(virtuals);
+
+      // Query backend for the currently active physical output runtime (if any)
+      try {
+        const active = await getOutputRuntime();
+        if (typeof active === 'number' && !Number.isNaN(active)) {
+          setActiveOutputs([active]);
+        } else {
+          setActiveOutputs([]);
+        }
+      } catch (e) {
+        // ignore; keep existing activeOutputs
+      }
 
       setPrismStatus({
         connected: prism.connected,

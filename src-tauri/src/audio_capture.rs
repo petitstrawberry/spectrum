@@ -361,7 +361,8 @@ pub fn find_prism_device() -> Option<u32> {
             if lower.contains("prism") {
                 let input_ch = get_device_input_channels(id);
                 if input_ch > 0 {
-                    println!("[AudioCapture] Found Prism device: {} (ID: {}, {} input channels)", name, id, input_ch);
+                    // debug println!
+                    // println!("[AudioCapture] Found Prism device: {} (ID: {}, {} input channels)", name, id, input_ch);
                     return Some(id);
                 }
             }
@@ -725,7 +726,7 @@ pub fn register_output_device(device_id: u32) {
             let write_positions: Vec<usize> = audio_buffers.channels.iter()
                 .map(|ch| ch.get_write_pos())
                 .collect();
-            
+
             // Create lock-free position storage starting at current write position
             let num_channels = audio_buffers.channels.len();
             positions.insert(device_id, Arc::new(OutputReadPositions::new_at_position(num_channels, &write_positions)));
