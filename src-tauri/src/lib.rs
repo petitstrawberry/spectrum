@@ -125,6 +125,12 @@ pub use api::stop_audio;
 pub use api::get_system_status;
 pub use api::set_buffer_size;
 pub use api::get_app_icon_by_pid;
+// Output runtime (v2) - unified naming: output_runtime_*
+pub use api::list_output_runtime_devices;
+pub use api::start_output_runtime;
+pub use api::stop_output_runtime;
+pub use api::is_output_runtime_running;
+pub use api::find_output_runtime_by_name;
 
 // =============================================================================
 // Legacy Commands (For backward compatibility)
@@ -351,6 +357,12 @@ pub fn run() {
             get_system_status,
             get_app_icon_by_pid,
             set_buffer_size,
+            // v2 API - Output runtime
+            list_output_runtime_devices,
+            start_output_runtime,
+            stop_output_runtime,
+            is_output_runtime_running,
+            find_output_runtime_by_name,
             // Legacy commands
             get_prism_clients,
             set_routing,

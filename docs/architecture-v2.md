@@ -547,6 +547,7 @@ Audio Thread → GraphMeters (ArcSwap) → UI Polling (60fps)
 | **Meter** | メータリング（ポーリング） | `get_meters` |
 | **State** | 状態の永続化 | `save_state`, `load_state` |
 | **System** | システム操作 | `start_audio`, `stop_audio`, `get_status` |
+| **Output Runtime** | 出力デバイスのランタイム制御（レンダラーからのデバイス選択/起動/停止） | `list_output_runtime_devices`, `start_output_runtime`, `stop_output_runtime`, `is_output_runtime_running`, `find_output_runtime_by_name` |
 
 ---
 
@@ -868,6 +869,33 @@ async function getSystemStatus(): Promise<{
 
 /** バッファサイズを設定 */
 async function setBufferSize(size: number): Promise<void>;
+
+// --- Output Runtime API ---
+
+/**
+ * 出力デバイス一覧を取得 (簡易ペア: device_id, name)
+ */
+async function listOutputDevices(): Promise<Array<{ deviceId: number; name: string }>>;
+
+/**
+ * 指定 deviceId に対して出力を開始する（システム出力スレッドを spawn）
+ */
+async function startOutputDevice(deviceId: number): Promise<void>;
+
+/**
+ * 現在の出力を停止する
+ */
+async function stopOutputDevice(): Promise<void>;
+
+/**
+ * 出力が稼働中かを確認する
+ */
+async function isOutputRunning(): Promise<boolean>;
+
+/**
+ * 名前で出力デバイスを検索し、deviceId を返す（見つからなければ null）
+ */
+async function findOutputDeviceByName(name: string): Promise<number | null>;
 ```
 
 ---
@@ -1015,6 +1043,25 @@ async fn get_system_status() -> Result<SystemStatusDto, String>;
 
 #[tauri::command]
 async fn set_buffer_size(size: u32) -> Result<(), String>;
+
+// -----------------------------------------------------------------------------
+// Output runtime commands (v2)
+// -----------------------------------------------------------------------------
+
+#[tauri::command]
+async fn list_output_runtime_devices() -> Result<Vec<(u32, String)>, String>;
+
+#[tauri::command]
+async fn start_output_runtime(device_id: u32) -> Result<(), String>;
+
+#[tauri::command]
+async fn stop_output_runtime() -> Result<(), String>;
+
+#[tauri::command]
+async fn is_output_runtime_running() -> Result<bool, String>;
+
+#[tauri::command]
+async fn find_output_runtime_by_name(name: String) -> Result<Option<u32>, String>;
 ```
 
 ---

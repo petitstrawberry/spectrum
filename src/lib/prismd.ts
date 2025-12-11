@@ -3,6 +3,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { getOutputDevices, startAudio } from './api';
 
 // --- Types ---
 
@@ -290,7 +291,7 @@ export async function isPrismAvailable(): Promise<boolean> {
  */
 export async function startAudioOutput(deviceId: number): Promise<void> {
   // v2 API: start global audio (device selection handled elsewhere)
-  return invoke('start_audio');
+  return startAudio();
 }
 
 /**
@@ -305,14 +306,27 @@ export async function stopAudioOutput(deviceId: number): Promise<void> {
  * Find output device by name
  */
 export async function findOutputDevice(name: string): Promise<number | null> {
-  return invoke<number | null>('find_output_device', { name });
+  // v2: query output devices and match by name (contains or exact)
+  try {
+    const devices = await getOutputDevices();
+    // Try exact match first, then substring match
+    const exact = devices.find(d => d.name === name || d.id === name);
+    if (exact) return exact.device_id;
+    const fuzzy = devices.find(d => d.name.toLowerCase().includes(name.toLowerCase()));
+    if (fuzzy) return fuzzy.device_id;
+    return null;
+  } catch (e) {
+    console.warn('findOutputDevice: failed to enumerate devices', e);
+    return null;
+  }
 }
 
 /**
  * Start output to default audio device
  */
 export async function startDefaultOutput(): Promise<void> {
-  return invoke('start_default_output');
+  // v2: start system audio (capture + any output already configured)
+  return startAudio();
 }
 
 // --- Generic Input Device Capture Types ---
