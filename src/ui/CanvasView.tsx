@@ -120,12 +120,14 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
           const style: React.CSSProperties = { left: node.x, top: node.y, height: nodeHeight };
 
           const disabled = isUnavailable || isSystemDisabled;
+          // Allow dragging of output nodes even when visually disabled (greyed out).
+          const allowDragWhenDisabled = node.type === 'target';
           return (
             <div
               key={node.id}
               ref={el => { if (el) nodeRefs.current.set(node.id, el); }}
-              onMouseDown={(e) => { if (!disabled) handleNodeMouseDown(e, node.id); }}
-              className={`canvas-node absolute w-[180px] ${disabled ? 'bg-slate-900/30' : (isUnavailable ? 'bg-slate-900/50' : 'bg-slate-800')} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${disabled ? 'opacity-40 pointer-events-none' : ''}`}
+              onMouseDown={(e) => { if (!disabled || allowDragWhenDisabled) handleNodeMouseDown(e, node.id); }}
+              className={`canvas-node absolute w-[180px] ${disabled ? 'bg-slate-900/30' : (isUnavailable ? 'bg-slate-900/50' : 'bg-slate-800')} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${disabled ? (allowDragWhenDisabled ? 'opacity-40' : 'opacity-40 pointer-events-none') : ''}`}
               style={style}
             >
               <div className="h-9 bg-slate-900/50 rounded-t-lg border-b border-slate-700/50 flex items-center px-3 gap-2 cursor-grab active:cursor-grabbing">
