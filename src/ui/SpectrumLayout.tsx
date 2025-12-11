@@ -92,9 +92,13 @@ import type { UseDevicesReturn } from '../hooks/useDevices';
 
 interface SpectrumLayoutProps {
   devices: UseDevicesReturn;
+  // v2 graph and meters (optional for progressive migration)
+  graph?: any;
+  meters?: any;
 }
 
-export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
+export default function SpectrumLayout(props: SpectrumLayoutProps) {
+  const { devices, graph, meters } = props;
   // For visual parity we keep local state where needed
   const [showSettings, setShowSettings] = useState(false);
   const [showPluginBrowser, setShowPluginBrowser] = useState(false);
@@ -182,6 +186,45 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
 
   // Nodes placed on the canvas (local UI state for visual feedback)
   const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
+
+  // If a v2 graph is provided, derive canvas nodes from it (progressive migration)
+  const nodesFromGraph: NodeData[] | null = (() => {
+    const g = graph as any;
+    if (!g || !g.nodes) return null;
+    try {
+      const arr = Array.from(g.nodes.values());
+      return arr.map((n: any) => {
+        const handle = n.handle ?? (n.id ?? 0);
+        const id = `node_${handle}`;
+        const libraryId = id;
+        const type: NodeType = n.type === 'sink' ? 'target' : (n.type === 'bus' ? 'bus' : 'source');
+        return {
+          id,
+          libraryId,
+          type,
+          label: n.label || `Node ${handle}`,
+          subLabel: n.subLabel || undefined,
+          icon: n.icon || Music,
+          color: n.color || 'text-cyan-400',
+          x: typeof n.x === 'number' ? n.x : 100,
+          y: typeof n.y === 'number' ? n.y : 100,
+          volume: 1,
+          muted: false,
+          channelCount: n.portCount || 2,
+          channelOffset: n.channelOffset ?? n.channel ?? undefined,
+          sourceType: n.sourceType === 'device' ? 'device' : 'prism-channel',
+          deviceId: n.deviceId ?? n.sinkDeviceId ?? undefined,
+          deviceName: undefined,
+          channelMode: 'stereo',
+          available: true,
+          busId: n.busId ?? undefined,
+          plugins: n.plugins ?? undefined,
+        } as NodeData;
+      });
+    } catch (e) {
+      return null;
+    }
+  })();
 
   // Compute whether a library item is used (i.e., already placed on the canvas)
   const isLibraryItemUsed = useCallback((id: string) => {
@@ -563,15 +606,24 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
           canvasRef={canvasRef}
           isPanning={isPanning}
           canvasTransform={canvasTransform}
-          nodes={placedNodes}
+          nodes={nodesFromGraph || placedNodes}
           channelColors={channelColors}
           systemActiveOutputs={devices?.activeOutputs || []}
           onMoveNode={(id: string, x: number, y: number) => {
+            // If rendering v2 nodes, update graph positions via provided graph prop
+            if (id && id.startsWith('node_') && (props as any).graph) {
+              const g = (props as any).graph;
+              const handle = Number(id.slice(5));
+              if (!Number.isNaN(handle) && g && typeof g.updateNodePosition === 'function') {
+                g.updateNodePosition(handle, x, y);
+                return;
+              }
+            }
             setPlacedNodes(prev => prev.map(n => n.id === id ? { ...n, x, y } : n));
           }}
           onDeleteNode={async (id: string) => {
             // find node to determine if it's a device-backed node
-            const node = placedNodes.find(n => n.id === id);
+            const node = (nodesFromGraph || placedNodes).find(n => n.id === id);
             // stop capture if this node represents a physical input device
             if (node && node.libraryId && node.libraryId.startsWith('dev_')) {
               const deviceId = Number(node.libraryId.slice(4));
@@ -583,12 +635,17 @@ export default function SpectrumLayout({ devices }: SpectrumLayoutProps) {
             }
             // remove locally
             setPlacedNodes(prev => prev.filter(n => n.id !== id));
-            // if it's a backend node (id like `node_<handle>`), call removeNode
+            // if it's a backend node (id like `node_<handle>`), call graph.deleteNode if available
             if (id && id.startsWith('node_')) {
               const handle = Number(id.slice(5));
               if (!Number.isNaN(handle)) {
                 try {
-                  await removeNode(handle);
+                  const g = (props as any).graph;
+                  if (g && typeof g.deleteNode === 'function') {
+                    await g.deleteNode(handle);
+                  } else {
+                    await removeNode(handle);
+                  }
                 } catch (e) {
                   console.error('removeNode failed', e);
                 }
