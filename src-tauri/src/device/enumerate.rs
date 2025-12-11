@@ -12,35 +12,6 @@ use coreaudio::sys::{
 };
 use std::ptr;
 
-/// Get the default output device ID
-pub fn get_default_output_device() -> Option<u32> {
-    let address = AudioObjectPropertyAddress {
-        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMaster,
-    };
-
-    let mut device_id: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-
-    let status = unsafe {
-        AudioObjectGetPropertyData(
-            kAudioObjectSystemObject,
-            &address,
-            0,
-            ptr::null(),
-            &mut size,
-            &mut device_id as *mut u32 as *mut _,
-        )
-    };
-
-    if status == 0 && device_id != 0 {
-        Some(device_id)
-    } else {
-        None
-    }
-}
-
 /// Get number of output channels for a device
 pub fn get_device_output_channels(device_id: u32) -> u32 {
     let address = AudioObjectPropertyAddress {
@@ -353,15 +324,5 @@ mod tests {
         }
         // Just check that it doesn't panic
         assert!(devices.len() >= 0);
-    }
-
-    #[test]
-    fn test_get_default_output_device() {
-        if let Some(device_id) = get_default_output_device() {
-            println!("Default output device ID: {}", device_id);
-            let channels = get_device_output_channels(device_id);
-            println!("Output channels: {}", channels);
-            assert!(channels > 0);
-        }
     }
 }

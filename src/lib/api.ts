@@ -313,8 +313,8 @@ export async function restoreState(): Promise<boolean> {
 // System Commands
 // =============================================================================
 
-export async function startAudio(): Promise<void> {
-  return invoke('start_audio');
+export async function startAudio(deviceId: number): Promise<void> {
+  return invoke('start_audio', { deviceId });
 }
 
 export async function stopAudio(): Promise<void> {

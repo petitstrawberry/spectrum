@@ -1,6 +1,7 @@
 //! Tauri Commands - API endpoints for frontend
 
 use super::dto::*;
+use crate::audio::output::start_output_v2;
 use crate::audio::processor::get_graph_processor;
 use crate::audio::{AudioNode, Edge, EdgeId, NodeHandle, PortId};
 use crate::audio::source::SourceNode;
@@ -33,41 +34,6 @@ pub async fn get_output_devices() -> Result<Vec<OutputDeviceDto>, String> {
     // Use the device module to get output devices
     let devices = crate::device::get_output_devices();
     Ok(devices)
-}
-
-// -----------------------------------------------------------------------------
-// Output runtime commands (v2)
-// These control the single active physical output runtime (ACTIVE_OUTPUT).
-// -----------------------------------------------------------------------------
-
-#[tauri::command]
-pub async fn list_output_runtime_devices() -> Result<Vec<(u32, String)>, String> {
-    // Return simple (device_id, name) pairs for quick lookup
-    Ok(crate::audio::output::list_output_devices())
-}
-
-#[tauri::command]
-pub async fn start_output_runtime(device_id: u32) -> Result<(), String> {
-    crate::audio::output::start_output_v2(device_id)
-}
-
-#[tauri::command]
-pub async fn stop_output_runtime() -> Result<(), String> {
-    crate::audio::output::stop_output_v2();
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn is_output_runtime_running() -> Result<bool, String> {
-    Ok(crate::audio::output::is_output_running_v2())
-}
-
-#[tauri::command]
-pub async fn find_output_runtime_by_name(name: String) -> Result<Option<u32>, String> {
-    match crate::device::find_output_device(&name) {
-        Some((device_id, _pair_idx, _ch_count)) => Ok(Some(device_id)),
-        None => Ok(None),
-    }
 }
 
 #[tauri::command]
@@ -680,17 +646,30 @@ pub async fn restore_state() -> Result<bool, String> {
 // =============================================================================
 
 #[tauri::command]
-pub async fn start_audio() -> Result<(), String> {
+pub async fn start_audio(device_id: u32) -> Result<(), String> {
     crate::capture::start_capture()?;
-    // TODO: Start output
+
+    if start_output_v2(device_id) .is_err() {
+        crate::capture::stop_capture();
+        return Err("Failed to start output runtime".to_string());
+    }
+
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_audio() -> Result<(), String> {
     crate::capture::stop_capture();
-    // TODO: Stop output
+
+    // Ensure physical output runtime is stopped as well
+    crate::audio::output::stop_output_v2();
+
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_output_runtime() -> Result<Option<u32>, String> {
+    Ok(crate::audio::output::get_active_output_device())
 }
 
 #[tauri::command]

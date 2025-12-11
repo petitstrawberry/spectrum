@@ -253,7 +253,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   // Output controls
   const startOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
-      await invoke('start_audio');
+      await invoke('start_audio', { deviceId });
       setActiveOutputs(prev => [...prev.filter(id => id !== deviceId), deviceId]);
     } catch (e) {
       console.error('Failed to start output:', e);

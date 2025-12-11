@@ -12,7 +12,7 @@ use crate::audio::sink::SinkNode;
 use crate::audio::source::SourceId;
 use crate::vdsp::VDsp;
 use coreaudio::audio_unit::macos_helpers::{
-    get_audio_device_ids, get_default_device_id, get_device_name, set_device_sample_rate,
+    get_audio_device_ids, get_device_name, set_device_sample_rate,
 };
 use coreaudio::audio_unit::{AudioUnit, Element, SampleFormat, Scope, StreamFormat};
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
@@ -351,19 +351,8 @@ pub fn is_output_running_v2() -> bool {
     active.as_ref().map_or(false, |o| o.running.load(Ordering::Relaxed))
 }
 
-/// List available output devices
-pub fn list_output_devices() -> Vec<(u32, String)> {
-    let mut devices = Vec::new();
-
-    if let Ok(device_ids) = get_audio_device_ids() {
-        for device_id in device_ids {
-            let channels = get_device_output_channels(device_id);
-            if channels > 0 {
-                let name = get_device_name(device_id).unwrap_or_else(|_| "Unknown".to_string());
-                devices.push((device_id, name));
-            }
-        }
-    }
-
-    devices
+/// Get the currently configured active output device, if any.
+pub fn get_active_output_device() -> Option<u32> {
+    let active = ACTIVE_OUTPUT.read();
+    active.as_ref().map(|o| o.device_id)
 }

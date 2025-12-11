@@ -538,16 +538,15 @@ Audio Thread → GraphMeters (ArcSwap) → UI Polling (60fps)
 
 ### API カテゴリ
 
-| カテゴリ | 責務 | 例 |
-|----------|------|-----|
-| **Device** | デバイス列挙（読み取り専用） | `get_input_devices`, `get_output_devices` |
-| **Graph** | グラフの構造変更 | `add_node`, `remove_node`, `add_edge`, `remove_edge` |
-| **Edge** | エッジのパラメータ変更（リアルタイム） | `set_edge_gain`, `set_edge_muted` |
-| **Plugin** | プラグイン管理 | `add_plugin`, `remove_plugin`, `open_plugin_ui` |
-| **Meter** | メータリング（ポーリング） | `get_meters` |
-| **State** | 状態の永続化 | `save_state`, `load_state` |
-| **System** | システム操作 | `start_audio`, `stop_audio`, `get_status` |
-| **Output Runtime** | 出力デバイスのランタイム制御（レンダラーからのデバイス選択/起動/停止） | `list_output_runtime_devices`, `start_output_runtime`, `stop_output_runtime`, `is_output_runtime_running`, `find_output_runtime_by_name` |
+| カテゴリ   | 責務                                   | 例                                                                     |
+| ---------- | -------------------------------------- | ---------------------------------------------------------------------- |
+| **Device** | デバイス列挙（読み取り専用）           | `get_input_devices`, `get_output_devices`                              |
+| **Graph**  | グラフの構造変更                       | `add_node`, `remove_node`, `add_edge`, `remove_edge`                   |
+| **Edge**   | エッジのパラメータ変更（リアルタイム） | `set_edge_gain`, `set_edge_muted`                                      |
+| **Plugin** | プラグイン管理                         | `add_plugin`, `remove_plugin`, `open_plugin_ui`                        |
+| **Meter**  | メータリング（ポーリング）             | `get_meters`                                                           |
+| **State**  | 状態の永続化                           | `save_state`, `load_state`                                             |
+| **System** | システム操作                           | `start_audio`, `stop_audio`, `get_active_output_runtime`, `get_status` |
 
 ---
 
@@ -1039,30 +1038,13 @@ async fn start_audio() -> Result<(), String>;
 async fn stop_audio() -> Result<(), String>;
 
 #[tauri::command]
+async fn get_output_runtime() -> Result<Option<u32>, String>;
+
+#[tauri::command]
 async fn get_system_status() -> Result<SystemStatusDto, String>;
 
 #[tauri::command]
 async fn set_buffer_size(size: u32) -> Result<(), String>;
-
-// -----------------------------------------------------------------------------
-// Output runtime commands (v2)
-// -----------------------------------------------------------------------------
-
-#[tauri::command]
-async fn list_output_runtime_devices() -> Result<Vec<(u32, String)>, String>;
-
-#[tauri::command]
-async fn start_output_runtime(device_id: u32) -> Result<(), String>;
-
-#[tauri::command]
-async fn stop_output_runtime() -> Result<(), String>;
-
-#[tauri::command]
-async fn is_output_runtime_running() -> Result<bool, String>;
-
-#[tauri::command]
-async fn find_output_runtime_by_name(name: String) -> Result<Option<u32>, String>;
-```
 
 ---
 
