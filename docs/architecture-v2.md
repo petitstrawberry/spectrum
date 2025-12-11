@@ -1774,28 +1774,3 @@ src-tauri/src/
 | `src/App.tsx` | 🔄 レガシー | prismd.ts を使用中、段階的移行が必要 |
 | `src/lib/prismd.v1.ts.bak` | 📦 バックアップ | prismd.ts のバックアップ |
 | `src/App.v1.tsx.bak` | 📦 バックアップ | App.tsx のバックアップ |
-
-### v2 API クライアント (api.ts) 実装内容
-
-**型定義:**
-- `InputDeviceDto`, `OutputDeviceDto`, `SubDeviceDto`
-- `PrismAppDto`, `PrismStatusDto`
-- `SourceIdDto` (discriminated union: `prism_channel` | `input_device`)
-- `OutputSinkDto`
-- `PluginInstanceDto`, `NodeInfoDto` (discriminated union)
-- `EdgeInfoDto`, `GraphDto`
-- `PluginInfoDto`
-- `PortMeterDto`, `NodeMeterDto`, `EdgeMeterDto`, `GraphMetersDto`
-- `GraphStateDto`, `SystemStatusDto`, `EdgeGainUpdate`
-
-**関数:**
-- Device: `getInputDevices`, `getOutputDevices`, `getPrismStatus`
-- Graph: `addSourceNode`, `addBusNode`, `addSinkNode`, `removeNode`, `addEdge`, `removeEdge`, `getGraph`
-- Edge: `setEdgeGain`, `setEdgeMuted`, `setEdgeGainsBatch`
-- Plugin: `getAvailablePlugins`, `addPluginToBus`, `removePluginFromBus`, `reorderPlugins`, `openPluginUI`, `closePluginUI`
-- Meter: `getMeters`, `getNodeMeters`, `getEdgeMeters`
-- State: `saveGraphState`, `loadGraphState`, `persistState`, `restoreState`
-- System: `startAudio`, `stopAudio`, `getSystemStatus`, `setBufferSize`
-- Helpers: `dbToGain`, `gainToDb`, `rmsToDb`, `dbToMeterPercent`
-
----
