@@ -38,7 +38,8 @@ pub async fn get_output_devices() -> Result<Vec<OutputDeviceDto>, String> {
 
 #[tauri::command]
 pub async fn get_prism_status() -> Result<PrismStatusDto, String> {
-    let connected = crate::capture::is_capture_running();
+    // connected should reflect prismd daemon connection, not whether audio capture is active
+    let connected = crate::prismd::is_connected();
     let apps = crate::prismd::get_processes()
         .into_iter()
         .map(|p| PrismAppDto {
