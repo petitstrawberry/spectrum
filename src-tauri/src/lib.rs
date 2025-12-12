@@ -20,7 +20,6 @@ pub mod device;     // Device enumeration
 mod audio_capture;  // Legacy capture (wrapped by capture module)
 mod audio_unit;     // AudioUnit plugin management
 mod audio_unit_ui;  // AudioUnit UI
-pub mod config;     // Configuration persistence
 pub mod prismd;     // Prism daemon communication
 mod vdsp;           // vDSP hardware acceleration
 
@@ -314,6 +313,30 @@ fn get_processes() -> Vec<PrismProcess> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|_app| {
+            // Initialize audio engine on app startup
+            println!("[Spectrum] Initializing audio engine...");
+
+            // Find preferred output device (aggregate or system default)
+            if let Some(device_id) = crate::device::find_preferred_output_device() {
+                match crate::audio::output::start_output_v2(device_id) {
+                    Ok(_) => {
+                        let channels = crate::device::get_device_output_channels(device_id);
+                        println!("[Spectrum] Audio engine initialized successfully");
+                        println!("[Spectrum] Using output device: {} ({} channels)", device_id, channels);
+                    }
+                    Err(e) => {
+                        eprintln!("[Spectrum] Warning: Failed to initialize audio engine: {}", e);
+                        eprintln!("[Spectrum] The app will start without audio output.");
+                    }
+                }
+            } else {
+                eprintln!("[Spectrum] Warning: No suitable output device found");
+                eprintln!("[Spectrum] The app will start without audio output.");
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // v2 API - Device
             get_input_devices,
