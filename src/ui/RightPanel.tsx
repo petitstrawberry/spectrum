@@ -17,6 +17,12 @@ export default function RightPanel({ width, devices, isLibraryItemUsed, handleLi
   const startOutput = devices?.startOutput;
   const stopOutput = devices?.stopOutput;
 
+  // Store latest functions in refs to avoid recreating effect
+  const startOutputRef = React.useRef(startOutput);
+  const stopOutputRef = React.useRef(stopOutput);
+  startOutputRef.current = startOutput;
+  stopOutputRef.current = stopOutput;
+
   const [selected, setSelected] = useState<number | ''>('');
 
   useEffect(() => {
@@ -37,6 +43,7 @@ export default function RightPanel({ width, devices, isLibraryItemUsed, handleLi
   }, [outputDevices, (devices as any)?.activeOutputs]);
 
   // When selection changes, stop previously selected output (if any) and start the new one.
+  // Note: Initial audio start is now handled by backend, this only handles user-initiated switches
   const prevRef = React.useRef<number | ''>('');
   useEffect(() => {
     const prev = prevRef.current;
@@ -45,21 +52,29 @@ export default function RightPanel({ width, devices, isLibraryItemUsed, handleLi
     (async () => {
       try {
         if (!mounted) return;
+        // Get latest functions from refs
+        const stopFn = stopOutputRef.current;
+        const startFn = startOutputRef.current;
+
         // Debug: log transition and available control functions
-        try { console.debug('RightPanel: output change', { prev, cur, activeOutputs: (devices as any)?.activeOutputs, hasStop: !!stopOutput, hasStart: !!startOutput }); } catch (e) {}
-        if (prev !== '' && prev !== cur && stopOutput) {
+        try { console.debug('RightPanel: output change', { prev, cur, activeOutputs: (devices as any)?.activeOutputs, hasStop: !!stopFn, hasStart: !!startFn }); } catch (e) {}
+
+        // Only switch if user explicitly changed selection (prev !== '')
+        if (prev !== '' && prev !== cur && stopFn) {
           try {
             console.debug('RightPanel: calling stopOutput', prev);
-            await stopOutput(Number(prev));
+            await stopFn(Number(prev));
             console.debug('RightPanel: stopOutput resolved', prev);
           } catch (e) {
             console.error('RightPanel: stopOutput failed', e);
           }
         }
-        if (cur !== '' && startOutput) {
+
+        // Start new output if user changed selection (prev !== '')
+        if (prev !== '' && cur !== '' && startFn) {
           try {
             console.debug('RightPanel: calling startOutput', cur);
-            await startOutput(Number(cur));
+            await startFn(Number(cur));
             console.debug('RightPanel: startOutput resolved', cur);
           } catch (e) {
             console.error('RightPanel: startOutput failed', e);
@@ -71,7 +86,7 @@ export default function RightPanel({ width, devices, isLibraryItemUsed, handleLi
     })();
     prevRef.current = selected;
     return () => { mounted = false; };
-  }, [selected, startOutput, stopOutput]);
+  }, [selected]);
 
   return (
     <div className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 z-10 shadow-xl relative" style={{ width }} onClick={e => e.stopPropagation()}>

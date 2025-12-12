@@ -514,22 +514,8 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
   }, [devices?.prismStatus]);
 
-  // On first mount, start audio in "auto" mode (deviceId 0) and refresh device list
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        // Use v2 devices hook to start the default audio runtime (deviceId==0 => auto)
-        if (devices?.startOutput) await devices.startOutput(0);
-        // Give backend a short moment then refresh device list so UI can pick up active output
-        await new Promise(r => setTimeout(r, 200));
-        if (mounted && devices && devices.refresh) await devices.refresh();
-      } catch (e) {
-        console.error('Failed to start default audio on startup', e);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [devices]);
+  // Note: Audio engine initialization moved to backend (.setup() in lib.rs)
+  // Frontend now only handles device switching via RightPanel
   // Fallback: if devices hook has no prism apps yet, keep local fallback empty.
   useEffect(() => {
     if (devices?.prismStatus?.apps && devices.prismStatus.apps.length > 0) {

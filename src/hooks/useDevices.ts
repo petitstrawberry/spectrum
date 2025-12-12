@@ -2,7 +2,7 @@
  * useDevices - Device enumeration hook for Spectrum v2
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   getInputDevices,
   getOutputDevices,
@@ -109,6 +109,10 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   const [activeOutputs, setActiveOutputs] = useState<number[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Use ref to access latest activeOutputs without causing callback recreations
+  const activeOutputsRef = useRef<number[]>([]);
+  activeOutputsRef.current = activeOutputs;
 
   const refresh = useCallback(async () => {
     try {
@@ -266,6 +270,11 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
   // Output controls
   const startOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
+      // Skip if already active to avoid repeated starts
+      if (activeOutputsRef.current.includes(deviceId)) {
+        console.debug('useDevices.startOutput: skipping start, already active', deviceId);
+        return;
+      }
       await invoke('start_audio', { deviceId });
       setActiveOutputs(prev => [...prev.filter(id => id !== deviceId), deviceId]);
     } catch (e) {
@@ -275,6 +284,11 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
 
   const stopOutput = useCallback(async (deviceId: number): Promise<void> => {
     try {
+      // Skip if not active
+      if (!activeOutputsRef.current.includes(deviceId)) {
+        console.debug('useDevices.stopOutput: skipping stop, not active', deviceId);
+        return;
+      }
       await invoke('stop_audio');
       setActiveOutputs(prev => prev.filter(id => id !== deviceId));
     } catch (e) {
@@ -282,7 +296,8 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
     }
   }, []);
 
-  return {
+  // Memoize return value to prevent unnecessary re-renders
+  return useMemo(() => ({
     inputDevices,
     outputDevices,
     virtualOutputDevices,
@@ -296,5 +311,19 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
     startOutput,
     stopOutput,
     activeOutputs,
-  };
+  }), [
+    inputDevices,
+    outputDevices,
+    virtualOutputDevices,
+    prismStatus,
+    isLoading,
+    error,
+    refresh,
+    startCapture,
+    stopCapture,
+    activeCaptures,
+    startOutput,
+    stopOutput,
+    activeOutputs,
+  ]);
 }
