@@ -172,7 +172,22 @@ export async function addSourceNode(
   sourceId: SourceIdDto,
   label?: string
 ): Promise<number> {
-  return invoke<number>('add_source_node', { sourceId, label });
+  // Map frontend union variant names to backend-expected DTO shape
+  let dto: any = sourceId;
+  try {
+    if ((sourceId as any)?.type === 'prism_channel') {
+      dto = { type: 'prism', channel: (sourceId as any).channel };
+    } else if ((sourceId as any)?.type === 'input_device') {
+      dto = { type: 'device', device_id: (sourceId as any).device_id, channel: (sourceId as any).channel };
+    }
+
+    console.debug('[api] invoke add_source_node', dto, label);
+    const res = await invoke<number>('add_source_node', { sourceId: dto, label });
+    return res;
+  } catch (err) {
+    console.error('[api] addSourceNode invoke failed', err);
+    throw err;
+  }
 }
 
 export async function addBusNode(

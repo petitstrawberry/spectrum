@@ -129,13 +129,10 @@ function getColorForSink(name: string): string {
 function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number }): UINode {
   switch (info.type) {
     case 'source': {
-      const sourceType = info.source_id.type === 'prism_channel' ? 'prism' : 'device';
-      const channel = info.source_id.type === 'prism_channel'
-        ? info.source_id.channel
-        : info.source_id.channel;
-      const deviceId = info.source_id.type === 'input_device'
-        ? info.source_id.device_id
-        : undefined;
+      const src: any = info.source_id as any;
+      const sourceType = (src.type === 'prism' || src.type === 'prism_channel') ? 'prism' : 'device';
+      const channel = src.channel;
+      const deviceId = src.device_id !== undefined ? src.device_id : undefined;
 
       return {
         handle: info.handle,

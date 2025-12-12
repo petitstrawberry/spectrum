@@ -198,21 +198,68 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         const id = `node_${handle}`;
         const libraryId = id;
         const type: NodeType = n.type === 'sink' ? 'target' : (n.type === 'bus' ? 'bus' : 'source');
+
+        // Base fields
+        let subLabel = n.subLabel || undefined;
+        let icon = n.icon || Music;
+        let color = n.color || 'text-cyan-400';
+
+        // Normalize channelOffset/channel for prism sources and enrich with channelSources data
+        const channelOffset = n.channelOffset ?? n.channel ?? undefined;
+        const srcType = n.sourceType === 'device' ? 'device' : 'prism';
+        if (type === 'source' && (srcType === 'prism' || srcType === 'prism-channel') && typeof channelOffset === 'number') {
+          // Match channelSources robustly: backend may supply channel as absolute offset
+          // or as a stereo-pair index. Accept either form.
+          const ch = channelSources.find((c: any) => {
+            const cOff = c.channelOffset;
+            // direct match (both use absolute channel offset)
+            if (cOff === channelOffset) return true;
+            // backend provided stereo-pair index while cOff is absolute offset (i*2)
+            if (cOff === channelOffset * 2) return true;
+            // backend provided absolute offset while cOff is stereo-pair index (unlikely) -> compare halves
+            if (Math.floor(cOff / 2) === channelOffset) return true;
+            return false;
+          });
+          if (ch) {
+            // For MAIN (first stereo pair) always use Music icon and cyan color
+            if (ch.isMain) {
+              subLabel = 'MAIN';
+              icon = Music;
+              color = 'text-cyan-400';
+            } else {
+              subLabel = (ch.apps && ch.apps.length > 0) ? ch.apps[0].name : subLabel;
+              icon = (ch.apps && ch.apps[0] && ch.apps[0].icon) || getIconForApp(ch.apps?.[0]?.name) || Music;
+              const chColor = channelColors && (channelColors[ch.channelOffset ?? 0] || channelColors[0]);
+              // Avoid white/blank upstream colors clobbering our styling
+              const upstreamIsWhite = typeof color === 'string' && ['white', '#fff', '#ffffff'].includes(color.toLowerCase());
+              if (!upstreamIsWhite) color = chColor || color;
+            }
+          }
+          else {
+            // No channelSources entry found — if this is the MAIN pair (channelOffset 0), force cyan + Music
+            if (channelOffset === 0) {
+              subLabel = 'MAIN';
+              icon = Music;
+              color = 'text-cyan-400';
+            }
+          }
+        }
+
         return {
           id,
           libraryId,
           type,
           label: n.label || `Node ${handle}`,
-          subLabel: n.subLabel || undefined,
-          icon: n.icon || Music,
-          color: n.color || 'text-cyan-400',
+          subLabel,
+          icon,
+          color,
           x: typeof n.x === 'number' ? n.x : 100,
           y: typeof n.y === 'number' ? n.y : 100,
           volume: 1,
           muted: false,
           channelCount: n.portCount || 2,
-          channelOffset: n.channelOffset ?? n.channel ?? undefined,
-          sourceType: n.sourceType === 'device' ? 'device' : 'prism-channel',
+          channelOffset,
+          sourceType: srcType === 'device' ? 'device' : 'prism-channel',
           deviceId: n.deviceId ?? n.sinkDeviceId ?? undefined,
           deviceName: undefined,
           channelMode: 'stereo',
@@ -228,8 +275,32 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
   // Compute whether a library item is used (i.e., already placed on the canvas)
   const isLibraryItemUsed = useCallback((id: string) => {
-    return placedNodes.some(p => p.libraryId === id);
-  }, [placedNodes]);
+    // If there's an optimistic/local placed node with this library id, it's used
+    if (placedNodes.some(p => p.libraryId === id)) return true;
+
+    // Also check nodes coming from the v2 graph so RightPanel can grey items
+    if (!nodesFromGraph) return false;
+
+    if (id.startsWith('ch_')) {
+      const offset = Number(id.slice(3));
+      return nodesFromGraph.some(n => n.type === 'source' && (n.sourceType === 'prism-channel' || n.sourceType === 'prism') && (n.channelOffset === offset || n.deviceId === undefined && n.channel === offset));
+    }
+
+    if (id.startsWith('dev_')) {
+      const deviceId = Number(id.slice(4));
+      return nodesFromGraph.some(n => n.type === 'source' && n.deviceId === deviceId);
+    }
+
+    if (id.startsWith('vout_')) {
+      const m = id.match(/^vout_(\d+)_(\d+)$/);
+      if (!m) return false;
+      const parentDeviceId = Number(m[1]);
+      const offset = Number(m[2]);
+      return nodesFromGraph.some(n => n.type === 'target' && n.deviceId === parentDeviceId && n.channelOffset === offset);
+    }
+
+    return false;
+  }, [placedNodes, nodesFromGraph]);
 
   // Handle drag from library items in LeftSidebar
   const handleLibraryMouseDown = useCallback((e: React.MouseEvent, type: 'lib_source' | 'lib_target', id: string) => {
@@ -386,27 +457,59 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                   }
                 }
 
-                const handle = await addSourceNode(sourceId, label);
-                // Add a simple visual node to placedNodes
-                setPlacedNodes(prev => [...prev, {
-                  id: `node_${handle}`,
-                  libraryId: id,
-                  type: 'source',
-                  label,
-                  subLabel,
-                  icon: nodeIcon,
-                  // use computed colorValue when available
-                  color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
-                  deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
-                  x: canvasX,
-                  y: canvasY,
-                  volume: 1,
-                  muted: false,
-                  channelCount: nodeChannels,
-                  channelMode: 'stereo'
-                }]);
+                // If a v2 graph is provided, use it so the graph state (and positions) are updated and reflected
+                if ((props as any).graph && typeof (props as any).graph.addSource === 'function') {
+                  // Optimistic UI: add a pending local node so the user sees immediate feedback
+                  const pendingId = `node_pending_${Date.now()}`;
+                  setPlacedNodes(prev => [...prev, {
+                    id: pendingId,
+                    libraryId: id,
+                    type: 'source',
+                    label,
+                    subLabel,
+                    icon: nodeIcon,
+                    color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
+                    deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
+                    x: canvasX,
+                    y: canvasY,
+                    volume: 1,
+                    muted: false,
+                    channelCount: nodeChannels,
+                    channelMode: 'stereo'
+                  }]);
+
+                  try {
+                    const handle = await (props as any).graph.addSource(sourceId, label, { x: canvasX, y: canvasY });
+                    // graph.addSource will refresh graph state; remove pending placeholder
+                    setPlacedNodes(prev => prev.filter(n => n.id !== pendingId));
+                    console.debug('added node via graph.addSource', handle);
+                  } catch (e) {
+                    // On failure, leave pending node as fallback local visual
+                    console.error('graph.addSource failed', e);
+                  }
+                } else {
+                  const handle = await addSourceNode(sourceId, label);
+                  // Add a simple visual node to placedNodes for v1/local fallback
+                  setPlacedNodes(prev => [...prev, {
+                    id: `node_${handle}`,
+                    libraryId: id,
+                    type: 'source',
+                    label,
+                    subLabel,
+                    icon: nodeIcon,
+                    // use computed colorValue when available
+                    color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
+                    deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
+                    x: canvasX,
+                    y: canvasY,
+                    volume: 1,
+                    muted: false,
+                    channelCount: nodeChannels,
+                    channelMode: 'stereo'
+                  }]);
+                }
               } catch (err) {
-                console.error('addSourceNode failed, falling back to local node', err);
+                console.error('addSourceNode/graph.addSource failed, falling back to local node', err);
                 // Fallback: still show a local visual node so UI feedback is visible
                 setPlacedNodes(prev => [...prev, {
                   id: `node_local_${Date.now()}`,
@@ -422,7 +525,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                   volume: 1,
                   muted: false,
                   channelCount: nodeChannels,
-                  channelMode: 'stereo'
+                  channelMode: 'stereo',
                 }]);
               }
             }
@@ -441,24 +544,29 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                 const sink = { device_id: parentDeviceId, channel_offset: offset, channel_count: nodeChannelsLocal };
                 const labelText = vEntry ? vEntry.name : `Out ${offset + 1}-${offset + nodeChannelsLocal}`;
                 try {
-                  const handle = await addSinkNode(sink, labelText);
-                  setPlacedNodes(prev => [...prev, {
-                    id: `node_${handle}`,
-                    libraryId: id,
-                    type: 'target',
-                    label: labelText,
-                    subLabel: `${nodeChannelsLocal}ch Output`,
-                    icon: nodeIconLocal,
-                    color: colorValueLocal,
-                    x: canvasX,
-                    y: canvasY,
-                    volume: 1,
-                    muted: false,
-                    channelCount: nodeChannelsLocal,
-                    channelMode: 'stereo',
-                  }]);
+                  if ((props as any).graph && typeof (props as any).graph.addSink === 'function') {
+                    const handle = await (props as any).graph.addSink(sink, labelText, { x: canvasX, y: canvasY });
+                    console.debug('added sink via graph.addSink', handle);
+                  } else {
+                    const handle = await addSinkNode(sink, labelText);
+                    setPlacedNodes(prev => [...prev, {
+                      id: `node_${handle}`,
+                      libraryId: id,
+                      type: 'target',
+                      label: labelText,
+                      subLabel: `${nodeChannelsLocal}ch Output`,
+                      icon: nodeIconLocal,
+                      color: colorValueLocal,
+                      x: canvasX,
+                      y: canvasY,
+                      volume: 1,
+                      muted: false,
+                      channelCount: nodeChannelsLocal,
+                      channelMode: 'stereo',
+                    }]);
+                  }
                 } catch (err) {
-                  console.error('addSinkNode failed, falling back to local sink node', err);
+                  console.error('addSinkNode/graph.addSink failed, falling back to local sink node', err);
                   setPlacedNodes(prev => [...prev, {
                     id: `node_local_${Date.now()}`,
                     libraryId: id,
@@ -592,7 +700,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           canvasRef={canvasRef}
           isPanning={isPanning}
           canvasTransform={canvasTransform}
-          nodes={nodesFromGraph || placedNodes}
+          nodes={[...(nodesFromGraph || []), ...placedNodes]}
           channelColors={channelColors}
           systemActiveOutputs={devices?.activeOutputs || []}
           onMoveNode={(id: string, x: number, y: number) => {
