@@ -4,7 +4,25 @@
  * Pure Sends-on-Fader architecture API
  */
 
-import { invoke } from '@tauri-apps/api/core';
+// NOTE: Avoid top-level import of Tauri invoke.
+// In non-Tauri contexts (e.g. opening the dev server in a regular browser),
+// importing the Tauri API at module init can throw and crash React before render.
+// We lazy-load it on first use instead.
+type Invoke = <T>(cmd: string, args?: Record<string, any>) => Promise<T>;
+let _invokePromise: Promise<Invoke> | null = null;
+
+const invoke: Invoke = (cmd, args) => {
+  if (!_invokePromise) {
+    _invokePromise = import('@tauri-apps/api/core')
+      .then((m) => m.invoke as unknown as Invoke)
+      .catch((err) => {
+        console.error('[api] failed to load Tauri invoke', err);
+        throw err;
+      });
+  }
+
+  return _invokePromise.then((fn) => fn(cmd, args));
+};
 
 // =============================================================================
 // Type Definitions
@@ -355,6 +373,10 @@ export async function getOutputRuntime(): Promise<number | null> {
 /** Set output node (sink) gain (linear). */
 export async function setOutputGain(outputHandle: number, gain: number): Promise<void> {
   return invoke('set_output_gain', { outputHandle, gain });
+}
+
+export async function setOutputChannelGain(outputHandle: number, channel: number, gain: number): Promise<void> {
+  return invoke<void>('set_output_channel_gain', { outputHandle, channel, gain });
 }
 
 export async function getSystemStatus(): Promise<SystemStatusDto> {

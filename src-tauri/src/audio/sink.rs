@@ -50,10 +50,10 @@ pub struct SinkNode {
     sink_id: SinkId,
     /// 表示ラベル
     label: String,
-    /// 出力ゲイン（linear）。sink単位で適用される。
+    /// 出力ゲイン（linear）。チャンネル(=port)ごとに適用される。
     ///
     /// f32 bits を AtomicU32 に格納して RT-safe に読む。
-    output_gain_bits: AtomicU32,
+    output_gain_bits_by_port: Vec<AtomicU32>,
     /// 入力バッファ（チャンネル数分）
     input_buffers: Vec<AudioBuffer>,
 }
@@ -65,7 +65,9 @@ impl SinkNode {
         Self {
             sink_id,
             label: label.into(),
-            output_gain_bits: AtomicU32::new(1.0_f32.to_bits()),
+            output_gain_bits_by_port: (0..channel_count)
+                .map(|_| AtomicU32::new(1.0_f32.to_bits()))
+                .collect(),
             input_buffers: (0..channel_count).map(|_| AudioBuffer::new()).collect(),
         }
     }
@@ -90,16 +92,32 @@ impl SinkNode {
         self.sink_id.channel_offset
     }
 
-    /// Get output gain (linear).
-    pub fn output_gain(&self) -> f32 {
-        f32::from_bits(self.output_gain_bits.load(Ordering::Relaxed))
+    /// Get output gain for a given port (linear).
+    pub fn output_gain_for_port(&self, port: usize) -> f32 {
+        self.output_gain_bits_by_port
+            .get(port)
+            .map(|g| f32::from_bits(g.load(Ordering::Relaxed)))
+            .unwrap_or(1.0)
     }
 
-    /// Set output gain (linear).
+    /// Set output gain (linear) for all ports.
     pub fn set_output_gain(&self, gain: f32) {
         let g = if gain.is_finite() { gain } else { 1.0 };
         let g = g.clamp(0.0, 4.0);
-        self.output_gain_bits.store(g.to_bits(), Ordering::Relaxed);
+        let bits = g.to_bits();
+        for slot in &self.output_gain_bits_by_port {
+            slot.store(bits, Ordering::Relaxed);
+        }
+    }
+
+    /// Set output gain (linear) for one port.
+    pub fn set_output_gain_for_port(&self, port: usize, gain: f32) {
+        let Some(slot) = self.output_gain_bits_by_port.get(port) else {
+            return;
+        };
+        let g = if gain.is_finite() { gain } else { 1.0 };
+        let g = g.clamp(0.0, 4.0);
+        slot.store(g.to_bits(), Ordering::Relaxed);
     }
 
     /// Set the label

@@ -503,6 +503,55 @@ pub async fn set_output_gain(output_handle: u32, gain: f32) -> Result<(), String
     }
 }
 
+/// Set output (sink/vout) gain for a specific channel/port (linear).
+///
+/// `channel` is the port index relative to the sink (0..channel_count).
+#[tauri::command]
+pub async fn set_output_channel_gain(
+    output_handle: u32,
+    channel: u32,
+    gain: f32,
+) -> Result<(), String> {
+    let processor = get_graph_processor();
+    let handle = NodeHandle::from_raw(output_handle);
+    let ch = channel as usize;
+
+    let updated = processor.with_graph_mut(|graph| {
+        let Some(node) = graph.get_node_mut(handle) else {
+            return Err("not_found".to_string());
+        };
+        let port_count = node.input_port_count();
+        let Some(sink) = node
+            .as_any_mut()
+            .downcast_mut::<crate::audio::sink::SinkNode>()
+        else {
+            return Err("not_sink".to_string());
+        };
+
+        if ch >= port_count {
+            return Err("bad_channel".to_string());
+        }
+
+        // RT-safe atomic store inside the SinkNode.
+        sink.set_output_gain_for_port(ch, gain);
+        Ok(())
+    });
+
+    match updated {
+        Ok(()) => Ok(()),
+        Err(tag) if tag == "not_found" => Err(format!("Node {} was not found", output_handle)),
+        Err(tag) if tag == "not_sink" => Err(format!(
+            "Node {} is not an output (sink) node or was not found",
+            output_handle
+        )),
+        Err(tag) if tag == "bad_channel" => Err(format!(
+            "Channel {} is out of range for sink node {}",
+            channel, output_handle
+        )),
+        Err(e) => Err(e),
+    }
+}
+
 // =============================================================================
 // Plugin Commands
 // =============================================================================

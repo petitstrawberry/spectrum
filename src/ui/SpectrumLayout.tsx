@@ -36,7 +36,7 @@ import { useChannelColors } from '../hooks/useChannelColors';
 import { getColorForDevice } from '../hooks/useColors';
 import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, getVirtualOutputDisplay, getBusDisplay } from '../hooks/useNodeDisplay';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { addSourceNode, addSinkNode, removeNode, setOutputGain } from '../lib/api';
+import { addSourceNode, addSinkNode, removeNode, setOutputGain, setOutputChannelGain } from '../lib/api';
 
 // --- Types ---
 
@@ -115,45 +115,57 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const selectedInputDevice = prismDevice;
   // Build 32 stereo channel pairs (64 channels) like v1
   // Prefer backend prismStatus.apps (from get_prism_status). If empty, fall back to getPrismApps() results.
-  const _prismAppsFromStatus = devices?.prismStatus?.apps || [];
-  const _prismApps: any[] = (_prismAppsFromStatus && _prismAppsFromStatus.length > 0)
-    ? _prismAppsFromStatus
-    : (fallbackPrismApps || []);
+  let _prismApps: any[] = [];
+  try {
+    const fromStatus = devices?.prismStatus?.apps;
+    _prismApps = (Array.isArray(fromStatus) && fromStatus.length > 0)
+      ? fromStatus
+      : (fallbackPrismApps ?? []);
+  } catch (err) {
+    // If we hit a TDZ/circular-init style ReferenceError, do not crash the whole UI.
+    console.error('[SpectrumLayout] prism apps init failed', err);
+    _prismApps = fallbackPrismApps ?? [];
+  }
+
   const channelSources: any[] = [];
-  for (let i = 0; i < 32; i++) {
-    const offset = i * 2;
-    // backend `prismStatus.apps` uses `channelOffset` (stereo-pair index)
-    // fallback `getPrismApps()` returns AppSource with `channelOffsets` array; normalize both shapes
-    const assigned = _prismApps.filter((a: any) => {
-      // If a.channelOffset is a single number, it's the stereo-pair index (from get_prism_status)
-      if (typeof a.channelOffset === 'number') return (a.channelOffset ?? 0) === i;
-      // If a.channelOffsets is an array (from getPrismApps()), treat entries as absolute channel indices
-      // and convert to stereo-pair index by Math.floor(channelIndex / 2).
-      if (Array.isArray(a.channelOffsets)) return a.channelOffsets.some((co: number) => Math.floor(co / 2) === i);
-      return false;
-    });
-    // Deduplicate apps by name and aggregate client counts. Do not assign a placeholder icon
-    // here so the LeftSidebar can pick a category icon via `getIconForApp`.
-    const appMap = new Map<string, { name: string; color?: string; pid?: number; clientCount: number }>();
-    for (const a of assigned) {
-      const name = a.name || 'Unknown';
-      const existing = appMap.get(name);
-      const clients = a.clients ? a.clients.length : (a.clientCount ?? 1);
-      if (existing) {
-        existing.clientCount += clients;
-      } else {
-        appMap.set(name, { name, color: a.color || 'text-cyan-400', pid: a.pid, clientCount: clients });
+  try {
+    for (let i = 0; i < 32; i++) {
+      const offset = i * 2;
+      // backend `prismStatus.apps` uses `channelOffset` (stereo-pair index)
+      // fallback `getPrismApps()` returns AppSource with `channelOffsets` array; normalize both shapes
+      const assigned = _prismApps.filter((a: any) => {
+        // If a.channelOffset is a single number, it's the stereo-pair index (from get_prism_status)
+        if (typeof a.channelOffset === 'number') return (a.channelOffset ?? 0) === i;
+        // If a.channelOffsets is an array (from getPrismApps()), treat entries as absolute channel indices
+        // and convert to stereo-pair index by Math.floor(channelIndex / 2).
+        if (Array.isArray(a.channelOffsets)) return a.channelOffsets.some((co: number) => Math.floor(co / 2) === i);
+        return false;
+      });
+      // Deduplicate apps by name and aggregate client counts. Do not assign a placeholder icon
+      // here so the LeftSidebar can pick a category icon via `getIconForApp`.
+      const appMap = new Map<string, { name: string; color?: string; pid?: number; clientCount: number }>();
+      for (const a of assigned) {
+        const name = a.name || 'Unknown';
+        const existing = appMap.get(name);
+        const clients = a.clients ? a.clients.length : (a.clientCount ?? 1);
+        if (existing) {
+          existing.clientCount += clients;
+        } else {
+          appMap.set(name, { name, color: a.color || 'text-cyan-400', pid: a.pid, clientCount: clients });
+        }
       }
+      const apps = Array.from(appMap.values()).map(a => ({ name: a.name, icon: undefined, color: a.color, pid: a.pid, clientCount: a.clientCount }));
+      channelSources.push({
+        id: `ch_${offset}`,
+        channelOffset: offset,
+        channelLabel: `${offset + 1}-${offset + 2}`,
+        apps,
+        hasApps: apps.length > 0,
+        isMain: offset === 0,
+      });
     }
-    const apps = Array.from(appMap.values()).map(a => ({ name: a.name, icon: undefined, color: a.color, pid: a.pid, clientCount: a.clientCount }));
-    channelSources.push({
-      id: `ch_${offset}`,
-      channelOffset: offset,
-      channelLabel: `${offset + 1}-${offset + 2}`,
-      apps,
-      hasApps: apps.length > 0,
-      isMain: offset === 0,
-    });
+  } catch (err) {
+    console.error('[SpectrumLayout] channelSources init failed', err);
   }
   const rawOtherInputDevices: any[] = (devices?.inputDevices || []).filter((d: any) => !d.isPrism);
   const otherInputDevices: any[] = rawOtherInputDevices.map((d: any) => ({
@@ -175,8 +187,12 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const mixerHeight = 260;
   const masterWidth = 300;
   const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
-  const [masterGainByOutputId, setMasterGainByOutputId] = useState<Record<string, number>>({});
-  const masterLastSendMsRef = useRef<number>(0);
+  const [masterGainsByOutputId, setMasterGainsByOutputId] = useState<Record<string, number[]>>({});
+  const [focusedOutputChannelById, setFocusedOutputChannelById] = useState<Record<string, number>>({});
+  const [channelModeByNodeId, setChannelModeByNodeId] = useState<Record<string, 'stereo' | 'mono'>>({});
+  const masterLastSendMsRef = useRef<Record<string, number>>({});
+  // Nodes placed on the canvas (local UI state for visual feedback)
+  const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
   const selectedBus: any = null;
   const focusedTarget: any = null;
   const focusedTargetPorts = 2;
@@ -188,11 +204,79 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const outputTargets: any[] = [];
   const libraryDrag: any = null;
 
+  const focusedOutputPortCount = useMemo(() => {
+    if (!focusedOutputId) return 0;
+
+    // Prefer graph nodes (v2), but do not reference nodesFromGraph here
+    // because it's declared later in this function and would trigger TDZ.
+    try {
+      const g = graph as any;
+      if (g && g.nodes && typeof g.nodes.values === 'function') {
+        for (const n of g.nodes.values()) {
+          const handle = n?.handle ?? (n?.id ?? 0);
+          if (`node_${handle}` !== focusedOutputId) continue;
+          const pc = Number(
+            n?.portCount ??
+              n?.port_count ??
+              n?.channelCount ??
+              n?.channel_count ??
+              n?.sink?.channel_count ??
+              n?.sink?.channelCount ??
+              0
+          );
+          return Number.isFinite(pc) && pc > 0 ? pc : 0;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Fallback to locally placed nodes
+    const n = placedNodes.find((x: any) => x && x.id === focusedOutputId);
+    const pc = Number(n?.channelCount ?? n?.portCount ?? n?.port_count ?? 0);
+    return Number.isFinite(pc) && pc > 0 ? pc : 0;
+  }, [focusedOutputId, graph, placedNodes]);
+
+  const activeMasterGains = useMemo<number[]>(() => {
+    if (!focusedOutputId) return [];
+    const g = masterGainsByOutputId[focusedOutputId];
+    return Array.isArray(g) ? g : [];
+  }, [focusedOutputId, masterGainsByOutputId]);
+
+  const masterChannelMode = useMemo<'stereo' | 'mono'>(() => {
+    if (!focusedOutputId) return 'stereo';
+    return channelModeByNodeId[focusedOutputId] ?? 'stereo';
+  }, [focusedOutputId, channelModeByNodeId]);
+
+  const focusedOutputChannel = useMemo(() => {
+    if (!focusedOutputId) return 0;
+    const ch = Number(focusedOutputChannelById[focusedOutputId] ?? 0);
+    return Number.isFinite(ch) && ch >= 0 ? ch : 0;
+  }, [focusedOutputId, focusedOutputChannelById]);
+
   const activeMasterGain = useMemo(() => {
     if (!focusedOutputId) return 1.0;
-    const g = masterGainByOutputId[focusedOutputId];
-    return typeof g === 'number' && Number.isFinite(g) ? g : 1.0;
-  }, [focusedOutputId, masterGainByOutputId]);
+    const sel = Math.max(0, focusedOutputChannel | 0);
+    const base = masterChannelMode === 'stereo' ? Math.floor(sel / 2) * 2 : sel;
+    const v = Number(activeMasterGains[base]);
+    return Number.isFinite(v) ? v : 1.0;
+  }, [focusedOutputId, focusedOutputChannel, masterChannelMode, activeMasterGains]);
+
+  const setFocusedOutputChannel = useCallback((ch: number) => {
+    if (!focusedOutputId) return;
+    const n = Number(ch);
+    if (!Number.isFinite(n) || n < 0) return;
+    setFocusedOutputChannelById((prev) => ({ ...prev, [focusedOutputId]: n }));
+  }, [focusedOutputId]);
+
+  const toggleMasterChannelMode = useCallback(() => {
+    if (!focusedOutputId) return;
+    setChannelModeByNodeId((prev) => {
+      const cur = prev[focusedOutputId] ?? 'stereo';
+      const next = cur === 'stereo' ? 'mono' : 'stereo';
+      return { ...prev, [focusedOutputId]: next };
+    });
+  }, [focusedOutputId]);
 
   const setActiveMasterGain = useCallback((gain: number, opts?: { commit?: boolean }) => {
     if (!focusedOutputId) return;
@@ -200,21 +284,84 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     const outputHandle = Number(focusedOutputId.slice(5));
     if (Number.isNaN(outputHandle)) return;
     const g = Math.max(0, Math.min(4, Number(gain)));
-    setMasterGainByOutputId((prev) => ({ ...prev, [focusedOutputId]: g }));
+
+    const pc = Math.max(0, focusedOutputPortCount | 0);
+    const sel = Math.max(0, focusedOutputChannel | 0);
+    const base = masterChannelMode === 'stereo' ? Math.floor(sel / 2) * 2 : sel;
+
+    setMasterGainsByOutputId((prev) => {
+      const cur = Array.isArray(prev[focusedOutputId]) ? [...(prev[focusedOutputId] as number[])] : [];
+      const next = pc > 0 ? Array.from({ length: pc }, (_, i) => {
+        const v = Number(cur[i]);
+        return Number.isFinite(v) ? v : 1.0;
+      }) : cur;
+      if (masterChannelMode === 'stereo') {
+        if (base < next.length) next[base] = g;
+        if (base + 1 < next.length) next[base + 1] = g;
+      } else {
+        if (base < next.length) next[base] = g;
+      }
+      return { ...prev, [focusedOutputId]: next };
+    });
 
     const shouldCommit = opts?.commit ?? false;
     const now = performance.now();
-    const last = masterLastSendMsRef.current || 0;
+    const key = `${focusedOutputId}:${masterChannelMode}:${Math.floor(base / 2)}`;
+    const last = masterLastSendMsRef.current[key] || 0;
     if (!shouldCommit && now - last < 33) return;
-    masterLastSendMsRef.current = now;
+    masterLastSendMsRef.current[key] = now;
 
-    void setOutputGain(outputHandle, g).catch((err) => {
-      console.warn('[master] setOutputGain failed', err);
+    if (masterChannelMode === 'stereo') {
+      void Promise.all([
+        setOutputChannelGain(outputHandle, base, g),
+        setOutputChannelGain(outputHandle, base + 1, g),
+      ]).catch((err) => {
+        console.warn('[master] setOutputChannelGain failed', err);
+      });
+    } else {
+      void setOutputChannelGain(outputHandle, base, g).catch((err) => {
+        console.warn('[master] setOutputChannelGain failed', err);
+      });
+    }
+  }, [focusedOutputId, focusedOutputPortCount, focusedOutputChannel, masterChannelMode]);
+
+  const setActiveMasterChannelGain = useCallback((channel: number, gain: number, opts?: { commit?: boolean }) => {
+    if (!focusedOutputId) return;
+    if (!focusedOutputId.startsWith('node_')) return;
+    const outputHandle = Number(focusedOutputId.slice(5));
+    if (Number.isNaN(outputHandle)) return;
+    const ch = Number(channel);
+    if (!Number.isFinite(ch) || ch < 0) return;
+    const g = Math.max(0, Math.min(4, Number(gain)));
+
+    setMasterGainsByOutputId((prev) => {
+      const cur = Array.isArray(prev[focusedOutputId]) ? [...(prev[focusedOutputId] as number[])] : [];
+      const pc = Math.max(0, focusedOutputPortCount | 0);
+      const next = pc > 0 ? Array.from({ length: pc }, (_, i) => {
+        const v = Number(cur[i]);
+        return Number.isFinite(v) ? v : 1.0;
+      }) : cur;
+      if (ch < next.length) next[ch] = g;
+      return { ...prev, [focusedOutputId]: next };
     });
-  }, [focusedOutputId]);
 
-  // Nodes placed on the canvas (local UI state for visual feedback)
-  const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
+    const shouldCommit = opts?.commit ?? false;
+    const now = performance.now();
+    const key = `${focusedOutputId}:ch${ch}`;
+    const last = masterLastSendMsRef.current[key] || 0;
+    if (!shouldCommit && now - last < 33) return;
+    masterLastSendMsRef.current[key] = now;
+
+    void setOutputChannelGain(outputHandle, ch, g).catch((err) => {
+      console.warn('[master] setOutputChannelGain failed', err);
+    });
+  }, [focusedOutputId, focusedOutputPortCount]);
+
+  const getDefaultChannelMode = (node: any): 'stereo' | 'mono' => {
+    const n = Number(node?.channelCount ?? node?.portCount ?? node?.port_count ?? 2);
+    if (!Number.isFinite(n) || n <= 1) return 'mono';
+    return n >= 2 && n % 2 === 0 ? 'stereo' : 'mono';
+  };
 
   // v1 parity: default focused output is first target node if none selected yet
   useEffect(() => {
@@ -510,6 +657,26 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     return allNodes.find((n: any) => n && n.id === selectedNodeId) || null;
   }, [selectedNodeId, nodesFromGraph, placedNodes]);
 
+  const mixerChannelMode = useMemo<'stereo' | 'mono'>(() => {
+    const targetId = (selectedNodeData && (selectedNodeData.type === 'target' || selectedNodeData.type === 'bus'))
+      ? selectedNodeData.id
+      : null;
+    if (!targetId) return 'stereo';
+    return channelModeByNodeId[targetId] ?? getDefaultChannelMode(selectedNodeData);
+  }, [selectedNodeData, channelModeByNodeId]);
+
+  const toggleMixerChannelMode = useCallback(() => {
+    const targetId = (selectedNodeData && (selectedNodeData.type === 'target' || selectedNodeData.type === 'bus'))
+      ? selectedNodeData.id
+      : null;
+    if (!targetId) return;
+    setChannelModeByNodeId((prev) => {
+      const cur = prev[targetId] ?? getDefaultChannelMode(selectedNodeData);
+      const next = cur === 'stereo' ? 'mono' : 'stereo';
+      return { ...prev, [targetId]: next };
+    });
+  }, [selectedNodeData]);
+
   // Mixer strips: input-side edges connected into the selected output/bus.
   // UI-only for now (no controls wired).
   const mixerStrips = useMemo(() => {
@@ -517,6 +684,10 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       ? selectedNodeData.id
       : null;
     if (!targetId) return [];
+
+    const isFocusedTarget = !!focusedOutputId && targetId === focusedOutputId;
+    const sel = Math.max(0, focusedOutputChannel | 0);
+    const base = mixerChannelMode === 'stereo' ? Math.floor(sel / 2) * 2 : sel;
 
     const allNodes = [...(nodesFromGraph || []), ...placedNodes];
     const nodesById = new Map<string, any>(allNodes.map((n: any) => [n.id, n]));
@@ -538,7 +709,16 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       if (!c) continue;
       const next = sorted[i + 1];
 
-      const canPair = !!next &&
+      if (isFocusedTarget) {
+        const toCh = Number(c.toChannel);
+        if (mixerChannelMode === 'mono') {
+          if (toCh !== base) continue;
+        } else {
+          if (toCh !== base && toCh !== base + 1) continue;
+        }
+      }
+
+      const canPair = mixerChannelMode !== 'mono' && !!next &&
         c.fromNodeId === next.fromNodeId &&
         c.toNodeId === next.toNodeId &&
         Number(c.fromChannel) % 2 === 0 &&
@@ -577,7 +757,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
 
     return out;
-  }, [selectedNodeData, connectionsFromGraph, nodesFromGraph, placedNodes]);
+  }, [selectedNodeData, connectionsFromGraph, nodesFromGraph, placedNodes, mixerChannelMode, focusedOutputId, focusedOutputChannel]);
 
   // Refresh graph when plugins change
   const handlePluginsChange = useCallback(() => {
@@ -725,14 +905,39 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
 
     setFocusedOutputId(outputNodeId);
+    // v1-like: selecting an output also makes it the active mixer target.
+    setSelectedNodeId(outputNodeId);
+    setSelectedBusId(null);
     log('focusOutput', { outputNodeId, deviceId, outputHandle });
 
     // Apply per-output stored master gain (UI state) to backend master gain.
-    const nextGainRaw = masterGainByOutputId[outputNodeId];
-    const nextGain = typeof nextGainRaw === 'number' && Number.isFinite(nextGainRaw) ? nextGainRaw : 1.0;
-    void setOutputGain(outputHandle, Math.max(0, Math.min(4, nextGain))).catch((err) => {
-      console.warn('[master] setOutputGain failed on focus change', err);
-    });
+    const pc = Math.max(0, Number(n?.channelCount ?? n?.portCount ?? n?.port_count ?? 0) | 0);
+    const stored = masterGainsByOutputId[outputNodeId];
+    const gains = pc > 0
+      ? Array.from({ length: pc }, (_, i) => {
+          const v = Array.isArray(stored) ? Number(stored[i]) : NaN;
+          return Math.max(0, Math.min(4, Number.isFinite(v) ? v : 1.0));
+        })
+      : (Array.isArray(stored) ? stored.map((v: any) => Math.max(0, Math.min(4, Number(v) || 1.0))) : []);
+
+    // Persist normalized shape in UI state.
+    if (pc > 0) {
+      setMasterGainsByOutputId((prev) => ({ ...prev, [outputNodeId]: gains }));
+      setFocusedOutputChannelById((prev) => ({ ...prev, [outputNodeId]: Number(prev[outputNodeId] ?? 0) }));
+    }
+
+    if (gains.length > 0) {
+      const allSame = gains.every((x) => x === gains[0]);
+      if (allSame) {
+        void setOutputGain(outputHandle, gains[0]).catch((err) => {
+          console.warn('[master] setOutputGain failed on focus change', err);
+        });
+      } else {
+        void Promise.all(gains.map((g0, ch) => setOutputChannelGain(outputHandle, ch, g0))).catch((err) => {
+          console.warn('[master] setOutputChannelGain failed on focus change', err);
+        });
+      }
+    }
 
     if (deviceId != null && devices?.startOutput) {
       log('startOutput', { deviceId, from: 'focusOutput' });
@@ -742,7 +947,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         console.error('[SpectrumLayout] startOutput failed', e);
       }
     }
-  }, [devices, log, nodesFromGraph, placedNodes, selectedNodeId, masterGainByOutputId]);
+  }, [devices, log, nodesFromGraph, placedNodes, selectedNodeId, masterGainsByOutputId]);
 
   // Compute whether a library item is used (i.e., already placed on the canvas)
   const isLibraryItemUsed = useCallback((id: string) => {
@@ -1289,11 +1494,20 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         selectedBus={selectedBusData}
         selectedNode={selectedNodeData}
         mixerStrips={mixerStrips}
+        mixerChannelMode={mixerChannelMode}
+        onToggleMixerChannelMode={toggleMixerChannelMode}
         outputTargets={mixerOutputTargets}
         focusedOutputId={focusedOutputId}
         onFocusOutputId={handleFocusOutputId}
+        focusedOutputChannel={focusedOutputChannel}
+        onFocusOutputChannel={setFocusedOutputChannel}
+        focusedOutputPortCount={focusedOutputPortCount}
+        masterChannelMode={masterChannelMode}
+        onToggleMasterChannelMode={toggleMasterChannelMode}
         masterGain={activeMasterGain}
+        masterGains={activeMasterGains}
         onMasterGainChange={setActiveMasterGain}
+        onMasterChannelGainChange={setActiveMasterChannelGain}
         onPluginsChange={handlePluginsChange}
       />
     </div>

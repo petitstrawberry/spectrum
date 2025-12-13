@@ -9,7 +9,19 @@ import {
   getPrismStatus,
   getOutputRuntime,
 } from '../lib/api';
-import { invoke } from '@tauri-apps/api/core';
+// NOTE: Avoid top-level import of Tauri invoke.
+// Opening the Vite dev server in a normal browser can crash module init otherwise.
+type Invoke = <T>(cmd: string, args?: Record<string, any>) => Promise<T>;
+let _invokePromise: Promise<Invoke> | null = null;
+
+const invoke: Invoke = (cmd, args) => {
+  if (!_invokePromise) {
+    _invokePromise = import('@tauri-apps/api/core')
+      .then((m) => m.invoke as unknown as Invoke);
+  }
+
+  return _invokePromise.then((fn) => fn(cmd, args));
+};
 
 // =============================================================================
 // Types

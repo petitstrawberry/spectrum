@@ -389,8 +389,6 @@ fn output_thread_v2(
                             continue;
                         }
 
-                        let sink_gain = sink.output_gain();
-
                         let channel_offset = sink.channel_offset() as usize;
                         let port_count = node.input_port_count();
 
@@ -403,6 +401,7 @@ fn output_thread_v2(
 
                             if let Some(samples) = sink.get_output_samples(port) {
                                 let valid = samples.len().min(frames);
+                                let sink_gain = sink.output_gain_for_port(port);
                                 for i in 0..valid {
                                     let out_idx = i * out_ch + target_ch;
                                     if out_idx < buffer.len() {

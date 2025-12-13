@@ -4,7 +4,30 @@ import { Maximize2, Volume2, Monitor } from 'lucide-react';
 import DetailView from './detail/DetailView';
 import type { BusInfo } from './detail/types';
 import type { UINode } from '../types/graph';
-import { dbToGain, gainToDb, setEdgeGainsBatch } from '../lib/api';
+import { dbToGain, gainToDb, setEdgeGainsBatch, getEdgeMeters, getNodeMeters } from '../lib/api';
+
+// =============================================================================
+// Canvas meter helpers (v1-style)
+// =============================================================================
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const radius = Math.max(0, Math.min(r, Math.min(w / 2, h / 2)));
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+function parseNodeHandleFromId(nodeId: any): number | null {
+  if (typeof nodeId !== 'string') return null;
+  const m = nodeId.match(/^node_(\d+)$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
 
 // =============================================================================
 // v1-inspired fader/meter scale helpers (UI-only)
@@ -202,6 +225,8 @@ interface Props {
   selectedBus?: BusInfo | null;
   selectedNode?: UINode | null;
   mixerStrips?: any[];
+  mixerChannelMode?: 'stereo' | 'mono';
+  onToggleMixerChannelMode?: () => void;
   outputTargets?: Array<{
     id: string;
     label: string;
@@ -212,8 +237,15 @@ interface Props {
   }>;
   focusedOutputId?: string | null;
   onFocusOutputId?: (outputNodeId: string | null) => void | Promise<void>;
+  focusedOutputChannel?: number;
+  onFocusOutputChannel?: (ch: number) => void;
+  focusedOutputPortCount?: number;
+  masterChannelMode?: 'stereo' | 'mono';
+  onToggleMasterChannelMode?: () => void;
   masterGain?: number;
+  masterGains?: number[];
   onMasterGainChange?: (gain: number, opts?: { commit?: boolean }) => void;
+  onMasterChannelGainChange?: (channel: number, gain: number, opts?: { commit?: boolean }) => void;
   onPluginsChange?: () => void;
 }
 
@@ -224,18 +256,341 @@ export default function MixerPanel({
   selectedBus,
   selectedNode,
   mixerStrips = [],
+  mixerChannelMode = 'stereo',
+  onToggleMixerChannelMode,
   outputTargets = [],
   focusedOutputId = null,
   onFocusOutputId,
+  focusedOutputChannel = 0,
+  onFocusOutputChannel,
+  focusedOutputPortCount = 0,
+  masterChannelMode = 'stereo',
+  onToggleMasterChannelMode,
   masterGain: masterGainProp,
+  masterGains: masterGainsProp,
   onMasterGainChange,
+  onMasterChannelGainChange,
   onPluginsChange,
 }: Props) {
   const strips = Array.isArray(mixerStrips) ? mixerStrips : [];
   const showStrips = strips.length > 0 && (selectedNode?.type === 'target' || selectedNode?.type === 'bus');
 
-  const masterGain = typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0;
-  const masterDb = gainToDb(masterGain);
+  const masterGainsRef = React.useRef<number[]>([1.0, 1.0]);
+  React.useEffect(() => {
+    if (Array.isArray(masterGainsProp) && masterGainsProp.length > 0) {
+      masterGainsRef.current = masterGainsProp.map((v: any) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 1.0;
+      });
+    } else {
+      const g = typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0;
+      masterGainsRef.current = [g, g];
+    }
+  }, [masterGainsProp, masterGainProp]);
+
+  // ---------------------------------------------------------------------------
+  // Meters (canvas, v1-style): poll into refs + draw via rAF, no React re-render
+  // ---------------------------------------------------------------------------
+
+  const meterPaletteRef = React.useRef<HTMLDivElement | null>(null);
+  const meterColorsRef = React.useRef<{ bg: string; green: string; yellow: string; red: string } | null>(null);
+
+  const ensureMeterColors = React.useCallback(() => {
+    if (meterColorsRef.current) return meterColorsRef.current;
+    const root = meterPaletteRef.current;
+    if (!root) return null;
+
+    const pick = (name: string) => {
+      const el = root.querySelector(`[data-meter-color="${name}"]`) as HTMLElement | null;
+      if (!el) return '';
+      return window.getComputedStyle(el).backgroundColor || '';
+    };
+
+    meterColorsRef.current = {
+      bg: pick('bg'),
+      green: pick('green'),
+      yellow: pick('yellow'),
+      red: pick('red'),
+    };
+    return meterColorsRef.current;
+  }, []);
+
+  const edgePeakByIdRef = React.useRef<Map<number, number>>(new Map());
+  const nodeOutputPeaksByHandleRef = React.useRef<Map<number, number[]>>(new Map());
+  const isFetchingMetersRef = React.useRef<boolean>(false);
+
+  // canvas refs/cache
+  const meterCanvasCache = React.useRef<
+    Map<string, { ctx: CanvasRenderingContext2D; cssW: number; cssH: number; dpr: number; gradient?: CanvasGradient }>
+  >(new Map());
+  const meterROs = React.useRef<Map<string, ResizeObserver>>(new Map());
+  const smoothedLevels = React.useRef<Map<string, number>>(new Map());
+
+  // key -> meter source mapping
+  const meterSourceRef = React.useRef<
+    Map<
+      string,
+      | { kind: 'edge'; ids: number[]; channel: 0 | 1 }
+      | { kind: 'node'; id: number; channel: 0 | 1 }
+    >
+  >(new Map());
+
+  const setMeterCanvasRef = React.useCallback((el: HTMLCanvasElement | null, key: string) => {
+    const existingRO = meterROs.current.get(key);
+    if (!el) {
+      meterCanvasCache.current.delete(key);
+      if (existingRO) {
+        existingRO.disconnect();
+        meterROs.current.delete(key);
+      }
+      return;
+    }
+
+    const updateSize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = Math.max(1, el.clientWidth);
+      const cssH = Math.max(1, el.clientHeight);
+      const backingW = Math.max(1, Math.floor(cssW * dpr));
+      const backingH = Math.max(1, Math.floor(cssH * dpr));
+      if (el.width !== backingW || el.height !== backingH) {
+        el.width = backingW;
+        el.height = backingH;
+      }
+      const ctx = el.getContext('2d', { alpha: true });
+      if (!ctx) return;
+
+      // Create/refresh vertical gradient (colors are taken from Tailwind tokens via computed styles)
+      const colors = ensureMeterColors();
+      if (!colors || !colors.green || !colors.yellow || !colors.red) {
+        meterCanvasCache.current.set(key, { ctx, cssW, cssH, dpr });
+        return;
+      }
+
+      const gradient = ctx.createLinearGradient(0, cssH, 0, 0);
+      gradient.addColorStop(0, colors.green);
+      gradient.addColorStop(0.6, colors.green);
+      gradient.addColorStop(0.82, colors.yellow);
+      gradient.addColorStop(1, colors.red);
+
+      meterCanvasCache.current.set(key, { ctx, cssW, cssH, dpr, gradient });
+    };
+
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    if (existingRO) existingRO.disconnect();
+    meterROs.current.set(key, ro);
+  }, [ensureMeterColors]);
+
+  // Prime palette colors once mounted (drawing also lazily reads them).
+  React.useEffect(() => {
+    ensureMeterColors();
+  }, [ensureMeterColors]);
+
+  // Update which meters we need when strips/focus changes.
+  React.useEffect(() => {
+    const next = new Map<
+      string,
+      | { kind: 'edge'; ids: number[]; channel: 0 | 1 }
+      | { kind: 'node'; id: number; channel: 0 | 1 }
+    >();
+
+    for (const s of strips) {
+      if (!s?.id) continue;
+      const ids = (Array.isArray(s.connectionIds) ? s.connectionIds : [])
+        .map(parseEdgeId)
+        .filter((n: any) => typeof n === 'number' && Number.isFinite(n));
+      if (!ids.length) continue;
+      next.set(`${s.id}:L`, { kind: 'edge', ids, channel: 0 });
+      next.set(`${s.id}:R`, { kind: 'edge', ids, channel: 1 });
+    }
+
+    const handle = parseNodeHandleFromId(focusedOutputId);
+    if (handle != null) {
+      next.set('master:L', { kind: 'node', id: handle, channel: 0 });
+      next.set('master:R', { kind: 'node', id: handle, channel: 1 });
+    }
+
+    meterSourceRef.current = next;
+
+    // Prune smoothing cache for keys that are no longer active.
+    for (const k of smoothedLevels.current.keys()) {
+      if (!next.has(k)) smoothedLevels.current.delete(k);
+    }
+  }, [strips, focusedOutputId]);
+
+  // Poll meters into refs (no setState). Use edge/node scoped APIs to keep payload small.
+  React.useEffect(() => {
+    let raf = 0;
+    let lastFetch = 0;
+    const intervalMs = 33;
+
+    const loop = (t: number) => {
+      const shouldFetch = t - lastFetch >= intervalMs && !isFetchingMetersRef.current;
+      if (shouldFetch) {
+        lastFetch = t;
+        isFetchingMetersRef.current = true;
+
+        const edgeIds: number[] = [];
+        const nodeHandles: number[] = [];
+        const sources = meterSourceRef.current;
+        for (const s of sources.values()) {
+          if (s.kind === 'edge') edgeIds.push(...s.ids);
+          else nodeHandles.push(s.id);
+        }
+
+        const unique = (arr: number[]) => Array.from(new Set(arr)).filter((n) => Number.isFinite(n));
+        const edgeIdsUniq = unique(edgeIds);
+        const nodeHandlesUniq = unique(nodeHandles);
+
+        Promise.all([
+          edgeIdsUniq.length ? getEdgeMeters(edgeIdsUniq) : Promise.resolve([]),
+          nodeHandlesUniq.length ? getNodeMeters(nodeHandlesUniq) : Promise.resolve([]),
+        ])
+          .then(([edgeMeters, nodeMeters]) => {
+            // Edge meters: store peak only
+            const edgeMap = new Map<number, number>();
+            for (const em of edgeMeters as any[]) {
+              if (em?.edge_id == null) continue;
+              edgeMap.set(Number(em.edge_id), Number(em.post_gain?.peak ?? 0));
+            }
+            edgePeakByIdRef.current = edgeMap;
+
+            // Node meters: store output peaks array
+            const nodeMap = new Map<number, number[]>();
+            for (const nm of nodeMeters as any[]) {
+              if (nm?.handle == null) continue;
+              // NOTE: sink/target nodes often have no `outputs` meters, so fall back to `inputs`.
+              const outPeaks = Array.isArray(nm.outputs) ? nm.outputs.map((p: any) => Number(p?.peak ?? 0)) : [];
+              const inPeaks = Array.isArray(nm.inputs) ? nm.inputs.map((p: any) => Number(p?.peak ?? 0)) : [];
+              const peaks = outPeaks.length ? outPeaks : inPeaks;
+              nodeMap.set(Number(nm.handle), peaks);
+            }
+            nodeOutputPeaksByHandleRef.current = nodeMap;
+          })
+          .catch(() => {
+            // ignore
+          })
+          .finally(() => {
+            isFetchingMetersRef.current = false;
+          });
+      }
+
+      raf = requestAnimationFrame(loop);
+    };
+
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // Draw meters every frame (cheap: canvas only). Uses smoothing like v1.
+  React.useEffect(() => {
+    let raf = 0;
+    const draw = () => {
+      const colors = ensureMeterColors();
+      if (!colors || !colors.bg || !colors.green || !colors.yellow || !colors.red) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      const bg = colors.bg;
+      const sources = meterSourceRef.current;
+
+      for (const [key, cache] of meterCanvasCache.current.entries()) {
+        const src = sources.get(key);
+        if (!src) {
+          const { ctx, cssW, cssH, dpr } = cache;
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, cssW, cssH);
+          roundRect(ctx, 0, 0, cssW, cssH, 2);
+          ctx.fillStyle = bg;
+          ctx.fill();
+          continue;
+        }
+
+        let peak = 0;
+        if (src.kind === 'edge') {
+          if (src.ids.length === 1) {
+            peak = edgePeakByIdRef.current.get(src.ids[0]) ?? 0;
+          } else if (src.channel != null && src.channel < src.ids.length) {
+            peak = edgePeakByIdRef.current.get(src.ids[src.channel]) ?? 0;
+          } else {
+            let maxPeak = 0;
+            for (const id of src.ids) {
+              const p = edgePeakByIdRef.current.get(id) ?? 0;
+              if (p > maxPeak) maxPeak = p;
+            }
+            peak = maxPeak;
+          }
+        } else {
+          const peaks = nodeOutputPeaksByHandleRef.current.get(src.id) ?? [];
+          peak = peaks[src.channel] ?? peaks[0] ?? 0;
+          // Output meters should reflect post-master-gain level.
+          if (key === 'master:L') peak *= (Number(masterGainsRef.current?.[0]) || 1.0);
+          if (key === 'master:R') peak *= (Number(masterGainsRef.current?.[1]) || 1.0);
+        }
+
+        // Convert to dB (meter is -60..0dB)
+        const db = Math.max(-60, Math.min(0, 20 * Math.log10(Math.max(0.00001, Math.abs(peak)))));
+        const targetPct = dbToMeterPercent(db);
+        const prev = smoothedLevels.current.get(key) ?? 0;
+        const next = prev + (targetPct - prev) * 0.35;
+        smoothedLevels.current.set(key, next);
+
+        let { ctx, cssW, cssH, dpr, gradient } = cache;
+
+        if (!gradient) {
+          const g = ctx.createLinearGradient(0, cssH, 0, 0);
+          g.addColorStop(0, colors.green);
+          g.addColorStop(0.6, colors.green);
+          g.addColorStop(0.82, colors.yellow);
+          g.addColorStop(1, colors.red);
+          gradient = g;
+          meterCanvasCache.current.set(key, { ...cache, gradient: g });
+        }
+
+        // Set transform so drawing uses CSS pixels.
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, cssW, cssH);
+
+        // Background (rounded)
+        roundRect(ctx, 0, 0, cssW, cssH, 2);
+        ctx.fillStyle = bg;
+        ctx.fill();
+
+        // Level fill
+        const h = (cssH * next) / 100;
+        if (h > 0.5) {
+          const y = cssH - h;
+          ctx.save();
+          roundRect(ctx, 0, 0, cssW, cssH, 2);
+          ctx.clip();
+          ctx.fillStyle = gradient || colors.green;
+          ctx.fillRect(0, y, cssW, h);
+          ctx.restore();
+        }
+      }
+
+      raf = requestAnimationFrame(draw);
+    };
+
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [ensureMeterColors]);
+
+  const masterGains: number[] = Array.isArray(masterGainsProp) && masterGainsProp.length > 0
+    ? masterGainsProp.map((v: any) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 1.0;
+      })
+    : [typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0,
+      typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0];
+
+  const selectedCh = Math.max(0, Number(focusedOutputChannel) || 0);
+  const selectedBase = masterChannelMode === 'stereo' ? Math.floor(selectedCh / 2) * 2 : selectedCh;
+  const activeMasterGain = Number(masterGains[selectedBase]);
+  const activeMasterGainSafe = Number.isFinite(activeMasterGain) ? activeMasterGain : 1.0;
+
+  const masterDb = gainToDb(activeMasterGainSafe);
   const masterLevel = dbToFader(isFinite(masterDb) ? Math.max(-100, Math.min(6, masterDb)) : -100);
   const masterDragRef = React.useRef<{ pointerId: number } | null>(null);
   const [editingMasterDb, setEditingMasterDb] = React.useState<boolean>(false);
@@ -294,12 +649,19 @@ export default function MixerPanel({
   };
 
   const updateMasterFromPointer = (trackEl: HTMLElement, clientY: number, opts?: { commit?: boolean }) => {
-    if (!onMasterGainChange) return;
     const rect = trackEl.getBoundingClientRect();
     const rel = (rect.bottom - clientY) / rect.height;
     const percent = Math.max(0, Math.min(1, rel)) * 100;
     const db = faderToDb(percent);
     const gain = dbToGain(db);
+
+    if (masterChannelMode === 'mono') {
+      if (!onMasterChannelGainChange) return;
+      onMasterChannelGainChange(selectedBase, gain, opts);
+      return;
+    }
+
+    if (!onMasterGainChange) return;
     onMasterGainChange(gain, opts);
   };
 
@@ -343,7 +705,12 @@ export default function MixerPanel({
     const db = parseDbText(editingMasterDbText);
     setEditingMasterDb(false);
     if (db == null) return;
-    onMasterGainChange?.(dbToGain(db), { commit: true });
+    const gain = dbToGain(db);
+    if (masterChannelMode === 'mono') {
+      onMasterChannelGainChange?.(selectedBase, gain, { commit: true });
+    } else {
+      onMasterGainChange?.(gain, { commit: true });
+    }
   };
 
   const cancelInlineMasterDbEdit = () => {
@@ -410,8 +777,18 @@ export default function MixerPanel({
       : <Icon className={`w-3 h-3 ${iconColor}`} />;
   };
 
+  const masterEnabled = masterChannelMode === 'mono' ? !!onMasterChannelGainChange : !!onMasterGainChange;
+
   return (
     <div className="bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30" style={{ height: mixerHeight }}>
+      {/* Tailwind palette sampler for canvas gradients (no hard-coded colors) */}
+      <div ref={meterPaletteRef} className="hidden" aria-hidden="true">
+        <div data-meter-color="bg" className="bg-slate-950" />
+        <div data-meter-color="green" className="bg-green-500" />
+        <div data-meter-color="yellow" className="bg-yellow-500" />
+        <div data-meter-color="red" className="bg-red-500" />
+      </div>
+
       {/* Bus Detail Section */}
       <div className="w-64 bg-[#1a1f2e] border-r border-slate-700 flex flex-col shrink-0">
         <DetailView selectedNode={selectedNode} selectedBus={selectedBus} onPluginsChange={onPluginsChange} />
@@ -484,8 +861,14 @@ export default function MixerPanel({
                       </div>
                     </div>
                     <div className="flex gap-0.5 relative">
-                      <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950" />
-                      <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5" />
+                      <canvas
+                        ref={(el) => setMeterCanvasRef(el as any, `${strip.id}:L`)}
+                        className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 pointer-events-none"
+                      />
+                      <canvas
+                        ref={(el) => setMeterCanvasRef(el as any, `${strip.id}:R`)}
+                        className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5 pointer-events-none"
+                      />
                       <MeterScale />
                     </div>
                   </div>
@@ -548,6 +931,83 @@ export default function MixerPanel({
           </div>
         </div>
         <div className="flex-1 flex gap-2 p-3 min-h-0">
+          {/* Channel selector (v1-like) */}
+          <div className="w-14 flex flex-col gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={!focusedOutputId}
+              onClick={() => onToggleMasterChannelMode?.()}
+              className={
+                `h-7 rounded-lg border text-[9px] font-bold transition-colors ` +
+                (!focusedOutputId
+                  ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-not-allowed'
+                  : masterChannelMode === 'stereo'
+                    ? 'border-slate-700 bg-slate-800 text-slate-200 hover:border-pink-500/50'
+                    : 'border-pink-500 bg-pink-500/15 text-white')
+              }
+              aria-label="Toggle master stereo/mono"
+            >
+              {masterChannelMode === 'stereo' ? 'ST' : 'MONO'}
+            </button>
+
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
+              {(() => {
+                const pc = Math.max(0, Number(focusedOutputPortCount) || 0);
+                if (!focusedOutputId || pc <= 0) {
+                  return null;
+                }
+
+                if (masterChannelMode === 'stereo') {
+                  const selectedPairBase = Math.floor(selectedCh / 2) * 2;
+                  const rows: any[] = [];
+                  for (let base = 0; base < pc; base += 2) {
+                    const label = base + 1 < pc ? `${base + 1}-${base + 2}` : `${base + 1}`;
+                    const isSel = base === selectedPairBase;
+                    rows.push(
+                      <button
+                        key={`pair_${base}`}
+                        type="button"
+                        onClick={() => onFocusOutputChannel?.(base)}
+                        className={
+                          `h-7 rounded-lg border text-[9px] font-bold transition-colors ` +
+                          (isSel
+                            ? 'border-pink-500 bg-pink-500/15 text-white'
+                            : 'border-slate-700 bg-slate-800 text-slate-200 hover:border-pink-500/50')
+                        }
+                        aria-label={`Select channels ${label}`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  }
+                  return rows;
+                }
+
+                const rows: any[] = [];
+                for (let ch = 0; ch < pc; ch++) {
+                  const isSel = ch === selectedCh;
+                  rows.push(
+                    <button
+                      key={`ch_${ch}`}
+                      type="button"
+                      onClick={() => onFocusOutputChannel?.(ch)}
+                      className={
+                        `h-7 rounded-lg border text-[9px] font-bold transition-colors ` +
+                        (isSel
+                          ? 'border-pink-500 bg-pink-500/15 text-white'
+                          : 'border-slate-700 bg-slate-800 text-slate-200 hover:border-pink-500/50')
+                      }
+                      aria-label={`Select channel ${ch + 1}`}
+                    >
+                      {ch + 1}
+                    </button>
+                  );
+                }
+                return rows;
+              })()}
+            </div>
+          </div>
+
           <div className="flex-1 flex flex-col gap-1 overflow-y-auto min-h-0">
             {Array.isArray(outputTargets) && outputTargets.length > 0 ? (
               outputTargets.map((t) => {
@@ -570,8 +1030,8 @@ export default function MixerPanel({
                       (isDisabled
                         ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-not-allowed'
                         : isSelected
-                          ? 'border-amber-500 bg-amber-500/15'
-                          : 'border-slate-700 bg-slate-800 hover:border-amber-500/50 hover:bg-slate-800/90')
+                          ? 'border-pink-500 bg-pink-500/15'
+                          : 'border-slate-700 bg-slate-800 hover:border-pink-500/50 hover:bg-slate-800/90')
                     }
                   >
                     <div className="w-5 h-5 rounded flex items-center justify-center bg-slate-950">
@@ -594,12 +1054,21 @@ export default function MixerPanel({
             <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
             <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
               <div className="relative mr-2">
-                <FaderScale onSelectDb={(dbSel) => onMasterGainChange?.(dbToGain(dbSel), { commit: true })} />
+                <FaderScale
+                  onSelectDb={(dbSel) => {
+                    const g = dbToGain(dbSel);
+                    if (masterChannelMode === 'mono') {
+                      onMasterChannelGainChange?.(selectedBase, g, { commit: true });
+                    } else {
+                      onMasterGainChange?.(g, { commit: true });
+                    }
+                  }}
+                />
                 <div
-                  className={`w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700 ${onMasterGainChange ? 'cursor-ns-resize' : 'cursor-default opacity-50'}`}
+                  className={`w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700 ${masterEnabled ? 'cursor-ns-resize' : 'cursor-default opacity-50'}`}
                   style={{ touchAction: 'none' }}
                   onPointerDown={(e: any) => {
-                    if (!onMasterGainChange) return;
+                    if (!masterEnabled) return;
                     e.preventDefault();
                     masterDragRef.current = { pointerId: e.pointerId };
                     try { (e.currentTarget as any).setPointerCapture(e.pointerId); } catch {}
@@ -624,15 +1093,21 @@ export default function MixerPanel({
                 </div>
               </div>
               <div className="flex gap-0.5 relative">
-                <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950" />
-                <div className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5" />
+                <canvas
+                  ref={(el) => setMeterCanvasRef(el as any, 'master:L')}
+                  className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 pointer-events-none"
+                />
+                <canvas
+                  ref={(el) => setMeterCanvasRef(el as any, 'master:R')}
+                  className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5 pointer-events-none"
+                />
                 <MeterScale />
               </div>
             </div>
             {(() => {
               const displayDbText = formatDb(masterDb);
               const dbFieldWidthCh = Math.max(4, Math.max(displayDbText.length, editingMasterDbText.length || 0));
-              const isDisabled = !onMasterGainChange;
+              const isDisabled = !masterEnabled;
 
               return (
                 <div className="mt-1 h-4 flex items-center justify-center">
