@@ -9,11 +9,10 @@ interface Props {
   nodes?: any[];
   onMoveNode?: (id: string, x: number, y: number) => void;
   onDeleteNode?: (id: string) => void;
-  channelColors?: Record<number, string>;
   systemActiveOutputs?: number[];
 }
 
-export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode, channelColors, systemActiveOutputs = [] }: Props) {
+export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode, systemActiveOutputs = [] }: Props) {
   const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -98,18 +97,8 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
           }
           const portCount = node.channelCount || 2;
           const nodeHeight = 36 + 16 + (portCount * 24);
-          // Determine effective color for this node.
-          // MAIN (ch_0) should always be cyan; other Prism channels prefer live channelColors.
-          let dynamicColor = node.color || 'text-cyan-400';
-          if (node.libraryId && typeof node.libraryId === 'string' && node.libraryId.startsWith('ch_')) {
-            const off = Number(node.libraryId.slice(3));
-            if (off === 0) {
-              dynamicColor = 'text-cyan-400';
-            } else {
-              const chCol = channelColors && (channelColors[off] || channelColors[node.channelOffset || 0]);
-              if (chCol && chCol !== 'transparent') dynamicColor = chCol;
-            }
-          }
+          // アイコンの色はnode.iconColorを優先、なければcolorにフォールバック
+          const iconColor = node.iconColor || node.color || 'text-cyan-400';
           const dynamicLabel = node.label;
           const dynamicSubLabel = node.subLabel;
 
@@ -139,12 +128,12 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
                     <div className="w-2 h-2 rounded-full bg-slate-500" />
                   )}
                 </div>
-                {/* Icon: prefer live channel color for Prism channels; support rgb(...) or CSS class */}
+                {/* Icon: iconColorを使用、rgb(...)形式とCSSクラスの両方をサポート */}
                 {(() => {
-                  if (!isUnavailable && typeof dynamicColor === 'string' && dynamicColor.startsWith && dynamicColor.startsWith('rgb')) {
-                    return <NodeIcon className="w-4 h-4" style={{ color: dynamicColor, filter: `drop-shadow(0 0 8px ${dynamicColor})` }} />;
+                  if (!isUnavailable && typeof iconColor === 'string' && iconColor.startsWith && iconColor.startsWith('rgb')) {
+                    return <NodeIcon className="w-4 h-4" style={{ color: iconColor, filter: `drop-shadow(0 0 8px ${iconColor})` }} />;
                   }
-                  return <NodeIcon className={`w-4 h-4 ${isUnavailable ? 'text-slate-500' : dynamicColor}`} />;
+                  return <NodeIcon className={`w-4 h-4 ${isUnavailable ? 'text-slate-500' : iconColor}`} />;
                 })()}
                 <div className="flex-1 min-w-0">
                   {isUnavailable ? (

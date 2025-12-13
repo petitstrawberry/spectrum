@@ -1,7 +1,7 @@
 import React from 'react';
-import { LogOut, RefreshCw, ExternalLink, Music, Volume2, Mic, Plus } from 'lucide-react';
-import { getIconForApp } from '../hooks/useIcons';
+import { LogOut, RefreshCw, ExternalLink, Plus } from 'lucide-react';
 import { useChannelColors } from '../hooks/useChannelColors';
+import { getPrismChannelDisplay, getInputDeviceDisplay } from '../hooks/useNodeDisplay';
 
 interface Props {
   width: number;
@@ -76,7 +76,10 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
             {channelSources.map(channel => {
               const isUsed = isLibraryItemUsed(channel.id);
               const hasApps = channel.hasApps;
-              const FirstIcon = (channel.apps && channel.apps[0] && channel.apps[0].icon) || getIconForApp(channel.apps[0]?.name) || Music;
+              // 共通関数を使用してチャンネルの表示情報を取得
+              const chColor = channelColors[channel.channelOffset];
+              const display = getPrismChannelDisplay(channel, chColor);
+              const DisplayIcon = display.icon;
 
               return (
                 <div
@@ -91,43 +94,30 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                         : 'border-transparent bg-slate-900/20 hover:border-slate-700/50 hover:bg-slate-900/40 hover:ring-2 hover:ring-slate-700/20 cursor-grab active:cursor-grabbing')
                   }
                 >
-                  <div className={`w-10 text-[10px] font-mono font-bold ${!channel.hasApps ? 'text-slate-600' : (channel.isMain ? 'text-cyan-400' : 'text-cyan-400')}`}>
+                  <div className={`w-10 text-[10px] font-mono font-bold ${!channel.hasApps ? 'text-slate-600' : 'text-cyan-400'}`}>
                     {channel.channelLabel}
                   </div>
 
-                  {channel.isMain ? (
-                    <div className="flex-1 flex items-center gap-2 min-w-0">
-                      <div className="w-5 h-5 rounded flex items-center justify-center bg-cyan-900/50 text-cyan-400">
-                          <Volume2 className="w-3 h-3" />
-                        </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[10px] text-cyan-300">MAIN</div>
-                        {channel.apps.length > 1 && (
-                          <div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>
-                        )}
-                      </div>
+                  <div className="flex-1 flex items-center gap-2 min-w-0">
+                    <div className={`w-5 h-5 rounded flex items-center justify-center ${channel.isMain ? 'bg-cyan-900/50' : 'bg-slate-950'}`}>
+                      {(() => {
+                        const iconColor = display.iconColor;
+                        if (typeof iconColor === 'string' && iconColor.startsWith('rgb')) {
+                          return <DisplayIcon className="w-3 h-3" style={{ color: iconColor }} />;
+                        }
+                        return <DisplayIcon className={`w-3 h-3 ${iconColor}`} />;
+                      })()}
                     </div>
-                  ) : hasApps ? (
-                    <div className="flex-1 flex items-center gap-2 min-w-0">
-                      <div className={`w-5 h-5 rounded flex items-center justify-center bg-slate-950`}>
-                        <FirstIcon className="w-3 h-3" style={{ color: channelColors[channel.channelOffset] || undefined }} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <div className="text-[10px] text-slate-300 truncate" title={channel.apps.map((a: any) => a.name).join(', ')}>
-                            {channel.apps[0]?.name}
-                          </div>
-                          {/* client multiplicity badge removed */}
-                        </div>
-                        {channel.apps.length > 1 && (<div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>)}
-                      </div>
-                    </div>
-                  ) : (
                     <div className="flex-1 min-w-0">
-                      <div className="text-[10px] text-slate-600 italic truncate">Empty</div>
+                      <div className={`text-[10px] truncate ${channel.isMain ? 'text-cyan-300' : (hasApps ? 'text-slate-300' : 'text-slate-600 italic')}`} title={channel.apps.map((a: any) => a.name).join(', ')}>
+                        {display.subLabel}
+                      </div>
+                      {channel.apps.length > 1 && (
+                        <div className="text-[8px] text-slate-500">{channel.apps.length} apps</div>
+                      )}
                     </div>
-                  )
-                  }
+                  </div>
+
                   {!isUsed && (
                     <Plus className="w-3 h-3 text-slate-600 group-hover:text-cyan-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />
                   )}
@@ -142,6 +132,9 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
               otherInputDevices.map(device => {
                 const deviceLibraryId = `dev_${device.deviceId}`;
                 const isUsed = isLibraryItemUsed(deviceLibraryId);
+                // 共通関数を使用してデバイスの表示情報を取得
+                const display = getInputDeviceDisplay(device);
+                const DeviceIcon = display.icon;
 
                 return (
                   <div
@@ -158,13 +151,13 @@ export default function LeftSidebar({ width, isRefreshing, inputSourceMode, hand
                     }
                   >
                     <div className="w-6 h-6 rounded-md flex items-center justify-center relative z-10 bg-slate-800 text-slate-500 group-hover:bg-amber-900/50 group-hover:text-amber-400">
-                        <Mic className="w-3 h-3" />
+                      <DeviceIcon className="w-3 h-3" />
                     </div>
                     <div className="flex-1 min-w-0 relative z-10">
                       <div className="text-[10px] font-medium truncate text-slate-300">
-                        {device.name}
+                        {display.label}
                       </div>
-                      <div className="text-[8px] text-slate-600">{device.channelCount}ch</div>
+                      <div className="text-[8px] text-slate-600">{display.subLabel}</div>
                     </div>
                     {!isUsed && (
                       <Plus className="w-3 h-3 text-slate-600 group-hover:text-amber-400 transition-colors opacity-0 group-hover:opacity-100 relative z-10" />

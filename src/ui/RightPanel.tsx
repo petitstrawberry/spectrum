@@ -1,8 +1,8 @@
 // @ts-nocheck
 import React, { useState, useEffect } from 'react';
 import { Workflow, Plus } from 'lucide-react';
-import getIconForDevice from '../hooks/useIcons';
-import getColorForDevice from '../hooks/useColors';
+import { getIconForDevice } from '../hooks/useIcons';
+import { getColorForDevice } from '../hooks/useColors';
 import type { UseDevicesReturn } from '../hooks/useDevices';
 
 interface Props {

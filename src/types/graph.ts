@@ -24,7 +24,9 @@ export interface UINode {
   subLabel?: string;
   /** アイコン */
   icon: LucideIcon;
-  /** 色クラス */
+  /** アイコンの色（RGB形式またはTailwindクラス） */
+  iconColor?: string;
+  /** 外枠の色クラス */
   color: string;
   /** キャンバス上のX座標 */
   x: number;

@@ -33,7 +33,8 @@ import RightPanel from './RightPanel';
 import MixerPanel from './MixerPanel';
 import { getIconForApp, getIconForDevice } from '../hooks/useIcons';
 import { useChannelColors } from '../hooks/useChannelColors';
-import getColorForDevice from '../hooks/useColors';
+import { getColorForDevice } from '../hooks/useColors';
+import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, getVirtualOutputDisplay } from '../hooks/useNodeDisplay';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { addSourceNode, addSinkNode, removeNode } from '../lib/api';
 
@@ -60,6 +61,7 @@ interface NodeData {
   label: string;
   subLabel?: string;
   icon: React.ComponentType<{ className?: string }>;
+  iconColor?: string;
   color: string;
   x: number;
   y: number;
@@ -199,59 +201,63 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         const libraryId = id;
         const type: NodeType = n.type === 'sink' ? 'target' : (n.type === 'bus' ? 'bus' : 'source');
 
-        // Base fields
+        // Base fields (defaults from useGraph)
+        let label = n.label || `Node ${handle}`;
         let subLabel = n.subLabel || undefined;
         let icon = n.icon || Music;
         let color = n.color || 'text-cyan-400';
+        let iconColor = n.iconColor || color;
 
         // Normalize channelOffset/channel for prism sources and enrich with channelSources data
         const channelOffset = n.channelOffset ?? n.channel ?? undefined;
         const srcType = n.sourceType === 'device' ? 'device' : 'prism';
+
         if (type === 'source' && (srcType === 'prism' || srcType === 'prism-channel') && typeof channelOffset === 'number') {
-          // Match channelSources robustly: backend may supply channel as absolute offset
-          // or as a stereo-pair index. Accept either form.
+          // Match channelSources robustly
           const ch = channelSources.find((c: any) => {
             const cOff = c.channelOffset;
-            // direct match (both use absolute channel offset)
             if (cOff === channelOffset) return true;
-            // backend provided stereo-pair index while cOff is absolute offset (i*2)
             if (cOff === channelOffset * 2) return true;
-            // backend provided absolute offset while cOff is stereo-pair index (unlikely) -> compare halves
             if (Math.floor(cOff / 2) === channelOffset) return true;
             return false;
           });
           if (ch) {
-            // For MAIN (first stereo pair) always use Music icon and cyan color
-            if (ch.isMain) {
-              subLabel = 'MAIN';
-              icon = Music;
-              color = 'text-cyan-400';
-            } else {
-              subLabel = (ch.apps && ch.apps.length > 0) ? ch.apps[0].name : subLabel;
-              icon = (ch.apps && ch.apps[0] && ch.apps[0].icon) || getIconForApp(ch.apps?.[0]?.name) || Music;
-              const chColor = channelColors && (channelColors[ch.channelOffset ?? 0] || channelColors[0]);
-              // Avoid white/blank upstream colors clobbering our styling
-              const upstreamIsWhite = typeof color === 'string' && ['white', '#fff', '#ffffff'].includes(color.toLowerCase());
-              if (!upstreamIsWhite) color = chColor || color;
-            }
+            // 共通関数を使用してPrismチャンネルの表示情報を取得
+            const chColor = channelColors?.[ch.channelOffset ?? 0];
+            const display = getPrismChannelDisplay(ch, chColor);
+            label = display.label;
+            subLabel = display.subLabel;
+            icon = display.icon;
+            iconColor = display.iconColor;
           }
-          else {
-            // No channelSources entry found — if this is the MAIN pair (channelOffset 0), force cyan + Music
-            if (channelOffset === 0) {
-              subLabel = 'MAIN';
-              icon = Music;
-              color = 'text-cyan-400';
-            }
-          }
+        } else if (type === 'source' && srcType === 'device') {
+          // 入力デバイスの表示情報
+          const display = getInputDeviceDisplay({
+            deviceId: n.deviceId ?? 0,
+            name: n.label || 'Device',
+            channelCount: n.portCount || 2,
+          });
+          label = display.label;
+          subLabel = display.subLabel;
+          icon = display.icon;
+          iconColor = display.iconColor;
+        } else if (type === 'target') {
+          // Sinkの表示情報
+          const display = getSinkDeviceDisplay(n.label || 'Output', n.portCount || 2);
+          label = display.label;
+          subLabel = display.subLabel;
+          icon = display.icon;
+          iconColor = display.iconColor;
         }
 
         return {
           id,
           libraryId,
           type,
-          label: n.label || `Node ${handle}`,
+          label,
           subLabel,
           icon,
+          iconColor,
           color,
           x: typeof n.x === 'number' ? n.x : 100,
           y: typeof n.y === 'number' ? n.y : 100,
@@ -260,7 +266,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           channelCount: n.portCount || 2,
           channelOffset,
           sourceType: srcType === 'device' ? 'device' : 'prism-channel',
-          deviceId: n.deviceId ?? n.sinkDeviceId ?? undefined,
+          deviceId: n.deviceId ?? undefined,
           deviceName: undefined,
           channelMode: 'stereo',
           available: true,
@@ -701,7 +707,6 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           isPanning={isPanning}
           canvasTransform={canvasTransform}
           nodes={[...(nodesFromGraph || []), ...placedNodes]}
-          channelColors={channelColors}
           systemActiveOutputs={devices?.activeOutputs || []}
           onMoveNode={(id: string, x: number, y: number) => {
             // If rendering v2 nodes, update graph positions via provided graph prop

@@ -67,6 +67,8 @@ pub async fn add_source_node(
 ) -> Result<u32, String> {
     let processor = get_graph_processor();
 
+    // Debug log: indicate frontend requested adding a source
+    println!("[api] add_source_node invoked: source_id={:?}, label={:?}", source_id, label);
     let node: Box<dyn AudioNode> = match source_id {
         SourceIdDto::PrismChannel { channel } => {
             let label = label.unwrap_or_else(|| format!("Prism Ch {}", channel));
@@ -104,6 +106,8 @@ pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, 
 pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result<u32, String> {
     let processor = get_graph_processor();
 
+    // Debug log: indicate frontend requested adding a sink
+    println!("[api] add_sink_node invoked: sink={:?}, label={:?}", sink, label);
     let label = label.unwrap_or_else(|| format!("Output {}", sink.device_id));
     let sink_id = crate::audio::sink::SinkId::from(sink);
     let node: Box<dyn AudioNode> = Box::new(crate::audio::sink::SinkNode::new(sink_id, &label));

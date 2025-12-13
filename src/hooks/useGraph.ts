@@ -30,6 +30,7 @@ import {
   Speaker,
   Radio,
   Monitor,
+  Music,
   Workflow,
   Cast,
   Video,
@@ -130,17 +131,67 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
   switch (info.type) {
     case 'source': {
       const src: any = info.source_id as any;
-      const sourceType = (src.type === 'prism' || src.type === 'prism_channel') ? 'prism' : 'device';
-      const channel = src.channel;
-      const deviceId = src.device_id !== undefined ? src.device_id : undefined;
+      // Normalize variant names (accept prism/prism_channel/prism-channel and device/input_device variants)
+      const rawType = (src && src.type) ? String(src.type).toLowerCase() : '';
+      const isPrism = rawType.includes('prism');
+      const isDevice = !isPrism && (rawType.includes('device') || rawType.includes('input'));
+
+      // Extract channel/channel_offset from multiple possible field names
+      const channelRaw = (src && (src.channel ?? src.channel_offset ?? src.channelOffset ?? src.stereo_pair ?? src.stereoPair ?? src.index));
+      const channel = typeof channelRaw === 'number' ? channelRaw : undefined;
+      // Derive stereo-pair index from raw channel info when possible. Backend may supply
+      // either an absolute channel offset (0..N) or a stereo-pair index (0..31).
+      let stereoPairIndex: number | undefined = undefined;
+      if (typeof channelRaw === 'number') {
+        // If field name explicitly suggests stereo pair, prefer it
+        if (typeof (src && (src.stereo_pair ?? src.stereoPair)) === 'number') {
+          stereoPairIndex = src.stereo_pair ?? src.stereoPair;
+        } else if (typeof (src && (src.channel_offset ?? src.channelOffset)) === 'number' && String(src.channel_offset ?? src.channelOffset).indexOf('.') === -1) {
+          // channel_offset might be absolute; still compute pair index
+          stereoPairIndex = Math.floor(channelRaw / 2);
+        } else {
+          // Fallback: compute pair index from absolute channel
+          stereoPairIndex = Math.floor(channelRaw / 2);
+        }
+      }
+
+      // Extract device id only for explicit device-type sources
+      const deviceId = isDevice ? (src.device_id ?? src.deviceId ?? src.device ?? undefined) : undefined;
+
+      const sourceType: 'prism' | 'device' = isPrism ? 'prism' : (isDevice ? 'device' : 'prism');
+
+      // MAIN detection: prefer explicit flag, then stereo-pair/index == 0, then absolute channel === 0, then label match
+      const isMain = isPrism && (
+        src.is_main === true ||
+        stereoPairIndex === 0 ||
+        channel === 0 ||
+        (!!info.label && String(info.label).toLowerCase().includes('main'))
+      );
+
+      // MAIN detection already includes stereoPairIndex/channel==0; use `isMain` directly
+      const icon = isMain ? Music : getIconForSourceType(sourceType);
+      const color = isMain ? 'text-cyan-400' : getColorForSourceType(sourceType);
+
+      // Build sensible subLabel: MAIN for main, otherwise Prism Ch <n> or Device <id>
+      let subLabel: string;
+      if (isMain) {
+        subLabel = 'MAIN';
+      } else if (sourceType === 'prism') {
+        subLabel = typeof channel === 'number' ? `Empty` : (info.label || 'Prism');
+      } else {
+        subLabel = deviceId !== undefined ? `Device ${deviceId}` : (info.label || 'Device');
+      }
+
+      console.log('nodeInfoToUINode - source', { info, sourceType, deviceId, channel, stereoPairIndex, isMain, subLabel, color });
 
       return {
         handle: info.handle,
         type: 'source',
         label: info.label,
-        subLabel: sourceType === 'prism' ? `Prism Ch ${channel}` : `Device ${deviceId}`,
-        icon: getIconForSourceType(sourceType),
-        color: getColorForSourceType(sourceType),
+        subLabel,
+        icon,
+        iconColor: color, // デフォルトはcolorと同じ、後でchannelColorsで上書き可能
+        color,
         x: position.x,
         y: position.y,
         portCount: info.port_count,
@@ -159,6 +210,7 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
         label: info.label,
         subLabel: `${info.port_count}ch`,
         icon: Workflow,
+        iconColor: BUS_COLORS[colorIndex],
         color: BUS_COLORS[colorIndex],
         x: position.x,
         y: position.y,
@@ -173,13 +225,15 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
       };
     }
     case 'sink': {
+      const sinkColor = getColorForSink(info.label);
       return {
         handle: info.handle,
         type: 'sink',
         label: info.label,
         subLabel: `${info.port_count}ch`,
         icon: getIconForSink(info.label),
-        color: getColorForSink(info.label),
+        iconColor: sinkColor,
+        color: sinkColor,
         x: position.x,
         y: position.y,
         portCount: info.port_count,
