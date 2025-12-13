@@ -481,6 +481,75 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     return allNodes.find((n: any) => n && n.id === selectedNodeId) || null;
   }, [selectedNodeId, nodesFromGraph, placedNodes]);
 
+  // Mixer strips: input-side edges connected into the selected output/bus.
+  // UI-only for now (no controls wired).
+  const mixerStrips = useMemo(() => {
+    const targetId = (selectedNodeData && (selectedNodeData.type === 'target' || selectedNodeData.type === 'bus'))
+      ? selectedNodeData.id
+      : null;
+    if (!targetId) return [];
+
+    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    const nodesById = new Map<string, any>(allNodes.map((n: any) => [n.id, n]));
+
+    const incoming = (connectionsFromGraph || []).filter((c: any) => c && c.toNodeId === targetId);
+    if (incoming.length === 0) return [];
+
+    const sorted = [...incoming].sort((a: any, b: any) => {
+      const an = String(a.fromNodeId || '').localeCompare(String(b.fromNodeId || ''));
+      if (an !== 0) return an;
+      const ac = Number(a.fromChannel) - Number(b.fromChannel);
+      if (ac !== 0) return ac;
+      return Number(a.toChannel) - Number(b.toChannel);
+    });
+
+    const out: any[] = [];
+    for (let i = 0; i < sorted.length; i++) {
+      const c = sorted[i];
+      if (!c) continue;
+      const next = sorted[i + 1];
+
+      const canPair = !!next &&
+        c.fromNodeId === next.fromNodeId &&
+        c.toNodeId === next.toNodeId &&
+        Number(c.fromChannel) % 2 === 0 &&
+        Number(next.fromChannel) === Number(c.fromChannel) + 1 &&
+        Number(next.toChannel) === Number(c.toChannel) + 1;
+
+      const sourceNode = nodesById.get(c.fromNodeId);
+      if (!sourceNode) continue;
+
+      if (canPair) {
+        out.push({
+          id: `${c.id}+${next.id}`,
+          connectionIds: [c.id, next.id],
+          sourceNode,
+          targetId,
+          fromChannels: [c.fromChannel, next.fromChannel],
+          toChannels: [c.toChannel, next.toChannel],
+          sendLevel: c.sendLevel,
+          muted: !!c.muted && !!next.muted,
+          stereoLinked: true,
+        });
+        i++;
+      } else {
+        out.push({
+          id: c.id,
+          connectionIds: [c.id],
+          sourceNode,
+          targetId,
+          fromChannels: [c.fromChannel],
+          toChannels: [c.toChannel],
+          sendLevel: c.sendLevel,
+          muted: !!c.muted,
+          stereoLinked: false,
+        });
+      }
+    }
+
+    return out;
+  }, [selectedNodeData, connectionsFromGraph, nodesFromGraph, placedNodes]);
+
   // Refresh graph when plugins change
   const handlePluginsChange = useCallback(() => {
     const g = (props as any).graph;
@@ -1101,7 +1170,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
 
-      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} selectedBus={selectedBusData} selectedNode={selectedNodeData} onPluginsChange={handlePluginsChange} />
+      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} selectedBus={selectedBusData} selectedNode={selectedNodeData} mixerStrips={mixerStrips} onPluginsChange={handlePluginsChange} />
     </div>
   );
 }
