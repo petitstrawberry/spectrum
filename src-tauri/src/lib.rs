@@ -121,6 +121,7 @@ pub use api::restore_state;
 // System Commands
 pub use api::start_audio;
 pub use api::stop_audio;
+pub use api::stop_output_runtime;
 pub use api::get_system_status;
 pub use api::set_buffer_size;
 pub use api::get_app_icon_by_pid;
@@ -317,6 +318,11 @@ pub fn run() {
             // Initialize audio engine on app startup
             println!("[Spectrum] Initializing audio engine...");
 
+            // Start capture first so the initial output can render actual audio.
+            if let Err(e) = crate::capture::start_capture() {
+                eprintln!("[Spectrum] Warning: Failed to start capture on startup: {}", e);
+            }
+
             // Find preferred output device (aggregate or system default)
             if let Some(device_id) = crate::device::find_preferred_output_device() {
                 match crate::audio::output::start_output_v2(device_id) {
@@ -328,6 +334,9 @@ pub fn run() {
                     Err(e) => {
                         eprintln!("[Spectrum] Warning: Failed to initialize audio engine: {}", e);
                         eprintln!("[Spectrum] The app will start without audio output.");
+
+                        // Best-effort cleanup if output fails.
+                        crate::capture::stop_capture();
                     }
                 }
             } else {
@@ -373,6 +382,7 @@ pub fn run() {
             // v2 API - System
             start_audio,
             stop_audio,
+            stop_output_runtime,
             get_system_status,
             get_app_icon_by_pid,
             set_buffer_size,

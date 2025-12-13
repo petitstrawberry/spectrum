@@ -76,8 +76,16 @@ pub async fn add_source_node(
         }
         SourceIdDto::InputDevice { device_id, channel } => {
             let label = label.unwrap_or_else(|| format!("Input {}/{}", device_id, channel));
-            Box::new(crate::audio::source::SourceNode::new_device(
-                device_id, channel, label,
+            // 外部入力デバイスはデバイスの実ch数に合わせてポート数を作る。
+            // 以前は常に2ch(ステレオ)固定だったため、UI側が一瞬正しいch数で描画しても
+            // 次のスナップショット更新で2chへ戻ってしまい、Canvas上で壊れる原因になっていた。
+            let channel_count = crate::capture::get_device_input_channels(device_id) as usize;
+            let channel_count = if channel_count == 0 { 2 } else { channel_count };
+            Box::new(crate::audio::source::SourceNode::new_device_with_channels(
+                device_id,
+                channel,
+                label,
+                channel_count,
             ))
         }
     };
@@ -585,13 +593,19 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
 
     for node_info in &state.nodes {
         let (old_handle, new_handle) = match node_info {
-            NodeInfoDto::Source { handle, source_id, label, .. } => {
+            NodeInfoDto::Source { handle, source_id, port_count, label } => {
                 let node: Box<dyn AudioNode> = match source_id {
                     SourceIdDto::PrismChannel { channel } => {
                         Box::new(SourceNode::new_prism(*channel, label.clone()))
                     }
                     SourceIdDto::InputDevice { device_id, channel } => {
-                        Box::new(SourceNode::new_device(*device_id, *channel, label.clone()))
+                        let port_count = (*port_count).max(1) as usize;
+                        Box::new(SourceNode::new_device_with_channels(
+                            *device_id,
+                            *channel,
+                            label.clone(),
+                            port_count,
+                        ))
                     }
                 };
                 (*handle, processor.add_node(node))
@@ -708,11 +722,19 @@ pub async fn start_audio(device_id: u32) -> Result<(), String> {
         device_id
     };
 
-    if start_output_v2(target_device).is_err() {
+    if let Err(e) = start_output_v2(target_device) {
         crate::capture::stop_capture();
-        return Err("Failed to start output runtime".to_string());
+        return Err(e);
     }
 
+    Ok(())
+}
+
+/// Stop only the physical output runtime (keep capture running).
+/// This is used for output switching without resetting capture/ringbuffers.
+#[tauri::command]
+pub async fn stop_output_runtime() -> Result<(), String> {
+    crate::audio::output::stop_output_v2();
     Ok(())
 }
 

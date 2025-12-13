@@ -12,7 +12,7 @@ use crate::audio::sink::SinkNode;
 use crate::audio::source::SourceId;
 use crate::vdsp::VDsp;
 use coreaudio::audio_unit::macos_helpers::{
-    get_audio_device_ids, get_device_name, set_device_sample_rate,
+    get_device_name, set_device_sample_rate,
 };
 use coreaudio::audio_unit::{AudioUnit, Element, SampleFormat, Scope, StreamFormat};
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
@@ -26,7 +26,8 @@ use coreaudio::sys::{
 use parking_lot::RwLock;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{mpsc, Arc, LazyLock};
+use std::time::Duration;
 
 /// Sample rate for audio output
 const SAMPLE_RATE: f64 = 48000.0;
@@ -137,21 +138,34 @@ pub fn start_output_v2(device_id: u32) -> Result<(), String> {
         });
     }
 
-    // Start output thread
+    // Start output thread, and wait until AudioUnit actually starts (or fails).
+    let (started_tx, started_rx) = mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        output_thread_v2(device_id, output_channels, running_clone);
+        output_thread_v2(device_id, output_channels, running_clone, Some(started_tx));
     });
 
-    Ok(())
+    match started_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Timed out while starting audio output".to_string()),
+    }
 }
 
 /// Output thread function - v2 architecture using GraphProcessor
-fn output_thread_v2(device_id: u32, output_channels: u32, running: Arc<AtomicBool>) {
+fn output_thread_v2(
+    device_id: u32,
+    output_channels: u32,
+    running: Arc<AtomicBool>,
+    started_tx: Option<mpsc::Sender<Result<(), String>>>,
+) {
     // Create audio unit for output
     let mut audio_unit = match AudioUnit::new(coreaudio::audio_unit::IOType::HalOutput) {
         Ok(au) => au,
         Err(e) => {
             eprintln!("[AudioOutput v2] Failed to create audio unit: {:?}", e);
+            if let Some(tx) = started_tx {
+                let _ = tx.send(Err(format!("Failed to create audio unit: {:?}", e)));
+            }
             running.store(false, Ordering::SeqCst);
             return;
         }
@@ -165,6 +179,9 @@ fn output_thread_v2(device_id: u32, output_channels: u32, running: Arc<AtomicBoo
         Some(&device_id),
     ) {
         eprintln!("[AudioOutput v2] Failed to set device: {:?}", e);
+        if let Some(tx) = started_tx {
+            let _ = tx.send(Err(format!("Failed to set device: {:?}", e)));
+        }
         running.store(false, Ordering::SeqCst);
         return;
     }
@@ -184,8 +201,31 @@ fn output_thread_v2(device_id: u32, output_channels: u32, running: Arc<AtomicBoo
         Some(&stream_format.to_asbd()),
     ) {
         eprintln!("[AudioOutput v2] Failed to set stream format: {:?}", e);
+        if let Some(tx) = started_tx {
+            let _ = tx.send(Err(format!("Failed to set stream format: {:?}", e)));
+        }
         running.store(false, Ordering::SeqCst);
         return;
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CapturePairKey {
+        PrismAny { pair_idx: usize },
+        InputDevice { device_id: u32, pair_idx: usize },
+    }
+
+    struct CapturePairCacheEntry {
+        key: CapturePairKey,
+        left: Vec<f32>,
+        right: Vec<f32>,
+        filled: bool,
+        used: bool,
+    }
+
+    // Thread-local cache to avoid double-advancing read positions when L/R are requested separately.
+    thread_local! {
+        static CAPTURE_PAIR_CACHE: std::cell::RefCell<Vec<CapturePairCacheEntry>> =
+            std::cell::RefCell::new(Vec::new());
     }
 
     let running_callback = running.clone();
@@ -213,54 +253,127 @@ fn output_thread_v2(device_id: u32, output_channels: u32, running: Arc<AtomicBoo
         // Get graph processor
         let processor = get_graph_processor();
 
-        // Define source reader (reads from capture system)
-        let read_source = |source_id: &SourceId, buf: &mut [f32]| {
-            match source_id {
-                SourceId::PrismChannel { channel } => {
-                    // Read mono channel - use channel as pair index * 2 + offset
-                    let pair_idx = *channel / 2;
-                    let is_right = *channel % 2 == 1;
-                    let mut dummy = vec![0.0f32; buf.len()];
-                    if is_right {
-                        crate::audio_capture::read_channel_audio_any(
-                            (pair_idx * 2) as usize,
-                            (pair_idx * 2 + 1) as usize,
-                            &mut dummy,
-                            buf,
-                        );
-                    } else {
-                        crate::audio_capture::read_channel_audio_any(
-                            (pair_idx * 2) as usize,
-                            (pair_idx * 2 + 1) as usize,
-                            buf,
-                            &mut dummy,
-                        );
-                    }
-                }
-                SourceId::InputDevice { device_id: dev_id, channel } => {
-                    // Read from input device
-                    let pair_idx = *channel / 2;
-                    let is_right = *channel % 2 == 1;
-                    let mut dummy = vec![0.0f32; buf.len()];
-                    if is_right {
-                        crate::audio_capture::read_channel_audio(
-                            *dev_id,
-                            (pair_idx * 2) as usize,
-                            (pair_idx * 2 + 1) as usize,
-                            &mut dummy,
-                            buf,
-                        );
-                    } else {
-                        crate::audio_capture::read_channel_audio(
-                            *dev_id,
-                            (pair_idx * 2) as usize,
-                            (pair_idx * 2 + 1) as usize,
-                            buf,
-                            &mut dummy,
-                        );
-                    }
-                }
+        // Reset per-callback cache state (keep allocations for RT safety)
+        CAPTURE_PAIR_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            for e in cache.iter_mut() {
+                e.filled = false;
+                e.used = false;
             }
+        });
+
+        // Define source reader (reads from capture system)
+        let read_source = |source_id: &SourceId, out: &mut [f32]| {
+            let frames = out.len();
+            if frames == 0 {
+                return;
+            }
+
+            let (key, left_ch, right_ch, want_right) = match source_id {
+                SourceId::PrismChannel { channel } => {
+                    let pair_idx = (*channel as usize) / 2;
+                    (
+                        CapturePairKey::PrismAny { pair_idx },
+                        pair_idx * 2,
+                        pair_idx * 2 + 1,
+                        (*channel % 2) == 1,
+                    )
+                }
+                SourceId::InputDevice { device_id, channel } => {
+                    let pair_idx = (*channel as usize) / 2;
+                    (
+                        CapturePairKey::InputDevice {
+                            device_id: *device_id,
+                            pair_idx,
+                        },
+                        pair_idx * 2,
+                        pair_idx * 2 + 1,
+                        (*channel % 2) == 1,
+                    )
+                }
+            };
+
+            CAPTURE_PAIR_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+
+                let mut entry_idx = None;
+                for (i, e) in cache.iter_mut().enumerate() {
+                    if e.key == key {
+                        e.used = true;
+                        entry_idx = Some(i);
+                        break;
+                    }
+                }
+
+                let entry_idx = match entry_idx {
+                    Some(i) => i,
+                    None => {
+                        // Reuse an unused slot if possible to avoid growing the Vec.
+                        if let Some((i, e)) = cache.iter_mut().enumerate().find(|(_, e)| !e.used) {
+                            e.key = key;
+                            e.used = true;
+                            e.filled = false;
+                            i
+                        } else {
+                            cache.push(CapturePairCacheEntry {
+                                key,
+                                left: Vec::new(),
+                                right: Vec::new(),
+                                filled: false,
+                                used: true,
+                            });
+                            cache.len() - 1
+                        }
+                    }
+                };
+
+                // Ensure capacity matches current callback frame count
+                if cache[entry_idx].left.len() != frames {
+                    cache[entry_idx].left.resize(frames, 0.0);
+                }
+                if cache[entry_idx].right.len() != frames {
+                    cache[entry_idx].right.resize(frames, 0.0);
+                }
+
+                // Read this pair at most once per callback.
+                if !cache[entry_idx].filled {
+                    {
+                        let entry = &mut cache[entry_idx];
+                        let left_buf: &mut [f32] = &mut entry.left;
+                        let right_buf: &mut [f32] = &mut entry.right;
+                        match key {
+                            CapturePairKey::PrismAny { .. } => {
+                                crate::audio_capture::read_channel_audio_any(
+                                    left_ch,
+                                    right_ch,
+                                    left_buf,
+                                    right_buf,
+                                );
+                            }
+                            CapturePairKey::InputDevice {
+                                device_id: input_device_id,
+                                ..
+                            } => {
+                                crate::audio_capture::read_input_audio(
+                                    input_device_id,
+                                    device_id,
+                                    left_ch,
+                                    right_ch,
+                                    left_buf,
+                                    right_buf,
+                                );
+                            }
+                        }
+                        entry.filled = true;
+                    }
+                }
+
+                if want_right {
+                    out.copy_from_slice(&cache[entry_idx].right[..frames]);
+                } else {
+                    out.copy_from_slice(&cache[entry_idx].left[..frames]);
+                }
+            });
         };
 
         // Process the audio graph
@@ -307,6 +420,9 @@ fn output_thread_v2(device_id: u32, output_channels: u32, running: Arc<AtomicBoo
         Ok(())
     }) {
         eprintln!("[AudioOutput v2] Failed to set render callback: {:?}", e);
+        if let Some(tx) = started_tx {
+            let _ = tx.send(Err(format!("Failed to set render callback: {:?}", e)));
+        }
         running.store(false, Ordering::SeqCst);
         return;
     }
@@ -314,14 +430,24 @@ fn output_thread_v2(device_id: u32, output_channels: u32, running: Arc<AtomicBoo
     // Initialize and start
     if let Err(e) = audio_unit.initialize() {
         eprintln!("[AudioOutput v2] Failed to initialize AudioUnit: {:?}", e);
+        if let Some(tx) = started_tx {
+            let _ = tx.send(Err(format!("Failed to initialize AudioUnit: {:?}", e)));
+        }
         running.store(false, Ordering::SeqCst);
         return;
     }
 
     if let Err(e) = audio_unit.start() {
         eprintln!("[AudioOutput v2] Failed to start AudioUnit: {:?}", e);
+        if let Some(tx) = started_tx {
+            let _ = tx.send(Err(format!("Failed to start AudioUnit: {:?}", e)));
+        }
         running.store(false, Ordering::SeqCst);
         return;
+    }
+
+    if let Some(tx) = started_tx {
+        let _ = tx.send(Ok(()));
     }
 
     println!("[AudioOutput v2] Started successfully, waiting for stop signal...");

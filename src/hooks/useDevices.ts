@@ -293,7 +293,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         console.debug('useDevices.stopOutput: skipping stop, not active', deviceId);
         return;
       }
-      await invoke('stop_audio');
+      await invoke('stop_output_runtime');
       setActiveOutputs(prev => prev.filter(id => id !== deviceId));
     } catch (e) {
       console.error('Failed to stop output:', e);

@@ -198,11 +198,22 @@ impl GraphProcessor {
             if let Some(node) = graph.get_node_mut(handle) {
                 // Downcast to get source_id
                 if let Some(source) = node.as_any_mut().downcast_mut::<SourceNode>() {
-                    let source_id = source.source_id().clone();
+                    let base_source_id = source.source_id().clone();
                     // Read each output port
                     for port_idx in 0..source.output_port_count() {
                         if let Some(buf) = source.output_buffer_mut(PortId::new(port_idx as u8)) {
                             let samples = buf.samples_mut();
+                            // SourceNode はステレオ(複数ポート)を持つが、source_id はベース(左ch)のみを保持している。
+                            // 各ポートで channel を port_idx 分オフセットして読み分ける。
+                            let source_id = match &base_source_id {
+                                SourceId::PrismChannel { channel } => SourceId::PrismChannel {
+                                    channel: channel.saturating_add(port_idx as u8),
+                                },
+                                SourceId::InputDevice { device_id, channel } => SourceId::InputDevice {
+                                    device_id: *device_id,
+                                    channel: channel.saturating_add(port_idx as u8),
+                                },
+                            };
                             read_source_fn(&source_id, samples);
                             buf.set_valid_frames(frames);
                             buf.update_meters();
@@ -280,10 +291,19 @@ impl GraphProcessor {
         for handle in graph.source_nodes().collect::<Vec<_>>() {
             if let Some(node) = graph.get_node_mut(handle) {
                 if let Some(source) = node.as_any_mut().downcast_mut::<SourceNode>() {
-                    let source_id = source.source_id().clone();
+                    let base_source_id = source.source_id().clone();
                     for port_idx in 0..source.output_port_count() {
                         if let Some(buf) = source.output_buffer_mut(PortId::new(port_idx as u8)) {
                             let samples = buf.samples_mut();
+                            let source_id = match &base_source_id {
+                                SourceId::PrismChannel { channel } => SourceId::PrismChannel {
+                                    channel: channel.saturating_add(port_idx as u8),
+                                },
+                                SourceId::InputDevice { device_id, channel } => SourceId::InputDevice {
+                                    device_id: *device_id,
+                                    channel: channel.saturating_add(port_idx as u8),
+                                },
+                            };
                             read_source_fn(&source_id, samples);
                             buf.set_valid_frames(frames);
                             buf.update_meters();
