@@ -1,7 +1,9 @@
 // @ts-nocheck
 import React from 'react';
 import { Maximize2, Volume2, Monitor } from 'lucide-react';
-import BusPanel, { BusInfo } from './BusPanel';
+import DetailView from './detail/DetailView';
+import type { BusInfo } from './detail/types';
+import type { UINode } from '../types/graph';
 
 // =============================================================================
 // Types
@@ -12,15 +14,16 @@ interface Props {
   masterWidth: number;
   channelSources?: any[];
   selectedBus?: BusInfo | null;
+  selectedNode?: UINode | null;
   onPluginsChange?: () => void;
 }
 
-export default function MixerPanel({ mixerHeight, masterWidth, channelSources = [], selectedBus, onPluginsChange }: Props) {
+export default function MixerPanel({ mixerHeight, masterWidth, channelSources = [], selectedBus, selectedNode, onPluginsChange }: Props) {
   return (
     <div className="bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30" style={{ height: mixerHeight }}>
       {/* Bus Detail Section */}
       <div className="w-64 bg-[#1a1f2e] border-r border-slate-700 flex flex-col shrink-0">
-        <BusPanel bus={selectedBus} onPluginsChange={onPluginsChange} />
+        <DetailView selectedNode={selectedNode} selectedBus={selectedBus} onPluginsChange={onPluginsChange} />
       </div>
 
       {/* Mixer Channels */}

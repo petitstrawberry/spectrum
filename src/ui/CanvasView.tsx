@@ -119,6 +119,9 @@ export default function CanvasView({
         if (typeof onSelectBusId === 'function') onSelectBusId(id);
         // do not clear focusedOutputId (v1 keeps it)
       }
+      if (node?.type !== 'bus') {
+        if (typeof onSelectBusId === 'function') onSelectBusId(null);
+      }
     } catch {
       // ignore
     }
@@ -287,6 +290,7 @@ export default function CanvasView({
         if (e.button !== 0) return;
         try {
           if (typeof onSelectNodeId === 'function') onSelectNodeId(null);
+          if (typeof onSelectBusId === 'function') onSelectBusId(null);
         } catch {
           // ignore
         }
@@ -406,7 +410,15 @@ export default function CanvasView({
             borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
           }
           if (isSelected && !disabled) {
-            borderClass = 'border-white ring-2 ring-white/20';
+            if (node.type === 'bus') {
+              borderClass = 'border-purple-500 ring-2 ring-purple-500/30';
+            } else if (node.type === 'target') {
+              borderClass = 'border-pink-500 ring-2 ring-pink-500/30';
+            } else if (node.type === 'source') {
+              borderClass = isDeviceNode ? 'border-amber-500 ring-2 ring-amber-500/25' : 'border-cyan-500 ring-2 ring-cyan-500/25';
+            } else {
+              borderClass = 'border-slate-200 ring-2 ring-slate-200/20';
+            }
           }
 
           const style: React.CSSProperties = { left: node.x, top: node.y, height: nodeHeight };
@@ -418,6 +430,7 @@ export default function CanvasView({
               key={node.id}
               ref={el => { if (el) nodeRefs.current.set(node.id, el); }}
               onMouseDown={(e) => { if (!disabled || allowDragWhenDisabled) handleNodeMouseDown(e, node.id); }}
+              onClick={(e) => { e.stopPropagation(); }}
               className={`canvas-node absolute w-[180px] ${disabled ? 'bg-slate-900/30' : (isUnavailable ? 'bg-slate-900/50' : 'bg-slate-800')} rounded-lg shadow-xl border-2 group z-10 will-change-transform ${borderClass} ${disabled ? (allowDragWhenDisabled ? 'opacity-40' : 'opacity-40 pointer-events-none') : ''}`}
               style={style}
             >

@@ -474,6 +474,13 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     return null;
   }, [selectedBusId, (graph as any)?.nodes]);
 
+  // Selected node for a general-purpose detail view (bus/source/target)
+  const selectedNodeData = useMemo(() => {
+    if (!selectedNodeId) return null;
+    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    return allNodes.find((n: any) => n && n.id === selectedNodeId) || null;
+  }, [selectedNodeId, nodesFromGraph, placedNodes]);
+
   // Refresh graph when plugins change
   const handlePluginsChange = useCallback(() => {
     const g = (props as any).graph;
@@ -909,7 +916,6 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   return (
     <div
       className="flex flex-col h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden select-none"
-      onClick={() => setSelectedNodeId(null)}
     >
       {/* HEADER */}
       <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-20">
@@ -1095,7 +1101,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
 
-      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} selectedBus={selectedBusData} onPluginsChange={handlePluginsChange} />
+      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} selectedBus={selectedBusData} selectedNode={selectedNodeData} onPluginsChange={handlePluginsChange} />
     </div>
   );
 }
