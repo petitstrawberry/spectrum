@@ -1,18 +1,32 @@
 // @ts-nocheck
 import React, { useState, useEffect } from 'react';
-import { Workflow, Plus } from 'lucide-react';
+import { Workflow, Plus, Trash2 } from 'lucide-react';
 import { getIconForDevice } from '../hooks/useIcons';
 import { getColorForDevice } from '../hooks/useColors';
+import { getBusColor } from '../hooks/useNodeDisplay';
 import type { UseDevicesReturn } from '../hooks/useDevices';
+
+interface BusInfo {
+  id: string;
+  label: string;
+  busId?: string;
+  channelCount: number;
+  plugins?: any[];
+}
 
 interface Props {
   width: number;
   devices?: UseDevicesReturn | null;
+  buses?: BusInfo[];
+  selectedBusId?: string | null;
   isLibraryItemUsed?: (id: string) => boolean;
   handleLibraryMouseDown?: (e: React.MouseEvent, type: string, id: string) => void;
+  onAddBus?: () => Promise<void>;
+  onSelectBus?: (busId: string | null) => void;
+  onDeleteBus?: (busId: string) => void;
 }
 
-export default function RightPanel({ width, devices, isLibraryItemUsed, handleLibraryMouseDown }: Props) {
+export default function RightPanel({ width, devices, buses = [], selectedBusId, isLibraryItemUsed, handleLibraryMouseDown, onAddBus, onSelectBus, onDeleteBus }: Props) {
   const outputDevices = devices?.outputDevices || [];
   const startOutput = devices?.startOutput;
   const stopOutput = devices?.stopOutput;
@@ -94,9 +108,42 @@ export default function RightPanel({ width, devices, isLibraryItemUsed, handleLi
         <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2 mb-3">
           <Workflow className="w-3 h-3" /> Buses / Aux
         </div>
-        <button className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-dashed border-purple-500/50 bg-purple-500/10 hover:bg-purple-500/20 hover:border-purple-400 text-purple-400 hover:text-purple-300 transition-all text-xs font-medium">
+        <button
+          onClick={onAddBus}
+          className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-dashed border-purple-500/50 bg-purple-500/10 hover:bg-purple-500/20 hover:border-purple-400 text-purple-400 hover:text-purple-300 transition-all text-xs font-medium mb-3"
+        >
           <Plus className="w-3.5 h-3.5" /> Add Bus
         </button>
+        {buses.length > 0 && (
+          <div className="space-y-2">
+            {buses.map((bus, idx) => {
+              const busNum = bus.busId ? parseInt(bus.busId.replace('bus_', ''), 10) || (idx + 1) : (idx + 1);
+              const color = getBusColor(busNum);
+              const isSelected = selectedBusId === bus.id;
+              return (
+                <div
+                  key={bus.id}
+                  onClick={() => onSelectBus?.(isSelected ? null : bus.id)}
+                  className={`group flex items-center gap-3 p-2 rounded-lg border cursor-pointer transition-all ${isSelected ? 'border-purple-500 bg-purple-500/20' : 'border-slate-700 bg-slate-800/50 hover:border-purple-500/50'}`}
+                >
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center bg-slate-950`}>
+                    <Workflow className={`w-3.5 h-3.5 ${color}`} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-slate-200 truncate">{bus.label}</div>
+                    <div className="text-[9px] text-slate-500">{bus.channelCount}ch • {bus.plugins?.length || 0} FX</div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onDeleteBus?.(bus.id); }}
+                    className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="p-4 border-b border-slate-800 bg-slate-900/50">

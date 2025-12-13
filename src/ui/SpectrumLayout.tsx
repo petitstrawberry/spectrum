@@ -34,7 +34,7 @@ import MixerPanel from './MixerPanel';
 import { getIconForApp, getIconForDevice } from '../hooks/useIcons';
 import { useChannelColors } from '../hooks/useChannelColors';
 import { getColorForDevice } from '../hooks/useColors';
-import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, getVirtualOutputDisplay } from '../hooks/useNodeDisplay';
+import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, getVirtualOutputDisplay, getBusDisplay } from '../hooks/useNodeDisplay';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { addSourceNode, addSinkNode, removeNode } from '../lib/api';
 
@@ -351,6 +351,14 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           subLabel = display.subLabel;
           icon = display.icon;
           iconColor = display.iconColor;
+        } else if (type === 'bus') {
+          // Busの表示情報
+          const display = getBusDisplay(n.busId || 'bus_1', n.portCount || 2, n.plugins?.length || 0);
+          label = n.label || display.label;
+          subLabel = display.subLabel;
+          icon = display.icon;
+          iconColor = display.iconColor;
+          color = display.iconColor;
         }
 
         return {
@@ -420,6 +428,36 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       if (isTargetDisabled(sel)) setSelectedNodeId(null);
     }
   }, [devices?.activeOutputs, nodesFromGraph, placedNodes, focusedOutputId, selectedNodeId]);
+
+  // Extract bus nodes for RightPanel
+  const busNodes = useMemo(() => {
+    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    return allNodes
+      .filter((n: any) => n.type === 'bus')
+      .map((n: any) => ({
+        id: n.id,
+        label: n.label,
+        busId: n.busId,
+        channelCount: n.channelCount || 2,
+        plugins: n.plugins,
+      }));
+  }, [nodesFromGraph, placedNodes]);
+
+  // Delete bus handler
+  const handleDeleteBus = useCallback(async (busId: string) => {
+    if (!busId?.startsWith('node_')) return;
+    const handle = Number(busId.slice(5));
+    if (Number.isNaN(handle)) return;
+    try {
+      const g = (props as any).graph;
+      if (g && typeof g.deleteNode === 'function') {
+        await g.deleteNode(handle);
+        if (selectedBusId === busId) setSelectedBusId(null);
+      }
+    } catch (e) {
+      console.error('deleteNode failed', e);
+    }
+  }, [props, selectedBusId]);
 
   const log = useCallback((event: string, payload?: any) => {
     try {
@@ -767,7 +805,23 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   // Use the real openPrismApp from ../lib/prismd (imported above)
   // openPrismApp is imported; call it directly where needed
   const reserveBusIdStub = async () => 'bus_1';
-  const addBusStub = async () => {};
+  // Add Bus handler
+  const handleAddBus = useCallback(async () => {
+    const g = (props as any).graph;
+    if (!g || typeof g.addBus !== 'function') {
+      console.error('[SpectrumLayout] graph.addBus not available');
+      return;
+    }
+    // Count existing buses to name the new one
+    const busCount = (nodesFromGraph || []).filter((n: any) => n.type === 'bus').length;
+    const label = `Bus ${busCount + 1}`;
+    try {
+      const handle = await g.addBus(label, 2); // stereo bus
+      console.debug('[SpectrumLayout] addBus ok', { handle, label });
+    } catch (e) {
+      console.error('[SpectrumLayout] addBus failed', e);
+    }
+  }, [props, nodesFromGraph]);
   const getActiveInputCaptures = async () => [];
   // Mirror driver status from devices hook
   useEffect(() => {
@@ -985,7 +1039,17 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           }}
         />
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
-        <RightPanel width={rightSidebarWidth} devices={devices} isLibraryItemUsed={isLibraryItemUsed} handleLibraryMouseDown={handleLibraryMouseDown} />
+        <RightPanel
+          width={rightSidebarWidth}
+          devices={devices}
+          buses={busNodes}
+          selectedBusId={selectedBusId}
+          isLibraryItemUsed={isLibraryItemUsed}
+          handleLibraryMouseDown={handleLibraryMouseDown}
+          onAddBus={handleAddBus}
+          onSelectBus={setSelectedBusId}
+          onDeleteBus={handleDeleteBus}
+        />
       </div>
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
