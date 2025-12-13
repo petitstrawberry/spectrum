@@ -493,7 +493,28 @@ pub async fn open_plugin_ui(instance_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn close_plugin_ui(instance_id: String) -> Result<(), String> {
-    crate::audio_unit_ui::close_audio_unit_ui(&instance_id);
+    let instance_id_clone = instance_id.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+    unsafe {
+        use block2::RcBlock;
+        use objc2::class;
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+
+        let block = RcBlock::new(move || {
+            crate::audio_unit_ui::close_audio_unit_ui(&instance_id_clone);
+            let _ = tx.send(());
+        });
+
+        let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+    }
+
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "Timeout waiting for UI to close".to_string())?;
+
     Ok(())
 }
 

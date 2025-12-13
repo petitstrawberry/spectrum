@@ -3,8 +3,9 @@
 //! This module creates native Cocoa windows to display AudioUnit custom views.
 //! Supports both AUv2 (CocoaUI) and AUv3 (requestViewController) plugins.
 //!
-//! Note: NSWindow is not thread-safe, so we store window numbers (i64) instead of
-//! Retained<NSWindow>. We can retrieve the window using [NSApp windowWithWindowNumber:].
+//! Note: NSWindow is not thread-safe, so we store window numbers (i64) for global
+//! bookkeeping, and keep any strong NSWindow references only on the main thread.
+//! We can retrieve the window using [NSApp windowWithWindowNumber:].
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -14,6 +15,7 @@ use objc2_app_kit::{NSWindow, NSWindowStyleMask, NSApplication, NSBackingStoreTy
 use objc2_foundation::{NSRect, NSPoint, NSSize, NSString, MainThreadMarker};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::cell::RefCell;
 use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -91,6 +93,72 @@ lazy_static::lazy_static! {
     static ref PLUGIN_WINDOW_NUMBERS: RwLock<HashMap<String, isize>> = RwLock::new(HashMap::new());
     // Cache view controllers to prevent deallocation while window is open
     static ref CACHED_VIEW_CONTROLLERS: RwLock<HashMap<String, SendSyncPtr>> = RwLock::new(HashMap::new());
+    // View controllers that must not be reused after close. We keep them retained
+    // to avoid teardown timing crashes, and release them when the instance is dropped.
+    static ref RETIRED_VIEW_CONTROLLERS: RwLock<HashMap<String, Vec<SendSyncPtr>>> =
+        RwLock::new(HashMap::new());
+}
+
+// NSWindow is not Send/Sync; we keep a strong reference on the main thread only.
+thread_local! {
+    static OPEN_PLUGIN_WINDOWS: RefCell<HashMap<String, Retained<NSWindow>>> = RefCell::new(HashMap::new());
+}
+
+fn take_cached_view_controller(instance_id: &str) -> Option<*mut AnyObject> {
+    CACHED_VIEW_CONTROLLERS
+        .write()
+        .unwrap()
+        .remove(instance_id)
+        .map(|SendSyncPtr(vc)| vc)
+}
+
+fn retire_view_controller(instance_id: &str, vc: *mut AnyObject) {
+    if vc.is_null() {
+        return;
+    }
+    let mut retired = RETIRED_VIEW_CONTROLLERS.write().unwrap();
+    retired
+        .entry(instance_id.to_string())
+        .or_insert_with(Vec::new)
+        .push(SendSyncPtr(vc));
+}
+
+fn release_retired_view_controllers(instance_id: &str) {
+    let retired = RETIRED_VIEW_CONTROLLERS
+        .write()
+        .unwrap()
+        .remove(instance_id)
+        .unwrap_or_default();
+    for SendSyncPtr(vc) in retired {
+        release_view_controller(vc);
+    }
+}
+
+fn release_view_controller(vc: *mut AnyObject) {
+    if vc.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![vc, release];
+    }
+}
+
+fn defer_release_view_controller(instance_id: &str, vc: *mut AnyObject) {
+    if vc.is_null() {
+        return;
+    }
+
+    // Defer the release to the next main-queue runloop turn.
+    // Some AU UIs (e.g. CoreAudioAUUI) are sensitive to teardown timing.
+    let instance_id = instance_id.to_string();
+    unsafe {
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+        let block = RcBlock::new(move || {
+            println!("[AudioUnit] Releasing cached view controller for {}", instance_id);
+            release_view_controller(vc);
+        });
+        let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+    }
 }
 
 /// Open a native window for an AudioUnit plugin's custom view
@@ -125,10 +193,21 @@ pub fn open_audio_unit_ui(
             return Ok(());
         } else {
             // Window was closed externally, remove from tracking
-            // Keep the cached view controller for reuse
             let mut map = PLUGIN_WINDOW_NUMBERS.write().unwrap();
             map.remove(instance_id);
             drop(map);
+
+            OPEN_PLUGIN_WINDOWS.with(|windows| {
+                windows.borrow_mut().remove(instance_id);
+            });
+
+            // Some plugins crash if we reuse the same view controller after the window closes.
+            // Force a fresh requestViewController on next open.
+            if let Some(vc) = take_cached_view_controller(instance_id) {
+                // Don't release here; some plugins crash during teardown.
+                // We'll release when the plugin instance is dropped.
+                retire_view_controller(instance_id, vc);
+            }
         }
     }
 
@@ -189,10 +268,12 @@ pub fn open_audio_unit_ui(
     };
 
     unsafe {
-        // =============================
-        // 【重要修正 1】ゾンビ化防止
-        // =============================
-        let _: () = msg_send![&*window, setReleasedWhenClosed: true];
+        // NOTE:
+        // We keep an explicit strong reference to this window in OPEN_PLUGIN_WINDOWS.
+        // If we also set releasedWhenClosed = true, calling `close()` can release the
+        // window while we still own a retain, leading to over-release when our Retained
+        // is dropped.
+        let _: () = msg_send![&*window, setReleasedWhenClosed: false];
 
         // =============================
         // 【重要修正 2】透過計算の無効化
@@ -302,10 +383,14 @@ pub fn open_audio_unit_ui(
     let window_number = window.windowNumber();
     PLUGIN_WINDOW_NUMBERS.write().unwrap().insert(instance_id.to_string(), window_number);
 
-    // We need to prevent the window from being deallocated
-    // By retaining it via the application's window list
-    // The window is already retained by being ordered front
-    std::mem::forget(window);
+    // Keep a strong reference to the window while it's open (main-thread only).
+    // Dropping the only strong reference here can lead to later crashes during AppKit teardown.
+    OPEN_PLUGIN_WINDOWS.with(|windows| {
+        let window_ptr = (&*window as *const NSWindow) as *mut NSWindow;
+        let retained = unsafe { Retained::retain(window_ptr) }
+            .expect("NSWindow retain should succeed");
+        windows.borrow_mut().insert(instance_id.to_string(), retained);
+    });
 
     Ok(())
 }
@@ -317,23 +402,25 @@ pub fn close_audio_unit_ui(instance_id: &str) {
         None => return,
     };
 
-    // Note: We keep the cached view controller alive so the window can be reopened.
-    // The view controller will be released when the AudioUnitInstance is dropped.
-    // We only need to remove the window tracking.
-
     // Must be on main thread
     let mtm = match MainThreadMarker::new() {
         Some(m) => m,
         None => return,
     };
 
-    if let Some(window) = get_window_by_number(window_number, mtm) {
-        unsafe {
-            // Remove the content view from the window before closing
-            // to prevent the view from being deallocated with the window
-            let _: () = msg_send![&*window, setContentView: std::ptr::null::<AnyObject>()];
-        }
+    // Prefer our owned reference if present
+    let owned_window = OPEN_PLUGIN_WINDOWS.with(|windows| windows.borrow_mut().remove(instance_id));
+
+    if let Some(window) = owned_window.or_else(|| get_window_by_number(window_number, mtm)) {
+        window.orderOut(None);
         window.close();
+    }
+
+    // We only cache view controllers to keep them alive while the window is open.
+    // Reusing cached controllers across close/reopen can crash (e.g. CoreAudioAUUI).
+    if let Some(vc) = take_cached_view_controller(instance_id) {
+        // Don't release during close; retire for later cleanup.
+        retire_view_controller(instance_id, vc);
     }
 }
 
@@ -373,6 +460,11 @@ fn get_audio_unit_view(instance_id: &str, au_audio_unit: *mut AnyObject) -> Resu
             }
         }
     }
+
+    // If we previously closed a window, we may have retired the old view controller.
+    // Before requesting a new one, release any retired controllers to avoid having
+    // multiple AU view controllers alive at once (some plugins crash on reopen otherwise).
+    release_retired_view_controllers(instance_id);
 
     // Request view controller from existing AUAudioUnit instance
     for attempt in 1..=3 {
@@ -678,15 +770,8 @@ pub fn cleanup_cached_view_controller(instance_id: &str) {
     // Close window if open
     close_audio_unit_ui(instance_id);
 
-    // Release cached view controller
-    if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.write().unwrap().remove(instance_id) {
-        if !vc.is_null() {
-            unsafe {
-                println!("[AudioUnit] Releasing cached view controller for {}", instance_id);
-                let _: () = msg_send![vc, release];
-            }
-        }
-    }
+    // Release any retired view controllers for this instance (balanced with retain in request_view_controller).
+    release_retired_view_controllers(instance_id);
 }
 
 /// Open plugin UI by instance_id only
