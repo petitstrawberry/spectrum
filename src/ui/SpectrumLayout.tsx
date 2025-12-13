@@ -463,7 +463,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
             id: p.instance_id || p.instanceId || p.id,
             pluginId: p.plugin_id || p.pluginId,
             name: p.name,
-            manufacturer: p.manufacturer || 'Unknown',
+            manufacturer: p.manufacturer || '',
             enabled: p.enabled !== false,
           })) || [],
         };
@@ -472,7 +472,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       // ignore
     }
     return null;
-  }, [selectedBusId, graph]);
+  }, [selectedBusId, (graph as any)?.nodes]);
 
   // Refresh graph when plugins change
   const handlePluginsChange = useCallback(() => {

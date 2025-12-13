@@ -7,6 +7,7 @@ use crate::audio::{AudioNode, EdgeId, NodeHandle, PortId};
 use crate::audio::source::SourceNode;
 use crate::audio::bus::BusNode;
 use crate::audio::sink::SinkNode;
+use std::collections::HashMap;
 
 // =============================================================================
 // Device Commands
@@ -129,6 +130,52 @@ pub async fn remove_node(handle: u32) -> Result<(), String> {
     let processor = get_graph_processor();
     let node_handle = NodeHandle::from(handle);
 
+    // If a bus node is being removed, close any open plugin UI windows first
+    // and release plugin instances from the AudioUnit manager.
+    // Best-effort: if closing times out, we still proceed with removal.
+    let plugin_instance_ids: Vec<String> = processor.with_graph(|graph| {
+        graph.get_node(node_handle)
+            .and_then(|node| node.as_any().downcast_ref::<BusNode>())
+            .map(|bus| bus.plugins().iter().map(|p| p.instance_id.clone()).collect())
+            .unwrap_or_default()
+    });
+
+    if !plugin_instance_ids.is_empty() {
+        let ids_for_ui = plugin_instance_ids.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        unsafe {
+            use block2::RcBlock;
+            use objc2::class;
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+
+            let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+
+            let block = RcBlock::new(move || {
+                for id in &ids_for_ui {
+                    crate::audio_unit_ui::close_audio_unit_ui(id);
+                }
+                let _ = tx.send(());
+            });
+
+            let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+        }
+
+        if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
+            eprintln!(
+                "[api] remove_node: timeout closing plugin UIs for bus {}",
+                handle
+            );
+        }
+
+        // Release AU instances (best-effort)
+        let au_manager = crate::audio_unit::get_au_manager();
+        for id in &plugin_instance_ids {
+            let _ = au_manager.remove_instance(id);
+        }
+    }
+
     if processor.remove_node(node_handle) {
         Ok(())
     } else {
@@ -228,6 +275,10 @@ pub async fn get_graph() -> Result<GraphDto, String> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
+        // Optional on-demand lookup for filling missing plugin metadata (old saved state).
+        // Built lazily only if we detect missing fields to avoid extra work.
+        let mut plugin_lookup: Option<HashMap<String, (String, String)>> = None;
+
         // Collect nodes with type-specific info
         for handle in graph.node_handles() {
             if let Some(node) = graph.get_node(handle) {
@@ -254,17 +305,86 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                     crate::audio::NodeType::Bus => {
                         // Downcast to BusNode to get bus_id and plugins
                         if let Some(bus_node) = node.as_any().downcast_ref::<BusNode>() {
+                            let plugins = bus_node.plugins();
+
+                            let needs_lookup = plugins.iter().any(|p| {
+                                let name = p.name.trim();
+                                let manufacturer = p.manufacturer.trim();
+
+                                name.is_empty()
+                                    || manufacturer.is_empty()
+                                    || manufacturer.eq_ignore_ascii_case("unknown")
+                            });
+
+                            if needs_lookup && plugin_lookup.is_none() {
+                                let mut map: HashMap<String, (String, String)> = HashMap::new();
+
+                                for p in crate::audio_unit::get_effect_audio_units() {
+                                    map.insert(
+                                        p.id.clone(),
+                                        (p.name.clone(), p.manufacturer.clone()),
+                                    );
+                                }
+                                for p in crate::audio_unit::get_instrument_audio_units() {
+                                    map.insert(
+                                        p.id.clone(),
+                                        (p.name.clone(), p.manufacturer.clone()),
+                                    );
+                                }
+                                for p in crate::audio_unit::get_generator_audio_units() {
+                                    map.insert(
+                                        p.id.clone(),
+                                        (p.name.clone(), p.manufacturer.clone()),
+                                    );
+                                }
+
+                                plugin_lookup = Some(map);
+                            }
+
+                            let lookup = plugin_lookup.as_ref();
                             NodeInfoDto::Bus {
                                 handle: handle.raw(),
                                 bus_id: bus_node.bus_id().to_string(),
                                 label: node.label().to_string(),
                                 port_count: node.input_port_count() as u8,
-                                plugins: bus_node.plugins().iter().map(|p| PluginInstanceDto {
-                                    instance_id: p.instance_id.clone(),
-                                    plugin_id: p.plugin_id.clone(),
-                                    name: p.name.clone(),
-                                    enabled: p.enabled,
-                                }).collect(),
+                                plugins: plugins
+                                    .iter()
+                                    .map(|p| {
+                                        let mut name = p.name.clone();
+                                        let mut manufacturer = p.manufacturer.clone();
+                                        let missing = {
+                                            let n = name.trim();
+                                            let m = manufacturer.trim();
+
+                                            n.is_empty()
+                                                || m.is_empty()
+                                                || m.eq_ignore_ascii_case("unknown")
+                                        };
+
+                                        if missing {
+                                            if let Some(lookup) = lookup {
+                                                if let Some((n, m)) = lookup.get(&p.plugin_id) {
+                                                    if name.trim().is_empty() {
+                                                        name = n.clone();
+                                                    }
+                                                    if manufacturer.trim().is_empty()
+                                                        || manufacturer.trim().eq_ignore_ascii_case("unknown")
+                                                    {
+                                                        manufacturer = m.clone();
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        PluginInstanceDto {
+                                            instance_id: p.instance_id.clone(),
+                                            plugin_id: p.plugin_id.clone(),
+                                            name,
+                                            manufacturer,
+                                            enabled: p.enabled,
+                                        }
+                                    })
+                                    .collect(),
                             }
                         } else {
                             NodeInfoDto::Bus {
@@ -364,7 +484,6 @@ pub async fn get_available_plugins() -> Result<Vec<PluginInfoDto>, String> {
             plugin_id: p.id.clone(),
             name: p.name.clone(),
             manufacturer: p.manufacturer.clone(),
-            category: p.plugin_type.clone(),
         })
         .collect())
 }
@@ -391,11 +510,17 @@ pub async fn add_plugin_to_bus(
 
     // Add the plugin reference to the bus node
     let plugin_name = plugin.name.clone();
+    let plugin_manufacturer = plugin.manufacturer.clone();
     let instance_id_clone = instance_id.clone();
     processor.with_graph_mut(|graph| {
         if let Some(node) = graph.get_node_mut(handle) {
             if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
-                bus.add_plugin(instance_id_clone.clone(), plugin_id.clone(), plugin_name);
+                bus.add_plugin(
+                    instance_id_clone.clone(),
+                    plugin_id.clone(),
+                    plugin_name,
+                    plugin_manufacturer,
+                );
 
                 if let Some(pos) = position {
                     // Reorder if a position was specified
@@ -417,6 +542,36 @@ pub async fn add_plugin_to_bus(
 pub async fn remove_plugin_from_bus(bus_handle: u32, instance_id: String) -> Result<(), String> {
     let handle = NodeHandle::from_raw(bus_handle);
     let processor = get_graph_processor();
+
+    // If the plugin UI is open, close it first (must run on main thread).
+    // Best-effort: if closing times out, we still proceed with removal.
+    {
+        let instance_id_clone = instance_id.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        unsafe {
+            use block2::RcBlock;
+            use objc2::class;
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+
+            let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+
+            let block = RcBlock::new(move || {
+                crate::audio_unit_ui::close_audio_unit_ui(&instance_id_clone);
+                let _ = tx.send(());
+            });
+
+            let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+        }
+
+        if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
+            eprintln!(
+                "[api] remove_plugin_from_bus: timeout closing UI for instance {}",
+                instance_id
+            );
+        }
+    }
 
     let mut found_in_bus = false;
     processor.with_graph_mut(|graph| {
@@ -635,6 +790,27 @@ pub async fn save_graph_state() -> Result<GraphStateDto, String> {
 pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
     let processor = get_graph_processor();
 
+    // Lookup table for filling missing plugin metadata from old saved state.
+    let mut plugin_lookup: HashMap<String, (String, String)> = HashMap::new();
+    for p in crate::audio_unit::get_effect_audio_units() {
+        plugin_lookup.insert(
+            p.id.clone(),
+            (p.name.clone(), p.manufacturer.clone()),
+        );
+    }
+    for p in crate::audio_unit::get_instrument_audio_units() {
+        plugin_lookup.insert(
+            p.id.clone(),
+            (p.name.clone(), p.manufacturer.clone()),
+        );
+    }
+    for p in crate::audio_unit::get_generator_audio_units() {
+        plugin_lookup.insert(
+            p.id.clone(),
+            (p.name.clone(), p.manufacturer.clone()),
+        );
+    }
+
     // Clear existing graph and rebuild from state
     processor.with_graph_mut(|graph| {
         // Clear existing nodes and edges
@@ -670,10 +846,35 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
                 let mut bus = BusNode::new(bus_id.clone(), label.clone(), *port_count as usize);
                 // Add plugins
                 for plugin in plugins {
+                    let mut name = plugin.name.clone();
+                    let mut manufacturer = plugin.manufacturer.clone();
+
+                    let missing = {
+                        let n = name.trim();
+                        let m = manufacturer.trim();
+
+                        n.is_empty()
+                            || m.is_empty()
+                            || m.eq_ignore_ascii_case("unknown")
+                    };
+                    if missing {
+                        if let Some((n, m)) = plugin_lookup.get(&plugin.plugin_id) {
+                            if name.trim().is_empty() {
+                                name = n.clone();
+                            }
+                            if manufacturer.trim().is_empty()
+                                || manufacturer.trim().eq_ignore_ascii_case("unknown")
+                            {
+                                manufacturer = m.clone();
+                            }
+                        }
+                    }
+
                     bus.add_plugin(
                         plugin.instance_id.clone(),
                         plugin.plugin_id.clone(),
-                        plugin.name.clone(),
+                        name,
+                        manufacturer,
                     );
                 }
                 (*handle, processor.add_node(Box::new(bus)))

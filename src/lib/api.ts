@@ -68,6 +68,7 @@ export interface PluginInstanceDto {
   instance_id: string;
   plugin_id: string;
   name: string;
+  manufacturer: string;
   enabled: boolean;
 }
 
@@ -97,7 +98,6 @@ export interface PluginInfoDto {
   plugin_id: string;
   name: string;
   manufacturer: string;
-  category: string;
 }
 
 // --- Meter Types ---

@@ -11,6 +11,7 @@ pub struct PluginInstance {
     pub instance_id: String,
     pub plugin_id: String,
     pub name: String,
+    pub manufacturer: String,
     pub enabled: bool,
     /// Cached AudioUnit instance for lock-free audio processing
     au_instance: Option<Arc<AudioUnitInstance>>,
@@ -22,6 +23,7 @@ impl std::fmt::Debug for PluginInstance {
             .field("instance_id", &self.instance_id)
             .field("plugin_id", &self.plugin_id)
             .field("name", &self.name)
+            .field("manufacturer", &self.manufacturer)
             .field("enabled", &self.enabled)
             .field("au_instance", &self.au_instance.as_ref().map(|_| "AudioUnitInstance"))
             .finish()
@@ -34,6 +36,7 @@ impl Clone for PluginInstance {
             instance_id: self.instance_id.clone(),
             plugin_id: self.plugin_id.clone(),
             name: self.name.clone(),
+            manufacturer: self.manufacturer.clone(),
             enabled: self.enabled,
             // Re-fetch from manager to get Arc clone
             au_instance: get_au_manager().get_instance(&self.instance_id),
@@ -43,13 +46,19 @@ impl Clone for PluginInstance {
 
 impl PluginInstance {
     /// Create a new plugin instance
-    pub fn new(instance_id: String, plugin_id: String, name: String) -> Self {
+    pub fn new(
+        instance_id: String,
+        plugin_id: String,
+        name: String,
+        manufacturer: String,
+    ) -> Self {
         // Try to get the AudioUnit instance from the manager
         let au_instance = get_au_manager().get_instance(&instance_id);
         Self {
             instance_id,
             plugin_id,
             name,
+            manufacturer,
             enabled: true,
             au_instance,
         }
@@ -133,8 +142,19 @@ impl BusNode {
     }
 
     /// Add a plugin to the chain
-    pub fn add_plugin(&mut self, instance_id: String, plugin_id: String, name: String) {
-        self.plugin_chain.push(PluginInstance::new(instance_id, plugin_id, name));
+    pub fn add_plugin(
+        &mut self,
+        instance_id: String,
+        plugin_id: String,
+        name: String,
+        manufacturer: String,
+    ) {
+        self.plugin_chain.push(PluginInstance::new(
+            instance_id,
+            plugin_id,
+            name,
+            manufacturer,
+        ));
     }
 
     /// Remove a plugin from the chain

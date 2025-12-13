@@ -93,6 +93,7 @@ export interface PluginInstance {
   instanceId: string;
   pluginId: string;
   name: string;
+  manufacturer: string;
   enabled: boolean;
 }
 

@@ -20,7 +20,6 @@ export interface PluginDescriptor {
   id: string;
   name: string;
   manufacturer: string;
-  category: string;
 }
 
 export interface PluginInstance {
@@ -63,7 +62,6 @@ export function usePlugins(): UsePluginsReturn {
         id: p.plugin_id,
         name: p.name,
         manufacturer: p.manufacturer,
-        category: p.category,
       })));
       setError(null);
     } catch (e) {

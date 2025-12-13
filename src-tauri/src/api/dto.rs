@@ -45,6 +45,8 @@ pub struct PluginInstanceDto {
     pub instance_id: String,
     pub plugin_id: String,
     pub name: String,
+    #[serde(default)]
+    pub manufacturer: String,
     pub enabled: bool,
 }
 
@@ -162,7 +164,6 @@ pub struct PluginInfoDto {
     pub plugin_id: String,
     pub name: String,
     pub manufacturer: String,
-    pub category: String,
 }
 
 // =============================================================================

@@ -220,6 +220,7 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
           instanceId: p.instance_id,
           pluginId: p.plugin_id,
           name: p.name,
+          manufacturer: p.manufacturer,
           enabled: p.enabled,
         })),
       };

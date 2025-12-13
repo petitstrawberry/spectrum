@@ -51,7 +51,6 @@ interface PluginInfoDto {
   plugin_id: string;
   name: string;
   manufacturer: string;
-  category: string;
 }
 
 interface Props {
@@ -473,7 +472,7 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
               </div>
               <div className="flex-1">
                 <div className="text-sm font-bold text-white">AudioUnit Plugins</div>
-                <div className="text-[10px] text-slate-500">Select an effect to add to {bus.label}</div>
+                <div className="text-[10px] text-slate-500">Select a plugin to add to {bus.label}</div>
               </div>
               <button
                 onClick={() => {
@@ -529,7 +528,7 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
                                 {plugin.name}
                               </div>
                               <div className="text-[10px] text-slate-500 flex items-center gap-2">
-                                <span>{plugin.category}</span>
+                                <span>{plugin.manufacturer}</span>
                               </div>
                             </div>
                             <Plus className="w-4 h-4 text-slate-600 group-hover:text-purple-400 transition-colors" />
