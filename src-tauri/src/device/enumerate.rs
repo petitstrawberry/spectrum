@@ -129,6 +129,52 @@ fn get_icon_hint(name: &str) -> String {
     }
 }
 
+/// Get transport type for a device
+fn get_transport_type(device_id: u32) -> String {
+    use coreaudio::sys::kAudioDevicePropertyTransportType;
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut transport_type: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut transport_type as *mut u32 as *mut _,
+        )
+    };
+
+    if status != 0 {
+        return "unknown".to_string();
+    }
+
+    // Convert FourCC to string
+    let bytes = transport_type.to_be_bytes();
+    let four_cc = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+
+    match four_cc.trim() {
+        "blut" => "bluetooth".to_string(),
+        "usba" => "usb".to_string(),
+        "hdmi" => "hdmi".to_string(),
+        "dprt" => "displayport".to_string(),
+        "fire" => "firewire".to_string(),
+        "thun" => "thunderbolt".to_string(),
+        "virt" => "virtual".to_string(),
+        "pci" => "pci".to_string(),
+        "pcie" => "pci-express".to_string(),
+        "avb" => "avb".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
 /// Get list of output devices (with virtual device expansion for aggregate devices)
 pub fn get_output_devices() -> Vec<OutputDeviceDto> {
     let mut result = Vec::new();
@@ -149,6 +195,7 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
         }
 
         let name = get_device_name(device_id).unwrap_or_else(|_| format!("Device {}", device_id));
+        let transport_type = get_transport_type(device_id);
 
         // Exclude the Prism virtual device by id (if present)
         if let Some(pid) = prism_device_id {
@@ -177,6 +224,7 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                         channel_count: sub.channels.min(255) as u8,
                         name: sub.name.clone(),
                         device_type: "aggregate_sub".to_string(),
+                        transport_type: get_transport_type(sub.original_id),
                         icon_hint: get_icon_hint(&sub.name),
                         is_aggregate_sub: true,
                     });
@@ -197,6 +245,7 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                         channel_count: rem.min(255) as u8,
                         name: format!("{} (Ch {}-{})", name, covered + 1, covered + rem),
                         device_type: "aggregate_sub".to_string(),
+                        transport_type: transport_type.clone(),
                         icon_hint: get_icon_hint(&name),
                         is_aggregate_sub: true,
                     });
@@ -218,6 +267,7 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                         channel_count: ch_count as u8,
                         name: format!("{} (Ch {}-{})", name, offset + 1, offset + ch_count),
                         device_type: "aggregate_sub".to_string(),
+                        transport_type: transport_type.clone(),
                         icon_hint: get_icon_hint(&name),
                         is_aggregate_sub: true,
                     });
@@ -235,6 +285,7 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                 subdevice_uid: None,
                 parent_name: None,
                 device_type: "physical".to_string(),
+                transport_type: transport_type.clone(),
                 icon_hint: get_icon_hint(&name),
                 is_aggregate_sub: false,
             });
@@ -310,6 +361,7 @@ struct SubDeviceInfo {
     uid: Option<String>,
     name: String,
     channels: u32,
+    original_id: u32,
 }
 
 /// Query aggregate device for its active sub-device list and resolve their UIDs/names/channels
@@ -352,7 +404,7 @@ fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
         let name = get_device_name(id).unwrap_or_else(|_| format!("Device {}", id));
         let channels = get_device_output_channels(id);
 
-        subs.push(SubDeviceInfo { uid, name, channels });
+        subs.push(SubDeviceInfo { uid, name, channels, original_id: id });
     }
 
     subs

@@ -134,6 +134,7 @@ pub struct OutputDeviceDto {
     pub channel_count: u8,
     pub name: String,
     pub device_type: String,
+    pub transport_type: String,
     pub icon_hint: String,
     pub is_aggregate_sub: bool,
 }
