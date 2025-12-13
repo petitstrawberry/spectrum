@@ -151,7 +151,7 @@ export default function RightPanel({ width, devices, isLibraryItemUsed, handleLi
               })()}
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-bold text-slate-200 truncate">{v.name}</div>
-                <div className="text-[9px] text-slate-500 uppercase">{v.channels}ch • Virtual</div>
+                <div className="text-[9px] text-slate-500 uppercase">{v.channels}ch • {(v.transportType ? String(v.transportType) : 'Virtual')}</div>
               </div>
                 <Plus className="w-4 h-4 text-slate-600 group-hover:text-pink-400 transition-colors" />
               </div>

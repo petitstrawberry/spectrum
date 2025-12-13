@@ -42,6 +42,7 @@ export interface VirtualOutputDevice {
   channelOffset: number;
   channels: number;
   iconHint?: string;
+  transportType?: string;
 }
 
 export interface SubDevice {
@@ -152,7 +153,8 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
           const name = (d as any).name ?? (d as any).label ?? rawId;
           const channels = (d as any).channel_count ?? (d as any).channelCount ?? (d as any).output_channels ?? 2;
           const icon = (d as any).icon_hint ?? undefined;
-          const v: VirtualOutputDevice = { id: rawId, parentDeviceId: parentId, name, channelOffset: offset, channels, iconHint: icon };
+          const transport = (d as any).transport_type ?? undefined;
+          const v: VirtualOutputDevice = { id: rawId, parentDeviceId: parentId, name, channelOffset: offset, channels, iconHint: icon, transportType: transport };
           virtuals.push(v);
           const arr = groups.get(parentId) ?? [];
           arr.push(v);
@@ -173,7 +175,9 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
         const isAggregate = vs.length > 1 || vs.some(x => /(aggregate|aggregate_sub)/i.test((x as any).id));
 
         // Choose an iconHint from parentEntry, else zero, else first
-        const iconHintSource = parentEntry ? (outputs.find((o: any) => o.id === parentEntry.id) as any).icon_hint : (zero ? zero.iconHint : vs[0].iconHint);
+        const parentOutput = parentEntry ? (outputs.find((o: any) => o.id === parentEntry.id) as any) : undefined;
+        const iconHintSource = parentOutput ? parentOutput.icon_hint : (zero ? zero.iconHint : vs[0].iconHint);
+        const transportSource = parentOutput ? parentOutput.transport_type : (zero ? zero.transportType : vs[0].transportType) || 'unknown';
         const subDevices: SubDevice[] = vs.map(v => ({
           id: v.id,
           name: v.name,
@@ -186,7 +190,7 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
           deviceId,
           name: baseName || `Device ${deviceId}`,
           channelCount: totalChannels,
-          transportType: 'Unknown',
+          transportType: transportSource,
           iconName: iconHintSource,
           isAggregate,
           subDevices,
