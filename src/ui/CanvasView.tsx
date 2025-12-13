@@ -21,6 +21,12 @@ interface Props {
   connections?: PatchConnection[];
   onConnect?: (fromNodeId: string, fromPortIdx: number, toNodeId: string, toPortIdx: number) => void | Promise<void>;
   onDisconnect?: (connectionId: string) => void | Promise<void>;
+  selectedNodeId?: string | null;
+  selectedBusId?: string | null;
+  focusedOutputId?: string | null;
+  onSelectNodeId?: (nodeId: string | null) => void;
+  onSelectBusId?: (busNodeId: string | null) => void;
+  onFocusOutputId?: (outputNodeId: string | null) => void;
   onMoveNode?: (id: string, x: number, y: number) => void;
   onDeleteNode?: (id: string) => void;
   systemActiveOutputs?: number[];
@@ -34,6 +40,12 @@ export default function CanvasView({
   connections = [],
   onConnect,
   onDisconnect,
+  selectedNodeId = null,
+  selectedBusId = null,
+  focusedOutputId = null,
+  onSelectNodeId,
+  onSelectBusId,
+  onFocusOutputId,
   onMoveNode,
   onDeleteNode,
   systemActiveOutputs = [],
@@ -95,6 +107,22 @@ export default function CanvasView({
     // find node's current position from DOM or nodes prop
     const node = nodes.find((n: any) => n.id === id);
     if (!node) return;
+
+    // v1 parity: node selection drives cable highlighting
+    try {
+      if (typeof onSelectNodeId === 'function') onSelectNodeId(id);
+      if (node?.type === 'target') {
+        if (typeof onFocusOutputId === 'function') onFocusOutputId(id);
+        if (typeof onSelectBusId === 'function') onSelectBusId(null);
+      }
+      if (node?.type === 'bus') {
+        if (typeof onSelectBusId === 'function') onSelectBusId(id);
+        // do not clear focusedOutputId (v1 keeps it)
+      }
+    } catch {
+      // ignore
+    }
+
     const offsetX = startCanvasX - node.x;
     const offsetY = startCanvasY - node.y;
 
@@ -121,6 +149,11 @@ export default function CanvasView({
   const startWire = (e: any, nodeId: string, portIdx: number) => {
     e.stopPropagation();
     if (e.button !== 0) return;
+    try {
+      console.log('[CanvasView] startWire', { nodeId, portIdx });
+    } catch {
+      // ignore
+    }
     setWireStart({ nodeId, portIdx });
     const p = getCanvasPointFromEvent(e);
     if (p) setWirePos(p);
@@ -151,6 +184,11 @@ export default function CanvasView({
 
     const channelsToConnect: Array<{ srcPort: number; tgtPort: number }> = [];
     const isStereoPair = !!e?.shiftKey;
+    try {
+      console.log('[CanvasView] endWire', { from: from, to: { nodeId, portIdx }, isStereoPair });
+    } catch {
+      // ignore
+    }
     if (isStereoPair) {
       const srcBase = Math.floor(from.portIdx / 2) * 2;
       const tgtBase = Math.floor(portIdx / 2) * 2;
@@ -184,45 +222,76 @@ export default function CanvasView({
   const findNode = (id: string) => nodes.find((n: any) => n.id === id);
 
   const getPortCenter = (node: any, portIdx: number, dir: 'in' | 'out') => {
-    // Node card geometry is defined here; keep in sync with layout constants.
-    const nodeWidth = 180;
-    const headerH = 36;
-    const meterH = 2;
-    const paddingTop = 8; // p-2
-    const rowStep = 24; // h-5 (20) + space-y-1 (4)
-    const dotSize = 12;
-    const dotOffsetTop = 4;
-    const dotInset = 15; // -left/-right
-
-    const x = dir === 'in'
-      ? (node.x - dotInset + dotSize / 2)
-      : (node.x + nodeWidth + dotInset - dotSize / 2);
-    const y = node.y + headerH + meterH + paddingTop + (portIdx * rowStep) + dotOffsetTop + dotSize / 2;
+    // v1 parity: match getPortPosition() geometry exactly
+    // x is anchored on the node edge (not the center of the dot)
+    const x = dir === 'in' ? node.x : (node.x + 180);
+    const y = node.y + 36 + 8 + (portIdx * 24) + 4 + 6 + 2;
     return { x, y };
   };
 
   const bezierPath = (a: { x: number; y: number }, b: { x: number; y: number }) => {
-    const dx = Math.max(40, Math.min(140, Math.abs(b.x - a.x) * 0.35));
-    const c1 = { x: a.x + dx, y: a.y };
-    const c2 = { x: b.x - dx, y: b.y };
-    return `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`;
+    // v1 parity: fixed control points
+    return `M ${a.x} ${a.y} C ${a.x + 50} ${a.y}, ${b.x - 50} ${b.y}, ${b.x} ${b.y}`;
   };
 
   const renderedConnections = useMemo(() => {
-    const out: Array<{ id: string; d: string; muted?: boolean }>= [];
+    const out: Array<{ id: string; d: string; isDisconnected: boolean; isActive: boolean; strokeColor: string; strokeWidth: number; dash: string | undefined; opacity: number }>= [];
     for (const c of connections) {
       const fromNode = findNode(c.fromNodeId);
       const toNode = findNode(c.toNodeId);
       if (!fromNode || !toNode) continue;
       const a = getPortCenter(fromNode, c.fromChannel, 'out');
       const b = getPortCenter(toNode, c.toChannel, 'in');
-      out.push({ id: c.id, d: bezierPath(a, b), muted: c.muted });
+
+      const isDisconnected = fromNode.available === false || toNode.available === false;
+      const isBusConnection = fromNode.type === 'bus' || toNode.type === 'bus';
+      const isActive = !isDisconnected && (
+        (toNode.id === focusedOutputId) ||
+        (isBusConnection && selectedBusId && (fromNode.id === selectedBusId || toNode.id === selectedBusId))
+      );
+
+      // v1 parity colors
+      let strokeColor = '#475569';
+      if (isDisconnected) {
+        strokeColor = '#64748b';
+      } else if (isActive) {
+        if (isBusConnection) {
+          strokeColor = '#a855f7';
+        } else if (String(toNode.color || '').includes('cyan')) {
+          strokeColor = '#22d3ee';
+        } else {
+          strokeColor = '#f472b6';
+        }
+      }
+
+      out.push({
+        id: c.id,
+        d: bezierPath(a, b),
+        isDisconnected,
+        isActive,
+        strokeColor,
+        strokeWidth: isActive ? 2 : 1,
+        dash: isDisconnected ? '4,4' : undefined,
+        opacity: isDisconnected ? 0.5 : 1,
+      });
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connections, nodes]);
+  }, [connections, nodes, focusedOutputId, selectedBusId]);
   return (
-    <div ref={canvasRef} className={`flex-1 bg-[#0b1120] relative overflow-hidden ${isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}>
+    <div
+      ref={canvasRef}
+      className={`flex-1 bg-[#0b1120] relative overflow-hidden ${isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+      onMouseDown={(e) => {
+        // v1 parity: click background clears selection
+        if (e.button !== 0) return;
+        try {
+          if (typeof onSelectNodeId === 'function') onSelectNodeId(null);
+        } catch {
+          // ignore
+        }
+      }}
+    >
       <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${canvasTransform.x}px, ${canvasTransform.y}px) scale(${canvasTransform.scale})` }}>
         <div className="absolute pointer-events-none opacity-20" style={{ backgroundImage: 'radial-gradient(#475569 1px, transparent 1px)', backgroundSize: '24px 24px', width: '4000px', height: '4000px', left: '-2000px', top: '-2000px' }}></div>
         <svg className="absolute pointer-events-none z-0" style={{ width: '4000px', height: '4000px', left: '-2000px', top: '-2000px', overflow: 'visible' }}>
@@ -235,6 +304,11 @@ export default function CanvasView({
                   e.stopPropagation();
                   if (typeof onDisconnect !== 'function') return;
                   try {
+                    console.log('[CanvasView] disconnect click', { connectionId: c.id });
+                  } catch {
+                    // ignore
+                  }
+                  try {
                     const r = onDisconnect(c.id);
                     if (r && typeof (r as any).catch === 'function') (r as any).catch((err: any) => console.error('disconnect failed', err));
                   } catch (err) {
@@ -246,12 +320,17 @@ export default function CanvasView({
                 <path
                   d={c.d}
                   fill="none"
-                  className={
-                    (c.muted ? 'stroke-slate-700' : 'stroke-slate-400') +
-                    ' group-hover:stroke-red-400'
-                  }
-                  strokeWidth={2}
+                  stroke={c.strokeColor}
+                  strokeWidth={c.strokeWidth}
+                  strokeDasharray={c.dash || 'none'}
+                  opacity={c.opacity}
+                  className="group-hover:stroke-red-400"
                 />
+                {c.isActive && !c.isDisconnected && (
+                  <circle r="3" fill="#fff" opacity="0.8">
+                    <animateMotion dur="2s" repeatCount="indefinite" path={c.d} />
+                  </circle>
+                )}
               </g>
             ))}
 
@@ -263,14 +342,14 @@ export default function CanvasView({
               return (
                 <>
                   <path
-                    d={bezierPath(a, b)}
+                    d={`M ${a.x} ${a.y} C ${a.x + 50} ${a.y}, ${b.x - 50} ${b.y}, ${b.x} ${b.y}`}
                     fill="none"
                     stroke="#fff"
                     strokeWidth={2}
                     strokeDasharray="4,4"
                   />
                   {/* Stereo hint tooltip near cursor (v1 parity) */}
-                  <g transform={`translate(${b.x + 12}, ${b.y - 8})`}>
+                  <g transform={`translate(${b.x - 50}, ${b.y - 18})`}>
                     <rect x="0" y="-10" width="100" height="16" rx="3" fill="rgba(15, 23, 42, 0.9)" stroke="rgba(100, 116, 139, 0.5)" strokeWidth="1" />
                     <text x="6" y="1" fontSize="9" fill="#94a3b8" fontFamily="ui-monospace, monospace">
                       <tspan fill="#22d3ee" fontWeight="bold">⇧ Shift</tspan>
@@ -309,13 +388,29 @@ export default function CanvasView({
           const dynamicLabel = node.label;
           const dynamicSubLabel = node.subLabel;
 
+          const isSelected = selectedNodeId === node.id;
+          const isFocused = focusedOutputId === node.id;
+          const isBusSelected = selectedBusId === node.id;
+
+          const disabled = isUnavailable || isSystemDisabled;
+
           let borderClass = 'border-slate-700';
-          if (isUnavailable) borderClass = 'border-slate-600/50';
-          else if (node.type === 'source') borderClass = isDeviceNode ? 'border-amber-500/30 hover:border-amber-500' : 'border-cyan-500/30 hover:border-cyan-500';
+          if (disabled) {
+            borderClass = 'border-slate-600/50';
+          } else if (node.type === 'source') {
+            borderClass = isDeviceNode ? 'border-amber-500/30 hover:border-amber-500' : 'border-cyan-500/30 hover:border-cyan-500';
+          } else if (node.type === 'bus') {
+            borderClass = isBusSelected ? 'border-purple-500 ring-2 ring-purple-500/20' : 'border-purple-500/30 hover:border-purple-500';
+          }
+          if (node.type === 'target' && !disabled) {
+            borderClass = isFocused ? 'border-pink-500 ring-2 ring-pink-500/20' : 'border-pink-500/30 hover:border-pink-500';
+          }
+          if (isSelected && !disabled) {
+            borderClass = 'border-white ring-2 ring-white/20';
+          }
 
           const style: React.CSSProperties = { left: node.x, top: node.y, height: nodeHeight };
 
-          const disabled = isUnavailable || isSystemDisabled;
           // Allow dragging of output nodes even when visually disabled (greyed out).
           const allowDragWhenDisabled = node.type === 'target';
           return (

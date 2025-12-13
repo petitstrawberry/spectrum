@@ -170,11 +170,11 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const connections: Connection[] = [];
   const nodes: NodeData[] = [];
   const nodesById = new Map<string, NodeData>();
-  const selectedNodeId: string | null = null;
-  const selectedBusId: string | null = null;
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
   const mixerHeight = 260;
   const masterWidth = 300;
-  const focusedOutputId: string | null = null;
+  const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
   const selectedBus: any = null;
   const focusedTarget: any = null;
   const focusedTargetPorts = 2;
@@ -188,6 +188,71 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
   // Nodes placed on the canvas (local UI state for visual feedback)
   const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
+
+  // v1 parity: default focused output is first target node if none selected yet
+  useEffect(() => {
+    if (focusedOutputId) return;
+    let firstTargetId: string | null = null;
+
+    const activeNums = Array.isArray(devices?.activeOutputs)
+      ? (devices!.activeOutputs as any[])
+          .map((v: any) => Number(v))
+          .filter((n: any) => !Number.isNaN(n))
+      : [];
+
+    // Prefer v2 graph sink nodes (avoid referencing nodesFromGraph before initialization).
+    try {
+      const g = graph as any;
+      if (g && g.nodes && typeof g.nodes.values === 'function') {
+        for (const n of g.nodes.values()) {
+          const t = n?.type;
+          if (t !== 'sink' && t !== 'target') continue;
+          if (n?.available === false) continue;
+
+          // If runtime has an active output device, do not auto-focus a sink
+          // that would be system-disabled (greyed) in the patch view.
+          if (activeNums.length > 0) {
+            const did = Number(
+              n?.deviceId ??
+                n?.device_id ??
+                n?.sinkDeviceId ??
+                n?.sink_device_id ??
+                n?.sink?.device_id ??
+                n?.sink?.deviceId ??
+                NaN
+            );
+            if (!Number.isNaN(did) && !activeNums.includes(did)) continue;
+          }
+
+          const handle = n.handle ?? n.id ?? 0;
+          firstTargetId = `node_${handle}`;
+          break;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Fallback to locally placed target nodes.
+    if (!firstTargetId) {
+      const firstPlacedTarget = placedNodes.find((n: any) => {
+        if (!n || n.type !== 'target') return false;
+        if (n.available === false) return false;
+        if (activeNums.length === 0) return true;
+        const did = Number(n.deviceId);
+        if (!Number.isNaN(did) && activeNums.includes(did)) return true;
+        const m = typeof n.libraryId === 'string' ? n.libraryId.match(/^vout_(\d+)_(\d+)$/) : null;
+        if (m) {
+          const parentId = Number(m[1]);
+          if (!Number.isNaN(parentId) && activeNums.includes(parentId)) return true;
+        }
+        return false;
+      });
+      if (firstPlacedTarget?.id) firstTargetId = firstPlacedTarget.id;
+    }
+
+    if (firstTargetId) setFocusedOutputId(firstTargetId);
+  }, [focusedOutputId, graph, placedNodes, devices?.activeOutputs]);
 
   const connectionsFromGraph: Connection[] = useMemo(() => {
     const g = graph as any;
@@ -316,6 +381,54 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       return null;
     }
   })();
+
+  // If an output node becomes system-disabled (greyed out), force-clear focus/selection
+  // so its cables are not highlighted anymore.
+  useEffect(() => {
+    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    const activeNums = Array.isArray(devices?.activeOutputs)
+      ? (devices!.activeOutputs as any[])
+          .map((v: any) => Number(v))
+          .filter((n: any) => !Number.isNaN(n))
+      : [];
+
+    const isTargetDisabled = (node: any): boolean => {
+      if (!node || node.type !== 'target') return false;
+      if (node.available === false) return true;
+      if (activeNums.length === 0) return false;
+      const m = typeof node.libraryId === 'string' ? node.libraryId.match(/^vout_(\d+)_(\d+)$/) : null;
+      if (m) {
+        const parentId = Number(m[1]);
+        if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) return true;
+      }
+      return false;
+    };
+
+    // Clear focus first (this is what drives cable highlight).
+    if (focusedOutputId) {
+      const focused = allNodes.find((n: any) => n && n.id === focusedOutputId);
+      if (isTargetDisabled(focused)) {
+        setFocusedOutputId(null);
+        if (selectedNodeId === focusedOutputId) setSelectedNodeId(null);
+        return;
+      }
+    }
+
+    // Also clear selection if it points at a disabled target.
+    if (selectedNodeId) {
+      const sel = allNodes.find((n: any) => n && n.id === selectedNodeId);
+      if (isTargetDisabled(sel)) setSelectedNodeId(null);
+    }
+  }, [devices?.activeOutputs, nodesFromGraph, placedNodes, focusedOutputId, selectedNodeId]);
+
+  const log = useCallback((event: string, payload?: any) => {
+    try {
+      if (payload !== undefined) console.log(`[SpectrumLayout] ${event}`, payload);
+      else console.log(`[SpectrumLayout] ${event}`);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // Compute whether a library item is used (i.e., already placed on the canvas)
   const isLibraryItemUsed = useCallback((id: string) => {
@@ -701,7 +814,10 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   // CopyPrismButton removed
 
   return (
-    <div className="flex flex-col h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden select-none" onClick={() => {}}>
+    <div
+      className="flex flex-col h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden select-none"
+      onClick={() => setSelectedNodeId(null)}
+    >
       {/* HEADER */}
       <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-6">
@@ -747,6 +863,61 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           nodes={[...(nodesFromGraph || []), ...placedNodes]}
           connections={connectionsFromGraph}
           systemActiveOutputs={devices?.activeOutputs || []}
+          selectedNodeId={selectedNodeId}
+          selectedBusId={selectedBusId}
+          focusedOutputId={focusedOutputId}
+          onSelectNodeId={setSelectedNodeId}
+          onSelectBusId={setSelectedBusId}
+          onFocusOutputId={async (outputNodeId: string | null) => {
+            if (!outputNodeId) {
+              setFocusedOutputId(null);
+              log('focusOutput', { outputNodeId: null });
+              return;
+            }
+
+            // Do not allow focusing a system-disabled (greyed) output node.
+            const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+            const n = allNodes.find((x: any) => x && x.id === outputNodeId);
+            const activeNums = Array.isArray(devices?.activeOutputs)
+              ? (devices!.activeOutputs as any[])
+                  .map((v: any) => Number(v))
+                  .filter((nn: any) => !Number.isNaN(nn))
+              : [];
+            let isSystemDisabled = false;
+            if (n?.available === false) isSystemDisabled = true;
+            if (!isSystemDisabled && activeNums.length > 0 && typeof n?.libraryId === 'string') {
+              const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+              if (m) {
+                const parentId = Number(m[1]);
+                if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) isSystemDisabled = true;
+              }
+            }
+            if (isSystemDisabled) {
+              setFocusedOutputId(null);
+              if (selectedNodeId === outputNodeId) setSelectedNodeId(null);
+              log('focusOutputIgnored(systemDisabled)', { outputNodeId });
+              return;
+            }
+
+            setFocusedOutputId(outputNodeId);
+            log('focusOutput', { outputNodeId });
+            let deviceId: number | null = null;
+            if (typeof n?.deviceId === 'number' && !Number.isNaN(n.deviceId)) {
+              deviceId = n.deviceId;
+            } else if (typeof n?.libraryId === 'string') {
+              const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+              if (m) deviceId = Number(m[1]);
+            }
+
+            if (deviceId != null && devices?.startOutput) {
+              log('startOutput', { deviceId, from: 'focusOutput' });
+              try {
+                await devices.startOutput(deviceId);
+              } catch (e) {
+                console.error('[SpectrumLayout] startOutput failed', e);
+              }
+            }
+          }}
           onConnect={async (fromNodeId: string, fromPortIdx: number, toNodeId: string, toPortIdx: number) => {
             const g = (props as any).graph;
             if (!g || typeof g.connect !== 'function') return;
@@ -754,7 +925,9 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
             const source = Number(fromNodeId.slice(5));
             const target = Number(toNodeId.slice(5));
             if (Number.isNaN(source) || Number.isNaN(target)) return;
-            await g.connect(source, fromPortIdx, target, toPortIdx, 1.0);
+            log('connect', { source, fromPortIdx, target, toPortIdx, gain: 1.0 });
+            const edgeId = await g.connect(source, fromPortIdx, target, toPortIdx, 1.0);
+            log('connected', { edgeId });
           }}
           onDisconnect={async (connectionId: string) => {
             const g = (props as any).graph;
@@ -763,7 +936,9 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
             if (!connectionId.startsWith('edge_')) return;
             const edgeId = Number(connectionId.slice(5));
             if (Number.isNaN(edgeId)) return;
+            log('disconnect', { edgeId });
             await g.disconnect(edgeId);
+            log('disconnected', { edgeId });
           }}
           onMoveNode={(id: string, x: number, y: number) => {
             // If rendering v2 nodes, update graph positions via provided graph prop

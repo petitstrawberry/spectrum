@@ -3,7 +3,7 @@
 use super::dto::*;
 use crate::audio::output::start_output_v2;
 use crate::audio::processor::get_graph_processor;
-use crate::audio::{AudioNode, Edge, EdgeId, NodeHandle, PortId};
+use crate::audio::{AudioNode, EdgeId, NodeHandle, PortId};
 use crate::audio::source::SourceNode;
 use crate::audio::bus::BusNode;
 use crate::audio::sink::SinkNode;
@@ -139,18 +139,48 @@ pub async fn add_edge(
 ) -> Result<u32, String> {
     let processor = get_graph_processor();
 
+    let gain_v = gain.unwrap_or(1.0);
+    let muted_v = muted.unwrap_or(false);
+
+    // Debug log: indicate frontend requested adding an edge (graph mutation)
+    println!(
+        "[graph] add_edge invoked: {}:{} -> {}:{} gain={} muted={}",
+        source, source_port, target, target_port, gain_v, muted_v
+    );
+
     let edge_id = processor.add_edge(
         NodeHandle::from(source),
         PortId::from(source_port),
         NodeHandle::from(target),
         PortId::from(target_port),
-        gain.unwrap_or(1.0),
-        muted.unwrap_or(false),
+        gain_v,
+        muted_v,
     );
 
     match edge_id {
-        Some(id) => Ok(id.raw()),
-        None => Err("Failed to add edge (nodes may not exist or edge already exists)".to_string()),
+        Some(id) => {
+            let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+            println!(
+                "[graph] add_edge ok: edge_id={} nodes={} edges={}",
+                id.raw(),
+                node_count,
+                edge_count
+            );
+            Ok(id.raw())
+        }
+        None => {
+            let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+            println!(
+                "[graph] add_edge FAILED: {}:{} -> {}:{} (nodes={} edges={})",
+                source,
+                source_port,
+                target,
+                target_port,
+                node_count,
+                edge_count
+            );
+            Err("Failed to add edge (nodes may not exist or edge already exists)".to_string())
+        }
     }
 }
 
@@ -158,9 +188,26 @@ pub async fn add_edge(
 pub async fn remove_edge(id: u32) -> Result<(), String> {
     let processor = get_graph_processor();
 
+    // Debug log: indicate frontend requested removing an edge (graph mutation)
+    println!("[graph] remove_edge invoked: edge_id={}", id);
+
     if processor.remove_edge(EdgeId::from(id)) {
+        let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+        println!(
+            "[graph] remove_edge ok: edge_id={} nodes={} edges={}",
+            id,
+            node_count,
+            edge_count
+        );
         Ok(())
     } else {
+        let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+        println!(
+            "[graph] remove_edge NOT_FOUND: edge_id={} (nodes={} edges={})",
+            id,
+            node_count,
+            edge_count
+        );
         Err(format!("Edge {} not found", id))
     }
 }
