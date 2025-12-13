@@ -17,6 +17,8 @@ interface Props {
   canvasRef: React.RefObject<HTMLDivElement>;
   isPanning: boolean;
   canvasTransform: { x: number; y: number; scale: number };
+  onCanvasWheel?: (e: React.WheelEvent) => void;
+  onCanvasPanStart?: (e: React.MouseEvent) => void;
   nodes?: any[];
   connections?: PatchConnection[];
   onConnect?: (fromNodeId: string, fromPortIdx: number, toNodeId: string, toPortIdx: number) => void | Promise<void>;
@@ -36,6 +38,8 @@ export default function CanvasView({
   canvasRef,
   isPanning,
   canvasTransform,
+  onCanvasWheel,
+  onCanvasPanStart,
   nodes = [],
   connections = [],
   onConnect,
@@ -285,9 +289,15 @@ export default function CanvasView({
     <div
       ref={canvasRef}
       className={`flex-1 bg-[#0b1120] relative overflow-hidden ${isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+      onWheel={(e) => {
+        if (typeof onCanvasWheel === 'function') onCanvasWheel(e);
+      }}
       onMouseDown={(e) => {
-        // v1 parity: click background clears selection
-        if (e.button !== 0) return;
+        if (typeof onCanvasPanStart === 'function') onCanvasPanStart(e);
+      }}
+      onClick={(e) => {
+        // v1 parity: click background clears selection (dragging/panning won't fire click)
+        if ((e.target as any)?.closest?.('.canvas-node')) return;
         try {
           if (typeof onSelectNodeId === 'function') onSelectNodeId(null);
           if (typeof onSelectBusId === 'function') onSelectBusId(null);
@@ -373,8 +383,6 @@ export default function CanvasView({
             })()}
           </g>
         </svg>
-        <div className="p-4 text-slate-500">Canvas area (v1 layout)</div>
-
         {nodes.map((node: any) => {
           const NodeIcon = node.icon || (() => null);
           const isDeviceNode = node.sourceType === 'device' || (node.libraryId && node.libraryId.startsWith('dev_'));

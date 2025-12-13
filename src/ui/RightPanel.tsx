@@ -2,8 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Workflow, Plus, Trash2 } from 'lucide-react';
 import { getIconForDevice } from '../hooks/useIcons';
-import { getColorForDevice } from '../hooks/useColors';
-import { getBusColor } from '../hooks/useNodeDisplay';
+import { getBusColor, getVirtualOutputDisplay } from '../hooks/useNodeDisplay';
 import type { UseDevicesReturn } from '../hooks/useDevices';
 
 interface BusInfo {
@@ -185,17 +184,17 @@ export default function RightPanel({ width, devices, buses = [], selectedBusId, 
 
           return virtuals.map((v: any) => {
             const isUsed = isLibraryItemUsed ? isLibraryItemUsed(v.id) : false;
+            const display = getVirtualOutputDisplay(v.name, v.channels || v.channelCount || 2, v.iconHint);
+            const Icon = display.icon;
+            const iconColor = display.iconColor || 'text-slate-500';
+            const isCssColor = typeof iconColor === 'string' && (iconColor.startsWith('rgb') || iconColor.startsWith('#') || iconColor.startsWith('hsl'));
             return (
               <div key={v.id} onMouseDown={!isUsed && handleLibraryMouseDown ? (e) => handleLibraryMouseDown(e, 'lib_target', v.id) : undefined} className={`group flex items-center gap-3 p-3 rounded-xl border border-slate-700 bg-slate-800/80 hover:border-pink-500/50 hover:bg-slate-800 ${isUsed ? 'cursor-default opacity-40' : 'cursor-grab active:cursor-grabbing'}`}>
-              {(() => {
-                const Icon = getIconForDevice(v.iconHint, v.name);
-                const color = getColorForDevice(v.name, v.iconHint);
-                return (
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center bg-slate-950 ${color.replace('text-', 'text-')}`}>
-                    <Icon className={`w-4 h-4 ${color}`} />
-                  </div>
-                );
-              })()}
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-slate-950">
+                  {isCssColor
+                    ? <Icon className="w-4 h-4" style={{ color: iconColor }} />
+                    : <Icon className={`w-4 h-4 ${iconColor}`} />}
+                </div>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-bold text-slate-200 truncate">{v.name}</div>
                 <div className="text-[9px] text-slate-500 uppercase">{v.channels}ch • {(v.transportType ? String(v.transportType) : 'Virtual')}</div>

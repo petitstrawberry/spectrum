@@ -250,6 +250,7 @@ interface Props {
   onMasterGainChange?: (gain: number, opts?: { commit?: boolean }) => void;
   onMasterChannelGainChange?: (channel: number, gain: number, opts?: { commit?: boolean }) => void;
   onPluginsChange?: () => void;
+  onMasterResizeStart?: (e: React.MouseEvent) => void;
 }
 
 export default function MixerPanel({
@@ -277,6 +278,7 @@ export default function MixerPanel({
   onMasterGainChange,
   onMasterChannelGainChange,
   onPluginsChange,
+  onMasterResizeStart,
 }: Props) {
   const strips = Array.isArray(mixerStrips) ? mixerStrips : [];
   const hasMixerTarget = selectedNode?.type === 'target' || selectedNode?.type === 'bus';
@@ -916,14 +918,14 @@ export default function MixerPanel({
       </div>
 
       {/* Mixer Channels */}
-      <div className="flex-1 flex flex-col min-w-0 bg-[#162032]">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-[#162032]">
         <div className="h-8 bg-slate-900/50 border-b border-slate-800 flex items-center px-4 justify-between shrink-0">
           <div className="flex items-center gap-3">
             <Maximize2 className="w-3 h-3 text-slate-500" />
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Select Output or Bus on Canvas to Mix</span>
           </div>
         </div>
-        <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
+        <div className="flex-1 flex min-h-0 overflow-x-auto overflow-y-hidden p-4 gap-2 items-stretch">
           {hasMixerTarget ? (
             <>
               {/* Mixer channel selector (applies to output or bus) */}
@@ -1023,7 +1025,7 @@ export default function MixerPanel({
               const isEditingDb = editingStripId === strip.id;
 
               return (
-                <div key={strip.id} className="w-32 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none">
+                <div key={strip.id} className="w-32 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none min-h-0">
                   <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
                     <div className="w-6 h-6 rounded-lg bg-slate-950 border border-slate-600 flex items-center justify-center shadow-lg">
                       {renderIcon(Icon, iconColor)}
@@ -1033,7 +1035,7 @@ export default function MixerPanel({
                     <div className="text-[7px] font-mono text-slate-500">{chLabel}</div>
                     <div className="text-[9px] font-bold truncate text-slate-300">{title}</div>
                   </div>
-                  <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
+                  <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative min-h-0">
                     <div className="relative mr-2">
                       <FaderScale onSelectDb={(dbSel) => setStripGain(strip, dbToGain(dbSel), { commit: true })} />
                       <div
@@ -1136,7 +1138,12 @@ export default function MixerPanel({
         </div>
       </div>
 
-      <div className="w-1 bg-transparent hover:bg-amber-500/50 cursor-ew-resize z-40 shrink-0 transition-colors" />
+      <div
+        className="w-1 bg-transparent hover:bg-amber-500/50 cursor-ew-resize z-40 shrink-0 transition-colors"
+        onMouseDown={(e) => {
+          if (typeof onMasterResizeStart === 'function') onMasterResizeStart(e);
+        }}
+      />
 
       {/* Master Section */}
       <div className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl min-h-0" style={{ width: masterWidth }}>
@@ -1188,9 +1195,9 @@ export default function MixerPanel({
               <div className="text-[10px] text-slate-600 p-2">No outputs</div>
             )}
           </div>
-          <div className="w-28 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
+          <div className="w-28 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl min-h-0">
             <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
-            <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
+            <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative min-h-0">
               <div className="relative mr-2">
                 <FaderScale
                   onSelectDb={(dbSel) => {

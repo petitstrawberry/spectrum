@@ -174,18 +174,133 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     channelCount: d.channelCount ?? d.channels ?? d.channels_count ?? d.channelsCount ?? 2,
   }));
   const channelColors = useChannelColors(channelSources || []);
-  const leftSidebarWidth = 300;
-  const rightSidebarWidth = 300;
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const isPanning = false;
-  const canvasTransform = { x: 0, y: 0, scale: 1 };
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(300);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
+  const [mixerHeight, setMixerHeight] = useState(260);
+  const [masterWidth, setMasterWidth] = useState(300);
+
+  // v1 parity: Canvas pan/zoom
+  const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const canvasTransformRef = useRef(canvasTransform);
+  useEffect(() => { canvasTransformRef.current = canvasTransform; }, [canvasTransform]);
+  const [isPanning, setIsPanning] = useState(false);
+  const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
+
+  const handleCanvasWheel = useCallback((e: any) => {
+    e.preventDefault();
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Pinch gesture (ctrlKey is set on trackpad pinch)
+    if (e.ctrlKey) {
+      const zoomIntensity = 0.01;
+      const zoomFactor = 1 - e.deltaY * zoomIntensity;
+      setCanvasTransform((prev: any) => {
+        const nextScale = Math.min(Math.max(prev.scale * zoomFactor, 0.25), 3);
+        const scaleChange = nextScale / prev.scale;
+        const nextX = mouseX - (mouseX - prev.x) * scaleChange;
+        const nextY = mouseY - (mouseY - prev.y) * scaleChange;
+        return { x: nextX, y: nextY, scale: nextScale };
+      });
+      return;
+    }
+
+    // Two-finger scroll for panning
+    setCanvasTransform((prev: any) => ({
+      ...prev,
+      x: prev.x - e.deltaX,
+      y: prev.y - e.deltaY,
+    }));
+  }, []);
+
+  const handleCanvasPanStart = useCallback((e: any) => {
+    // Only start pan if clicking on empty canvas (not on nodes/cables)
+    if ((e.target as HTMLElement)?.closest?.('.canvas-node')) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    setIsPanning(true);
+    panStart.current = {
+      x: e.clientX,
+      y: e.clientY,
+      canvasX: canvasTransformRef.current.x,
+      canvasY: canvasTransformRef.current.y,
+    };
+
+    const handlePanMove = (ev: MouseEvent) => {
+      if (!panStart.current) return;
+      const dx = ev.clientX - panStart.current.x;
+      const dy = ev.clientY - panStart.current.y;
+      setCanvasTransform((prev: any) => ({
+        ...prev,
+        x: panStart.current!.canvasX + dx,
+        y: panStart.current!.canvasY + dy,
+      }));
+    };
+
+    const handlePanEnd = () => {
+      setIsPanning(false);
+      panStart.current = null;
+      document.removeEventListener('mousemove', handlePanMove);
+      document.removeEventListener('mouseup', handlePanEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handlePanMove);
+    document.addEventListener('mouseup', handlePanEnd);
+  }, []);
+
+  const handleResizeStart = useCallback((
+    e: any,
+    direction: 'left' | 'right' | 'top' | 'master',
+    currentValue: number,
+    setter: (value: number) => void,
+    minValue: number,
+    maxValue: number,
+    getBounds?: () => { min: number; max: number }
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const startPos = direction === 'top' ? e.clientY : e.clientX;
+    const startValue = currentValue;
+
+    const handleMove = (ev: MouseEvent) => {
+      const currentPos = direction === 'top' ? ev.clientY : ev.clientX;
+      let delta = currentPos - startPos;
+      if (direction === 'right' || direction === 'top' || direction === 'master') {
+        delta = -delta;
+      }
+      const bounds = typeof getBounds === 'function' ? getBounds() : { min: minValue, max: maxValue };
+      const safeMin = Number.isFinite(bounds.min) ? bounds.min : minValue;
+      const safeMax = Number.isFinite(bounds.max) ? bounds.max : maxValue;
+      const next = Math.min(safeMax, Math.max(safeMin, startValue + delta));
+      setter(next);
+    };
+
+    const handleEnd = () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = direction === 'top' ? 'ns-resize' : 'ew-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleEnd);
+  }, []);
   const connections: Connection[] = [];
   const nodes: NodeData[] = [];
   const nodesById = new Map<string, NodeData>();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
-  const mixerHeight = 260;
-  const masterWidth = 300;
   const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
   const [masterGainsByOutputId, setMasterGainsByOutputId] = useState<Record<string, number[]>>({});
   const [focusedOutputChannelById, setFocusedOutputChannelById] = useState<Record<string, number>>({});
@@ -1352,9 +1467,6 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
   // No-op handlers to satisfy JSX bindings
   const handleRefresh = async () => { if (devices?.refresh) await devices.refresh(); };
-  const handleResizeStart: any = () => {};
-  const handleCanvasWheel = () => {};
-  const handleCanvasPanStart = () => {};
   const deleteConnection = () => {};
   const startWire = () => {};
   const endWire = () => {};
@@ -1467,12 +1579,30 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           handleLibraryMouseDown={handleLibraryMouseDown}
           onOpenPrismApp={() => { if (devices?.refresh) devices.refresh().catch(console.error); }}
         />
-        <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
+        <div
+          className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors"
+          onMouseDown={(e) => handleResizeStart(
+            e,
+            'left',
+            leftSidebarWidth,
+            setLeftSidebarWidth,
+            180,
+            520,
+            () => {
+              const viewportWidth = window.innerWidth || 0;
+              const minCenterWidth = 420;
+              const computedMax = Math.min(520, viewportWidth - rightSidebarWidth - minCenterWidth);
+              return { min: 180, max: Math.max(180, computedMax) };
+            }
+          )}
+        />
         <div className="flex-1 relative flex flex-col">
           <CanvasView
             canvasRef={canvasRef}
             isPanning={isPanning}
             canvasTransform={canvasTransform}
+            onCanvasWheel={handleCanvasWheel}
+            onCanvasPanStart={handleCanvasPanStart}
           nodes={[...(nodesFromGraph || []), ...placedNodes]}
           connections={connectionsFromGraph}
           systemActiveOutputs={devices?.activeOutputs || []}
@@ -1549,7 +1679,23 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           }}
           />
         </div>
-        <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
+        <div
+          className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors"
+          onMouseDown={(e) => handleResizeStart(
+            e,
+            'right',
+            rightSidebarWidth,
+            setRightSidebarWidth,
+            200,
+            520,
+            () => {
+              const viewportWidth = window.innerWidth || 0;
+              const minCenterWidth = 420;
+              const computedMax = Math.min(520, viewportWidth - leftSidebarWidth - minCenterWidth);
+              return { min: 200, max: Math.max(200, computedMax) };
+            }
+          )}
+        />
         <RightPanel
           width={rightSidebarWidth}
           devices={devices}
@@ -1563,7 +1709,24 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         />
       </div>
 
-      <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
+      <div
+        className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors"
+        onMouseDown={(e) => handleResizeStart(
+          e,
+          'top',
+          mixerHeight,
+          setMixerHeight,
+          350,
+          520,
+          () => {
+            const viewportHeight = window.innerHeight || 0;
+            const headerHeight = 56; // h-14
+            const minCanvasHeight = 240;
+            const computedMax = Math.min(520, viewportHeight - headerHeight - minCanvasHeight);
+            return { min: 350, max: Math.max(350, computedMax) };
+          }
+        )}
+      />
 
       <MixerPanel
         mixerHeight={mixerHeight}
@@ -1590,6 +1753,20 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         onMasterGainChange={setActiveMasterGain}
         onMasterChannelGainChange={setActiveMasterChannelGain}
         onPluginsChange={handlePluginsChange}
+        onMasterResizeStart={(e) => handleResizeStart(
+          e,
+          'master',
+          masterWidth,
+          setMasterWidth,
+          240,
+          520,
+          () => {
+            const viewportWidth = window.innerWidth || 0;
+            const minMixerStripArea = 360;
+            const computedMax = Math.min(520, viewportWidth - minMixerStripArea);
+            return { min: 240, max: Math.max(240, computedMax) };
+          }
+        )}
       />
     </div>
   );
