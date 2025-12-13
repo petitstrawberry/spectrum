@@ -106,31 +106,72 @@ fn get_device_uid(device_id: u32) -> Option<String> {
     Some(cf_string.to_string())
 }
 
-/// Guess icon hint from device name
-fn get_icon_hint(name: &str) -> String {
-    let lower = name.to_lowercase();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportType {
+    Bluetooth,
+    USB,
+    HDMI,
+    DisplayPort,
+    FireWire,
+    Thunderbolt,
+    Virtual,
+    BuiltIn,
+    PCI,
+    PCIe,
+    AVB,
+    Unknown,
+}
 
-    if lower.contains("headphone") || lower.contains("ヘッドフォン") {
-        "headphones".to_string()
-    } else if lower.contains("speaker") || lower.contains("スピーカー") {
-        "speaker".to_string()
-    } else if lower.contains("airpods") {
-        "airpods".to_string()
-    } else if lower.contains("bluetooth") || lower.contains("bt") {
-        "bluetooth".to_string()
-    } else if lower.contains("usb") {
-        "usb".to_string()
-    } else if lower.contains("hdmi") || lower.contains("displayport") {
-        "display".to_string()
-    } else if lower.contains("aggregate") || lower.contains("multi") {
-        "aggregate".to_string()
-    } else {
-        "default".to_string()
+impl ToString for TransportType {
+    fn to_string(&self) -> String {
+        match self {
+            TransportType::Bluetooth => "bluetooth",
+            TransportType::USB => "usb",
+            TransportType::HDMI => "hdmi",
+            TransportType::DisplayPort => "displayport",
+            TransportType::BuiltIn => "built-in",
+            TransportType::FireWire => "firewire",
+            TransportType::Thunderbolt => "thunderbolt",
+            TransportType::Virtual => "virtual",
+            TransportType::PCI => "pci",
+            TransportType::PCIe => "pcie",
+            TransportType::AVB => "avb",
+            TransportType::Unknown => "unknown",
+        }
+        .to_string()
+    }
+}
+
+/// Guess icon hint from device UID and transport type
+fn get_icon_hint(uid: &str, transport_type: &TransportType) -> String {
+    println!("UID: {}, Transport: {:?}", uid, transport_type);
+    // Check exact UID hits first
+    match uid {
+        "BuiltInSpeakerDevice" => return "speaker".to_string(),
+        "BuiltInHeadphoneOutputDevice" => return "headphones".to_string(),
+        _ => ()
+    }
+
+    // Check substrings in UID
+    // AppleUSBAudioEngine:Apple Inc.:Studio Display
+    if uid.starts_with("AppleUSBAudioEngine:Apple Inc.:Studio Display") {
+        return "display".to_string();
+    }
+
+    // Check transport type
+    match transport_type {
+        TransportType::Bluetooth => "bluetooth".to_string(),
+        TransportType::USB => "usb".to_string(),
+        TransportType::HDMI => "display".to_string(),
+        TransportType::DisplayPort => "display".to_string(),
+        TransportType::Virtual => "virtual".to_string(),
+        TransportType::Unknown => "default".to_string(),
+        _ => "default".to_string(),
     }
 }
 
 /// Get transport type for a device
-fn get_transport_type(device_id: u32) -> String {
+fn get_transport_type(device_id: u32) -> TransportType {
     use coreaudio::sys::kAudioDevicePropertyTransportType;
 
     let address = AudioObjectPropertyAddress {
@@ -153,26 +194,45 @@ fn get_transport_type(device_id: u32) -> String {
     };
 
     if status != 0 {
-        return "unknown".to_string();
+        eprint!("Failed to get transport type for device {}", device_id);
+        return TransportType::Unknown;
     }
 
     // Convert FourCC to string
     let bytes = transport_type.to_be_bytes();
     let four_cc = String::from_utf8(bytes.to_vec()).unwrap_or_default();
 
-    match four_cc.trim() {
-        "blut" => "bluetooth".to_string(),
-        "usba" => "usb".to_string(),
-        "hdmi" => "hdmi".to_string(),
-        "dprt" => "displayport".to_string(),
-        "fire" => "firewire".to_string(),
-        "thun" => "thunderbolt".to_string(),
-        "virt" => "virtual".to_string(),
-        "pci" => "pci".to_string(),
-        "pcie" => "pci-express".to_string(),
-        "avb" => "avb".to_string(),
-        _ => "unknown".to_string(),
-    }
+    // Normalize and match on substrings to tolerate short/variant FourCCs
+    let s = four_cc.trim().to_lowercase();
+
+    // Prefer explicit built-in/internal tokens to avoid confusing built-in with Bluetooth
+    let ret = if s.contains("bltn") || s.contains("built") || s.contains("internal") {
+        TransportType::BuiltIn
+    } else if s.contains("blut") || s.contains("blue") || s.contains("blu") || s.contains("bt") {
+        TransportType::Bluetooth
+    } else if s.contains("usba") || s.contains("usb") {
+        TransportType::USB
+    } else if s.contains("hdmi") {
+        TransportType::HDMI
+    } else if s.contains("dprt") || s.contains("display") {
+        TransportType::DisplayPort
+    } else if s.contains("fire") {
+        TransportType::FireWire
+    } else if s.contains("thun") || s.contains("thdb") || s.contains("thdr") {
+        TransportType::Thunderbolt
+    } else if s.contains("virt") {
+        TransportType::Virtual
+    } else if s.contains("pcie") {
+        TransportType::PCIe
+    } else if s.contains("pci") {
+        TransportType::PCI
+    } else if s.contains("avb") {
+        TransportType::AVB
+    } else {
+        TransportType::Unknown
+    };
+
+    ret
 }
 
 /// Get list of output devices (with virtual device expansion for aggregate devices)
@@ -214,6 +274,8 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                         continue;
                     }
 
+                    let transport_type = get_transport_type(sub.original_id);
+
                     result.push(OutputDeviceDto {
                         id: format!("vout_{}_{}", device_id, offset),
                         device_id,
@@ -224,56 +286,16 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                         channel_count: sub.channels.min(255) as u8,
                         name: sub.name.clone(),
                         device_type: "aggregate_sub".to_string(),
-                        transport_type: get_transport_type(sub.original_id),
-                        icon_hint: get_icon_hint(&sub.name),
+                        transport_type: transport_type.to_string(),
+                        icon_hint: get_icon_hint(sub.uid.as_deref().unwrap_or(""), &transport_type),
                         is_aggregate_sub: true,
                     });
 
                     offset += sub.channels;
                 }
-
-                let covered: u32 = subs.iter().map(|s| s.channels).sum();
-                if covered < output_channels {
-                    let rem = output_channels - covered;
-                    result.push(OutputDeviceDto {
-                        id: format!("vout_{}_{}", device_id, covered),
-                        device_id,
-                        device_uid: get_device_uid(device_id),
-                        subdevice_uid: None,
-                        parent_name: Some(name.clone()),
-                        channel_offset: covered as u8,
-                        channel_count: rem.min(255) as u8,
-                        name: format!("{} (Ch {}-{})", name, covered + 1, covered + rem),
-                        device_type: "aggregate_sub".to_string(),
-                        transport_type: transport_type.clone(),
-                        icon_hint: get_icon_hint(&name),
-                        is_aggregate_sub: true,
-                    });
-                }
-            } else {
-                // Fallback: create virtual stereo pairs
-                let stereo_pairs = (output_channels + 1) / 2;
-                for pair in 0..stereo_pairs {
-                    let offset = pair * 2;
-                    let ch_count = (output_channels - offset).min(2);
-
-                    result.push(OutputDeviceDto {
-                        id: format!("vout_{}_{}", device_id, offset),
-                        device_id,
-                        device_uid: get_device_uid(device_id),
-                        subdevice_uid: None,
-                        parent_name: Some(name.clone()),
-                        channel_offset: offset as u8,
-                        channel_count: ch_count as u8,
-                        name: format!("{} (Ch {}-{})", name, offset + 1, offset + ch_count),
-                        device_type: "aggregate_sub".to_string(),
-                        transport_type: transport_type.clone(),
-                        icon_hint: get_icon_hint(&name),
-                        is_aggregate_sub: true,
-                    });
-                }
             }
         } else {
+            let device_uid = get_device_uid(device_id);
             // Regular device - single entry
             result.push(OutputDeviceDto {
                 id: format!("vout_{}_0", device_id),
@@ -281,12 +303,12 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
                 channel_offset: 0,
                 channel_count: output_channels.min(255) as u8,
                 name: name.clone(),
-                device_uid: get_device_uid(device_id),
+                device_uid: device_uid.clone(),
                 subdevice_uid: None,
                 parent_name: None,
                 device_type: "physical".to_string(),
-                transport_type: transport_type.clone(),
-                icon_hint: get_icon_hint(&name),
+                transport_type: transport_type.to_string(),
+                icon_hint: get_icon_hint(device_uid.as_deref().unwrap_or(""), &transport_type),
                 is_aggregate_sub: false,
             });
         }

@@ -2,25 +2,39 @@ import { Headphones, Speaker, Monitor, Radio, Cast, Video, Volume2, Gamepad2, Gl
 import type { LucideIcon } from 'lucide-react';
 
 export function getIconForDevice(iconHint?: string | null, name?: string): LucideIcon {
-  const hint = (iconHint || '').toLowerCase();
-  if (hint.includes('headphone') || hint.includes('headphones')) return Headphones;
-  if (hint.includes('speaker')) return Speaker;
-  if (hint.includes('airpods')) return Headphones;
-  if (hint.includes('bluetooth') || hint.includes('bt')) return Headphones;
-  if (hint.includes('usb')) return Volume2;
-  if (hint.includes('display') || hint.includes('hdmi') || hint.includes('displayport')) return Monitor;
-  if (hint.includes('aggregate') || hint.includes('virtual') || hint.includes('multi') || hint.includes('blackhole')) return Radio;
-  if (hint.includes('airplay')) return Cast;
+  // Use backend-provided `icon_hint` exclusively when present; do not perform
+  // name-based heuristics in the UI. If `iconHint` is absent or unrecognized,
+  // return a neutral generic icon.
+  const hintRaw = iconHint ?? null;
+  if (hintRaw) {
+    const hint = String(hintRaw).toLowerCase().trim();
+    // Exact token map first
+    if (hint === 'music' || hint === 'main') return Music;
+    if (hint === 'headphone' || hint === 'headphones' || hint === 'headset' || hint === 'headsets') return Headphones;
+    if (hint === 'speaker' || hint === 'speakers') return Speaker;
+    if (hint === 'airpods') return Headphones;
+    if (hint === 'bluetooth' || hint === 'bt') return Headphones;
+    if (hint === 'usb') return Volume2;
+    if (hint === 'monitor' || hint === 'display' || hint === 'hdmi' || hint === 'displayport') return Monitor;
+    if (hint === 'virtual' || hint === 'multi') return Radio;
+    if (hint === 'airplay') return Cast;
+    if (hint === 'cast') return Cast;
 
-  // Fallback to name-based heuristics
-  const lower = (name || '').toLowerCase();
-  if (lower.includes('headphone') || lower.includes('airpods')) return Headphones;
-  if (lower.includes('speaker') || lower.includes('built-in')) return Speaker;
-  if (lower.includes('monitor') || lower.includes('display')) return Monitor;
-  if (lower.includes('blackhole') || lower.includes('virtual')) return Radio;
-  if (lower.includes('airplay')) return Cast;
-  if (lower.includes('obs') || lower.includes('stream')) return Video;
+    // Substring fallback (still only using iconHint)
+    if (hint.includes('headphone') || hint.includes('headphones')) return Headphones;
+    if (hint.includes('speaker')) return Speaker;
+    if (hint.includes('airpods')) return Headphones;
+    if (hint.includes('bluetooth') || hint.includes('bt')) return Headphones;
+    if (hint.includes('usb')) return Volume2;
+    if (hint.includes('display') || hint.includes('hdmi') || hint.includes('displayport')) return Monitor;
+    if (hint.includes('virtual') || hint.includes('multi')) return Radio;
+    if (hint.includes('airplay')) return Cast;
 
+    // Unrecognized iconHint: return neutral generic icon rather than guessing from name
+    return Volume2;
+  }
+
+  // iconHint not provided — do NOT attempt name-based detection; return neutral
   return Volume2;
 }
 
