@@ -128,6 +128,8 @@ pub use api::set_buffer_size;
 pub use api::get_app_icon_by_pid;
 // Output runtime
 pub use api::get_output_runtime;
+// Output master
+pub use api::set_output_gain;
 
 // =============================================================================
 // Legacy Commands (For backward compatibility)
@@ -390,6 +392,8 @@ pub fn run() {
             set_buffer_size,
             // v2 API - Output runtime
             get_output_runtime,
+            // v2 API - Output master
+            set_output_gain,
             // Legacy commands
             get_prism_clients,
             set_routing,

@@ -348,6 +348,15 @@ export async function getOutputRuntime(): Promise<number | null> {
   return invoke<number | null>('get_output_runtime');
 }
 
+// =============================================================================
+// Output (Master)
+// =============================================================================
+
+/** Set output node (sink) gain (linear). */
+export async function setOutputGain(outputHandle: number, gain: number): Promise<void> {
+  return invoke('set_output_gain', { outputHandle, gain });
+}
+
 export async function getSystemStatus(): Promise<SystemStatusDto> {
   return invoke<SystemStatusDto>('get_system_status');
 }

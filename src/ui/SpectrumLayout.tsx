@@ -36,7 +36,7 @@ import { useChannelColors } from '../hooks/useChannelColors';
 import { getColorForDevice } from '../hooks/useColors';
 import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, getVirtualOutputDisplay, getBusDisplay } from '../hooks/useNodeDisplay';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { addSourceNode, addSinkNode, removeNode } from '../lib/api';
+import { addSourceNode, addSinkNode, removeNode, setOutputGain } from '../lib/api';
 
 // --- Types ---
 
@@ -175,6 +175,8 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const mixerHeight = 260;
   const masterWidth = 300;
   const [focusedOutputId, setFocusedOutputId] = useState<string | null>(null);
+  const [masterGainByOutputId, setMasterGainByOutputId] = useState<Record<string, number>>({});
+  const masterLastSendMsRef = useRef<number>(0);
   const selectedBus: any = null;
   const focusedTarget: any = null;
   const focusedTargetPorts = 2;
@@ -185,6 +187,31 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const availableOutputDevices: any[] = [];
   const outputTargets: any[] = [];
   const libraryDrag: any = null;
+
+  const activeMasterGain = useMemo(() => {
+    if (!focusedOutputId) return 1.0;
+    const g = masterGainByOutputId[focusedOutputId];
+    return typeof g === 'number' && Number.isFinite(g) ? g : 1.0;
+  }, [focusedOutputId, masterGainByOutputId]);
+
+  const setActiveMasterGain = useCallback((gain: number, opts?: { commit?: boolean }) => {
+    if (!focusedOutputId) return;
+    if (!focusedOutputId.startsWith('node_')) return;
+    const outputHandle = Number(focusedOutputId.slice(5));
+    if (Number.isNaN(outputHandle)) return;
+    const g = Math.max(0, Math.min(4, Number(gain)));
+    setMasterGainByOutputId((prev) => ({ ...prev, [focusedOutputId]: g }));
+
+    const shouldCommit = opts?.commit ?? false;
+    const now = performance.now();
+    const last = masterLastSendMsRef.current || 0;
+    if (!shouldCommit && now - last < 33) return;
+    masterLastSendMsRef.current = now;
+
+    void setOutputGain(outputHandle, g).catch((err) => {
+      console.warn('[master] setOutputGain failed', err);
+    });
+  }, [focusedOutputId]);
 
   // Nodes placed on the canvas (local UI state for visual feedback)
   const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
@@ -251,7 +278,9 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       if (firstPlacedTarget?.id) firstTargetId = firstPlacedTarget.id;
     }
 
-    if (firstTargetId) setFocusedOutputId(firstTargetId);
+    if (firstTargetId) {
+      setFocusedOutputId(firstTargetId);
+    }
   }, [focusedOutputId, graph, placedNodes, devices?.activeOutputs]);
 
   const connectionsFromGraph: Connection[] = useMemo(() => {
@@ -582,6 +611,138 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       // ignore
     }
   }, []);
+
+  const mixerOutputTargets = useMemo(() => {
+    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    const activeNums = Array.isArray(devices?.activeOutputs)
+      ? (devices!.activeOutputs as any[])
+          .map((v: any) => Number(v))
+          .filter((n: any) => !Number.isNaN(n))
+      : [];
+
+    const targets = allNodes
+      .filter((n: any) => n && n.type === 'target')
+      .map((n: any) => {
+        let label = n.label || 'Output';
+        let subLabel = n.subLabel || '';
+        let icon: any = n.icon || Monitor;
+        let iconColor: any = n.iconColor || n.color || 'text-slate-500';
+
+        let parentDeviceId: number | null = null;
+        if (typeof n.deviceId === 'number' && !Number.isNaN(n.deviceId)) parentDeviceId = n.deviceId;
+        if (parentDeviceId == null && typeof n.libraryId === 'string') {
+          const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+          if (m) parentDeviceId = Number(m[1]);
+        }
+
+        // Prefer virtual output metadata for display, if present.
+        if (typeof n.libraryId === 'string' && n.libraryId.startsWith('vout_')) {
+          const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === n.libraryId);
+          if (vEntry) {
+            const display = getVirtualOutputDisplay(vEntry.name, vEntry.channels || vEntry.channelCount || 2, vEntry.iconHint);
+            label = display.label;
+            subLabel = display.subLabel;
+            icon = display.icon;
+            iconColor = display.iconColor;
+          }
+        }
+
+        // System-disabled (greyed) logic: if runtime is active on some device(s),
+        // outputs for other devices are disabled.
+        let disabled = false;
+        if (n?.available === false) disabled = true;
+        if (!disabled && activeNums.length > 0 && parentDeviceId != null) {
+          if (!activeNums.includes(parentDeviceId)) disabled = true;
+        }
+
+        return {
+          id: n.id,
+          label,
+          subLabel,
+          icon,
+          iconColor,
+          disabled,
+        };
+      });
+
+    // Stable-ish ordering
+    targets.sort((a: any, b: any) => String(a.label).localeCompare(String(b.label)));
+    return targets;
+  }, [nodesFromGraph, placedNodes, devices?.virtualOutputDevices, devices?.activeOutputs]);
+
+  const handleFocusOutputId = useCallback(async (outputNodeId: string | null) => {
+    if (!outputNodeId) {
+      setFocusedOutputId(null);
+      log('focusOutput', { outputNodeId: null });
+      return;
+    }
+
+    // Do not allow focusing a system-disabled (greyed) output node.
+    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    const n = allNodes.find((x: any) => x && x.id === outputNodeId);
+    const activeNums = Array.isArray(devices?.activeOutputs)
+      ? (devices!.activeOutputs as any[])
+          .map((v: any) => Number(v))
+          .filter((nn: any) => !Number.isNaN(nn))
+      : [];
+    let isSystemDisabled = false;
+    if (n?.available === false) isSystemDisabled = true;
+    if (!isSystemDisabled && activeNums.length > 0 && typeof n?.libraryId === 'string') {
+      const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+      if (m) {
+        const parentId = Number(m[1]);
+        if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) isSystemDisabled = true;
+      }
+    }
+    if (isSystemDisabled) {
+      setFocusedOutputId(null);
+      if (selectedNodeId === outputNodeId) setSelectedNodeId(null);
+      log('focusOutputIgnored(systemDisabled)', { outputNodeId });
+      return;
+    }
+
+    if (!outputNodeId.startsWith('node_')) {
+      setFocusedOutputId(null);
+      if (selectedNodeId === outputNodeId) setSelectedNodeId(null);
+      log('focusOutputIgnored(nonNodeId)', { outputNodeId });
+      return;
+    }
+
+    const outputHandle = Number(outputNodeId.slice(5));
+    if (Number.isNaN(outputHandle)) {
+      setFocusedOutputId(null);
+      if (selectedNodeId === outputNodeId) setSelectedNodeId(null);
+      log('focusOutputIgnored(badHandle)', { outputNodeId });
+      return;
+    }
+
+    let deviceId: number | null = null;
+    if (typeof n?.deviceId === 'number' && !Number.isNaN(n.deviceId)) {
+      deviceId = n.deviceId;
+    } else if (typeof n?.libraryId === 'string') {
+      const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+      if (m) deviceId = Number(m[1]);
+    }
+
+    setFocusedOutputId(outputNodeId);
+    log('focusOutput', { outputNodeId, deviceId, outputHandle });
+
+    // Apply per-output stored master gain (UI state) to backend master gain.
+    const nextGainRaw = masterGainByOutputId[outputNodeId];
+    const nextGain = typeof nextGainRaw === 'number' && Number.isFinite(nextGainRaw) ? nextGainRaw : 1.0;
+    void setOutputGain(outputHandle, Math.max(0, Math.min(4, nextGain))).catch((err) => {
+      console.warn('[master] setOutputGain failed on focus change', err);
+    });
+
+    if (deviceId != null && devices?.startOutput) {
+      log('startOutput', { deviceId, from: 'focusOutput' });
+      try {
+        await devices.startOutput(deviceId);
+      } catch (e) {
+        console.error('[SpectrumLayout] startOutput failed', e);
+      }
+    }
+  }, [devices, log, nodesFromGraph, placedNodes, selectedNodeId, masterGainByOutputId]);
 
   // Compute whether a library item is used (i.e., already placed on the canvas)
   const isLibraryItemUsed = useCallback((id: string) => {
@@ -1037,56 +1198,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           focusedOutputId={focusedOutputId}
           onSelectNodeId={setSelectedNodeId}
           onSelectBusId={setSelectedBusId}
-          onFocusOutputId={async (outputNodeId: string | null) => {
-            if (!outputNodeId) {
-              setFocusedOutputId(null);
-              log('focusOutput', { outputNodeId: null });
-              return;
-            }
-
-            // Do not allow focusing a system-disabled (greyed) output node.
-            const allNodes = [...(nodesFromGraph || []), ...placedNodes];
-            const n = allNodes.find((x: any) => x && x.id === outputNodeId);
-            const activeNums = Array.isArray(devices?.activeOutputs)
-              ? (devices!.activeOutputs as any[])
-                  .map((v: any) => Number(v))
-                  .filter((nn: any) => !Number.isNaN(nn))
-              : [];
-            let isSystemDisabled = false;
-            if (n?.available === false) isSystemDisabled = true;
-            if (!isSystemDisabled && activeNums.length > 0 && typeof n?.libraryId === 'string') {
-              const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
-              if (m) {
-                const parentId = Number(m[1]);
-                if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) isSystemDisabled = true;
-              }
-            }
-            if (isSystemDisabled) {
-              setFocusedOutputId(null);
-              if (selectedNodeId === outputNodeId) setSelectedNodeId(null);
-              log('focusOutputIgnored(systemDisabled)', { outputNodeId });
-              return;
-            }
-
-            setFocusedOutputId(outputNodeId);
-            log('focusOutput', { outputNodeId });
-            let deviceId: number | null = null;
-            if (typeof n?.deviceId === 'number' && !Number.isNaN(n.deviceId)) {
-              deviceId = n.deviceId;
-            } else if (typeof n?.libraryId === 'string') {
-              const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
-              if (m) deviceId = Number(m[1]);
-            }
-
-            if (deviceId != null && devices?.startOutput) {
-              log('startOutput', { deviceId, from: 'focusOutput' });
-              try {
-                await devices.startOutput(deviceId);
-              } catch (e) {
-                console.error('[SpectrumLayout] startOutput failed', e);
-              }
-            }
-          }}
+          onFocusOutputId={handleFocusOutputId}
           onConnect={async (fromNodeId: string, fromPortIdx: number, toNodeId: string, toPortIdx: number) => {
             const g = (props as any).graph;
             if (!g || typeof g.connect !== 'function') return;
@@ -1170,7 +1282,20 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
 
-      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} selectedBus={selectedBusData} selectedNode={selectedNodeData} mixerStrips={mixerStrips} onPluginsChange={handlePluginsChange} />
+      <MixerPanel
+        mixerHeight={mixerHeight}
+        masterWidth={masterWidth}
+        channelSources={channelSources}
+        selectedBus={selectedBusData}
+        selectedNode={selectedNodeData}
+        mixerStrips={mixerStrips}
+        outputTargets={mixerOutputTargets}
+        focusedOutputId={focusedOutputId}
+        onFocusOutputId={handleFocusOutputId}
+        masterGain={activeMasterGain}
+        onMasterGainChange={setActiveMasterGain}
+        onPluginsChange={handlePluginsChange}
+      />
     </div>
   );
 }

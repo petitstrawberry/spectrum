@@ -202,12 +202,45 @@ interface Props {
   selectedBus?: BusInfo | null;
   selectedNode?: UINode | null;
   mixerStrips?: any[];
+  outputTargets?: Array<{
+    id: string;
+    label: string;
+    subLabel?: string;
+    icon?: any;
+    iconColor?: string;
+    disabled?: boolean;
+  }>;
+  focusedOutputId?: string | null;
+  onFocusOutputId?: (outputNodeId: string | null) => void | Promise<void>;
+  masterGain?: number;
+  onMasterGainChange?: (gain: number, opts?: { commit?: boolean }) => void;
   onPluginsChange?: () => void;
 }
 
-export default function MixerPanel({ mixerHeight, masterWidth, channelSources = [], selectedBus, selectedNode, mixerStrips = [], onPluginsChange }: Props) {
+export default function MixerPanel({
+  mixerHeight,
+  masterWidth,
+  channelSources = [],
+  selectedBus,
+  selectedNode,
+  mixerStrips = [],
+  outputTargets = [],
+  focusedOutputId = null,
+  onFocusOutputId,
+  masterGain: masterGainProp,
+  onMasterGainChange,
+  onPluginsChange,
+}: Props) {
   const strips = Array.isArray(mixerStrips) ? mixerStrips : [];
   const showStrips = strips.length > 0 && (selectedNode?.type === 'target' || selectedNode?.type === 'bus');
+
+  const masterGain = typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0;
+  const masterDb = gainToDb(masterGain);
+  const masterLevel = dbToFader(isFinite(masterDb) ? Math.max(-100, Math.min(6, masterDb)) : -100);
+  const masterDragRef = React.useRef<{ pointerId: number } | null>(null);
+  const [editingMasterDb, setEditingMasterDb] = React.useState<boolean>(false);
+  const [editingMasterDbText, setEditingMasterDbText] = React.useState<string>('');
+  const masterEditInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [gainByStripId, setGainByStripId] = React.useState<Record<string, number>>({});
   const [editingStripId, setEditingStripId] = React.useState<string | null>(null);
@@ -260,6 +293,16 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
     setStripGain(strip, gain, opts);
   };
 
+  const updateMasterFromPointer = (trackEl: HTMLElement, clientY: number, opts?: { commit?: boolean }) => {
+    if (!onMasterGainChange) return;
+    const rect = trackEl.getBoundingClientRect();
+    const rel = (rect.bottom - clientY) / rect.height;
+    const percent = Math.max(0, Math.min(1, rel)) * 100;
+    const db = faderToDb(percent);
+    const gain = dbToGain(db);
+    onMasterGainChange(gain, opts);
+  };
+
   React.useEffect(() => {
     if (!editingStripId) return;
     const el = editInputRef.current;
@@ -267,6 +310,14 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
     el.focus();
     el.select();
   }, [editingStripId]);
+
+  React.useEffect(() => {
+    if (!editingMasterDb) return;
+    const el = masterEditInputRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [editingMasterDb]);
 
   const parseDbText = (raw: string): number | null => {
     const s0 = String(raw ?? '').trim();
@@ -280,6 +331,23 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
     const n = Number(cleaned);
     if (!Number.isFinite(n)) return null;
     return Math.max(-100, Math.min(6, n));
+  };
+
+  const beginInlineMasterDbEdit = (currentDb: number) => {
+    setEditingMasterDb(true);
+    const initial = isFinite(currentDb) && currentDb > -99.5 ? String(Math.round(currentDb * 10) / 10) : '-inf';
+    setEditingMasterDbText(initial);
+  };
+
+  const commitInlineMasterDbEdit = () => {
+    const db = parseDbText(editingMasterDbText);
+    setEditingMasterDb(false);
+    if (db == null) return;
+    onMasterGainChange?.(dbToGain(db), { commit: true });
+  };
+
+  const cancelInlineMasterDbEdit = () => {
+    setEditingMasterDb(false);
   };
 
   const beginInlineDbEdit = (strip: any, currentDb: number) => {
@@ -481,22 +549,78 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
         </div>
         <div className="flex-1 flex gap-2 p-3 min-h-0">
           <div className="flex-1 flex flex-col gap-1 overflow-y-auto min-h-0">
-            <div className="flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all shrink-0 bg-slate-800">
-              <div className="w-5 h-5 rounded flex items-center justify-center bg-slate-950 text-slate-500">
-                <Monitor className="w-3 h-3" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[10px] font-bold truncate text-white">Output</div>
-              </div>
-            </div>
+            {Array.isArray(outputTargets) && outputTargets.length > 0 ? (
+              outputTargets.map((t) => {
+                const isSelected = focusedOutputId != null && t.id === focusedOutputId;
+                const isDisabled = !!t.disabled;
+                const Icon = t.icon || Monitor;
+                const iconColor = t.iconColor || 'text-slate-500';
+
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    disabled={isDisabled}
+                    onClick={() => {
+                      if (!onFocusOutputId) return;
+                      void onFocusOutputId(t.id);
+                    }}
+                    className={
+                      `flex items-center gap-2 p-2 rounded-lg border transition-all shrink-0 text-left ` +
+                      (isDisabled
+                        ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-not-allowed'
+                        : isSelected
+                          ? 'border-amber-500 bg-amber-500/15'
+                          : 'border-slate-700 bg-slate-800 hover:border-amber-500/50 hover:bg-slate-800/90')
+                    }
+                  >
+                    <div className="w-5 h-5 rounded flex items-center justify-center bg-slate-950">
+                      {renderIcon(Icon, iconColor)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className={`text-[10px] font-bold truncate ${isSelected ? 'text-white' : 'text-slate-200'}`}>{t.label || 'Output'}</div>
+                      {t.subLabel ? (
+                        <div className="text-[8px] text-slate-500 truncate">{t.subLabel}</div>
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="text-[10px] text-slate-600 p-2">No outputs</div>
+            )}
           </div>
           <div className="w-28 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none shadow-xl">
             <div className="text-[8px] font-bold text-slate-500 mb-2">MASTER</div>
             <div className="flex-1 w-full px-2 flex gap-0.5 justify-center relative">
               <div className="relative mr-2">
-                <FaderScale />
-                <div className="w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700">
-                  <div className="absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10" style={{ bottom: `calc(${40}% - 5px)` }}></div>
+                <FaderScale onSelectDb={(dbSel) => onMasterGainChange?.(dbToGain(dbSel), { commit: true })} />
+                <div
+                  className={`w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700 ${onMasterGainChange ? 'cursor-ns-resize' : 'cursor-default opacity-50'}`}
+                  style={{ touchAction: 'none' }}
+                  onPointerDown={(e: any) => {
+                    if (!onMasterGainChange) return;
+                    e.preventDefault();
+                    masterDragRef.current = { pointerId: e.pointerId };
+                    try { (e.currentTarget as any).setPointerCapture(e.pointerId); } catch {}
+                    updateMasterFromPointer(e.currentTarget, e.clientY);
+                  }}
+                  onPointerMove={(e: any) => {
+                    const d = masterDragRef.current;
+                    if (!d || d.pointerId !== e.pointerId) return;
+                    updateMasterFromPointer(e.currentTarget, e.clientY);
+                  }}
+                  onPointerUp={(e: any) => {
+                    const d = masterDragRef.current;
+                    if (!d || d.pointerId !== e.pointerId) return;
+                    updateMasterFromPointer(e.currentTarget, e.clientY, { commit: true });
+                    masterDragRef.current = null;
+                  }}
+                  onPointerCancel={() => {
+                    masterDragRef.current = null;
+                  }}
+                >
+                  <div className="absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10" style={{ bottom: `calc(${masterLevel}% - 5px)` }}></div>
                 </div>
               </div>
               <div className="flex gap-0.5 relative">
@@ -505,7 +629,51 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
                 <MeterScale />
               </div>
             </div>
-            <div className="text-[8px] font-mono text-slate-500 mt-1">-∞</div>
+            {(() => {
+              const displayDbText = formatDb(masterDb);
+              const dbFieldWidthCh = Math.max(4, Math.max(displayDbText.length, editingMasterDbText.length || 0));
+              const isDisabled = !onMasterGainChange;
+
+              return (
+                <div className="mt-1 h-4 flex items-center justify-center">
+                  {editingMasterDb ? (
+                    <input
+                      ref={(el) => { masterEditInputRef.current = el; }}
+                      className="h-4 rounded bg-transparent border border-slate-700 text-[8px] font-mono text-slate-200 px-0 outline-none focus:border-slate-500 text-center box-border"
+                      style={{ width: `${dbFieldWidthCh}ch` }}
+                      value={editingMasterDbText}
+                      onChange={(e) => setEditingMasterDbText(e.target.value)}
+                      onBlur={() => commitInlineMasterDbEdit()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          commitInlineMasterDbEdit();
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          cancelInlineMasterDbEdit();
+                        }
+                      }}
+                      aria-label="Edit master dB"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isDisabled}
+                      className={`text-[8px] font-mono text-slate-500 text-center ${isDisabled ? 'cursor-default opacity-60' : 'hover:text-slate-200'}`}
+                      style={{ width: `${dbFieldWidthCh}ch` }}
+                      onClick={() => {
+                        if (isDisabled) return;
+                        beginInlineMasterDbEdit(masterDb);
+                      }}
+                      onMouseDown={(e) => e.preventDefault()}
+                      aria-label="Edit master dB"
+                    >
+                      {displayDbText}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
       </div>

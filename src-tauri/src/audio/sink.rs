@@ -4,6 +4,7 @@ use super::buffer::AudioBuffer;
 use super::node::{AudioNode, NodeType, PortId};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 出力先の識別
 ///
@@ -49,6 +50,10 @@ pub struct SinkNode {
     sink_id: SinkId,
     /// 表示ラベル
     label: String,
+    /// 出力ゲイン（linear）。sink単位で適用される。
+    ///
+    /// f32 bits を AtomicU32 に格納して RT-safe に読む。
+    output_gain_bits: AtomicU32,
     /// 入力バッファ（チャンネル数分）
     input_buffers: Vec<AudioBuffer>,
 }
@@ -60,6 +65,7 @@ impl SinkNode {
         Self {
             sink_id,
             label: label.into(),
+            output_gain_bits: AtomicU32::new(1.0_f32.to_bits()),
             input_buffers: (0..channel_count).map(|_| AudioBuffer::new()).collect(),
         }
     }
@@ -82,6 +88,18 @@ impl SinkNode {
     /// Get channel offset
     pub fn channel_offset(&self) -> u8 {
         self.sink_id.channel_offset
+    }
+
+    /// Get output gain (linear).
+    pub fn output_gain(&self) -> f32 {
+        f32::from_bits(self.output_gain_bits.load(Ordering::Relaxed))
+    }
+
+    /// Set output gain (linear).
+    pub fn set_output_gain(&self, gain: f32) {
+        let g = if gain.is_finite() { gain } else { 1.0 };
+        let g = g.clamp(0.0, 4.0);
+        self.output_gain_bits.store(g.to_bits(), Ordering::Relaxed);
     }
 
     /// Set the label

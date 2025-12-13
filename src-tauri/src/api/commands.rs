@@ -472,6 +472,38 @@ pub async fn set_edge_gains_batch(updates: Vec<EdgeGainUpdate>) -> Result<(), St
 }
 
 // =============================================================================
+// Output Commands
+// =============================================================================
+
+/// Set output (sink/vout) gain (linear). Applied per-sink during summing.
+#[tauri::command]
+pub async fn set_output_gain(output_handle: u32, gain: f32) -> Result<(), String> {
+    let processor = get_graph_processor();
+    let handle = NodeHandle::from_raw(output_handle);
+
+    let updated = processor.with_graph_mut(|graph| {
+        let Some(node) = graph.get_node_mut(handle) else {
+            return false;
+        };
+        let Some(sink) = node.as_any_mut().downcast_mut::<crate::audio::sink::SinkNode>() else {
+            return false;
+        };
+        // RT-safe atomic store inside the SinkNode.
+        sink.set_output_gain(gain);
+        true
+    });
+
+    if updated {
+        Ok(())
+    } else {
+        Err(format!(
+            "Node {} is not an output (sink) node or was not found",
+            output_handle
+        ))
+    }
+}
+
+// =============================================================================
 // Plugin Commands
 // =============================================================================
 
