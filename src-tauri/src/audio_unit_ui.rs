@@ -93,6 +93,9 @@ lazy_static::lazy_static! {
     static ref PLUGIN_WINDOW_NUMBERS: RwLock<HashMap<String, isize>> = RwLock::new(HashMap::new());
     // Cache view controllers to prevent deallocation while window is open
     static ref CACHED_VIEW_CONTROLLERS: RwLock<HashMap<String, SendSyncPtr>> = RwLock::new(HashMap::new());
+    // NotificationCenter observer tokens for view size changes (must be removed on close)
+    static ref PLUGIN_VIEW_SIZE_OBSERVERS: RwLock<HashMap<String, Vec<SendSyncPtr>>> =
+        RwLock::new(HashMap::new());
     // View controllers that must not be reused after close. We keep them retained
     // to avoid teardown timing crashes, and release them when the instance is dropped.
     static ref RETIRED_VIEW_CONTROLLERS: RwLock<HashMap<String, Vec<SendSyncPtr>>> =
@@ -140,6 +143,325 @@ fn release_view_controller(vc: *mut AnyObject) {
     }
     unsafe {
         let _: () = msg_send![vc, release];
+    }
+}
+
+fn remove_view_size_observer(instance_id: &str) {
+    let tokens = PLUGIN_VIEW_SIZE_OBSERVERS.write().unwrap().remove(instance_id);
+    let Some(tokens) = tokens else {
+        return;
+    };
+
+    unsafe {
+        let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+        for SendSyncPtr(token) in tokens {
+            let _: () = msg_send![center, removeObserver: token];
+        }
+    }
+}
+
+fn sync_window_content_size_to_view(window: &NSWindow, view: *mut AnyObject) {
+    if view.is_null() {
+        return;
+    }
+
+    unsafe {
+        // Compute a best-effort preferred size.
+        let frame: NSRect = msg_send![view, frame];
+        let preferred: NSSize = msg_send![view, fittingSize];
+
+        let mut width = if preferred.width > 10.0 {
+            preferred.width
+        } else if frame.size.width > 10.0 {
+            frame.size.width
+        } else {
+            600.0
+        };
+
+        let mut height = if preferred.height > 10.0 {
+            preferred.height
+        } else if frame.size.height > 10.0 {
+            frame.size.height
+        } else {
+            400.0
+        };
+
+        // Clamp to reasonable sizes.
+        width = width.max(200.0).min(2000.0);
+        height = height.max(100.0).min(1500.0);
+
+        let content_view: *mut AnyObject = msg_send![window, contentView];
+        if !content_view.is_null() {
+            let cv_frame: NSRect = msg_send![content_view, frame];
+            // Avoid re-entrant resize loops for tiny deltas.
+            if (cv_frame.size.width - width).abs() < 0.5 && (cv_frame.size.height - height).abs() < 0.5 {
+                return;
+            }
+        }
+
+        let _: () = msg_send![window, setContentSize: NSSize::new(width, height)];
+    }
+}
+
+fn set_window_fixed_content_size(window: &NSWindow, w: f64, h: f64) {
+    unsafe {
+        let size = NSSize::new(w, h);
+        let _: () = msg_send![window, setContentMinSize: size];
+        let _: () = msg_send![window, setContentMaxSize: size];
+    }
+}
+
+fn clear_window_fixed_content_size(window: &NSWindow) {
+    // Best-effort reset so a previously-fixed window can become resizable.
+    // AppKit will still enforce its own constraints.
+    unsafe {
+        let _: () = msg_send![window, setContentMinSize: NSSize::new(200.0, 100.0)];
+        let _: () = msg_send![window, setContentMaxSize: NSSize::new(10000.0, 10000.0)];
+    }
+}
+
+fn sync_fixed_window_to_view(window: &NSWindow, instance_id: &str, view: *mut AnyObject) {
+    if view.is_null() {
+        return;
+    }
+
+    unsafe {
+        // Prefer VC preferredContentSize (AUv3 often updates this), then intrinsic, then fitting.
+        let mut width = 0.0;
+        let mut height = 0.0;
+
+        if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+            if !vc.is_null() {
+                let preferred: NSSize = msg_send![vc, preferredContentSize];
+                if preferred.width > 10.0 && preferred.height > 10.0 {
+                    width = preferred.width;
+                    height = preferred.height;
+                }
+            }
+        }
+
+        if width <= 10.0 || height <= 10.0 {
+            if let Some((iw, ih)) = view_intrinsic_size(view) {
+                width = iw;
+                height = ih;
+            }
+        }
+
+        if width <= 10.0 || height <= 10.0 {
+            let fitting: NSSize = msg_send![view, fittingSize];
+            if fitting.width > 10.0 && fitting.height > 10.0 {
+                width = fitting.width;
+                height = fitting.height;
+            }
+        }
+
+        if width <= 10.0 || height <= 10.0 {
+            let frame: NSRect = msg_send![view, frame];
+            if frame.size.width > 10.0 && frame.size.height > 10.0 {
+                width = frame.size.width;
+                height = frame.size.height;
+            }
+        }
+
+        if width <= 10.0 || height <= 10.0 {
+            // Last resort: keep current window content size.
+            let content_view: *mut AnyObject = msg_send![window, contentView];
+            if !content_view.is_null() {
+                let cv_frame: NSRect = msg_send![content_view, frame];
+                width = cv_frame.size.width;
+                height = cv_frame.size.height;
+            }
+        }
+
+        if width <= 10.0 {
+            width = 600.0;
+        }
+        if height <= 10.0 {
+            height = 400.0;
+        }
+
+        width = width.max(200.0).min(2000.0);
+        height = height.max(100.0).min(1500.0);
+
+        // Avoid re-entrant resize loops for tiny deltas.
+        let content_view: *mut AnyObject = msg_send![window, contentView];
+        if !content_view.is_null() {
+            let cv_frame: NSRect = msg_send![content_view, frame];
+            if (cv_frame.size.width - width).abs() < 0.5 && (cv_frame.size.height - height).abs() < 0.5 {
+                // Still enforce non-resizable + fixed constraints.
+                set_window_resizable(window, false);
+                set_window_fixed_content_size(window, cv_frame.size.width, cv_frame.size.height);
+                return;
+            }
+        }
+
+        let _: () = msg_send![window, setContentSize: NSSize::new(width, height)];
+        set_window_resizable(window, false);
+        set_window_fixed_content_size(window, width, height);
+    }
+}
+
+fn view_intrinsic_size(view: *mut AnyObject) -> Option<(f64, f64)> {
+    if view.is_null() {
+        return None;
+    }
+
+    unsafe {
+        // NSViewNoIntrinsicMetric is typically -1.
+        let intrinsic: NSSize = msg_send![view, intrinsicContentSize];
+        let w = intrinsic.width;
+        let h = intrinsic.height;
+
+        if w.is_finite() && h.is_finite() && w > 10.0 && h > 10.0 {
+            Some((w, h))
+        } else {
+            None
+        }
+    }
+}
+
+fn view_is_resizable(view: *mut AnyObject) -> bool {
+    if view.is_null() {
+        return false;
+    }
+
+    unsafe {
+        // Quick heuristic only; final decision may be calibrated.
+        // Prefer treating views with real intrinsic size as fixed.
+        if view_intrinsic_size(view).is_some() {
+            return false;
+        }
+
+        let mask: u64 = msg_send![view, autoresizingMask];
+        // NSViewWidthSizable = 2, NSViewHeightSizable = 16
+        let mask_resizable = (mask & (2u64 | 16u64)) == (2u64 | 16u64);
+        if mask_resizable {
+            return true;
+        }
+
+        // Unknown: we'll calibrate.
+        true
+    }
+}
+
+fn set_window_resizable(window: &NSWindow, resizable: bool) {
+    unsafe {
+        let current_style: u64 = msg_send![window, styleMask];
+        let resizable_flag: u64 = 8u64; // NSWindowStyleMaskResizable
+        let new_style = if resizable {
+            current_style | resizable_flag
+        } else {
+            current_style & !resizable_flag
+        };
+        let _: () = msg_send![window, setStyleMask: new_style];
+    }
+}
+
+fn install_view_size_observer(instance_id: &str, window_number: isize, view: *mut AnyObject) {
+    if view.is_null() {
+        return;
+    }
+
+    // Remove any stale observer (best-effort) before installing a new one.
+    remove_view_size_observer(instance_id);
+
+    unsafe {
+        // Ensure the view posts frame change notifications.
+        let _: () = msg_send![view, setPostsFrameChangedNotifications: true];
+        let _: () = msg_send![view, setPostsBoundsChangedNotifications: true];
+
+        let name_frame = NSString::from_str("NSViewFrameDidChangeNotification");
+        let name_bounds = NSString::from_str("NSViewBoundsDidChangeNotification");
+        let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+
+        let instance = instance_id.to_string();
+        let block = RcBlock::new(move |_note: *mut AnyObject| {
+            // Notifications should arrive on the main queue, but we defensively check.
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+
+            // If the window is gone, drop the observer.
+            let Some(window) = get_window_by_number(window_number, mtm) else {
+                remove_view_size_observer(&instance);
+                return;
+            };
+
+            // Always follow plugin UI size; user-resize is disabled.
+            sync_fixed_window_to_view(&window, &instance, view);
+        });
+
+        let token_frame: *mut AnyObject = msg_send![
+            center,
+            addObserverForName: &*name_frame,
+            object: view,
+            queue: main_queue,
+            usingBlock: &*block
+        ];
+
+        let token_bounds: *mut AnyObject = msg_send![
+            center,
+            addObserverForName: &*name_bounds,
+            object: view,
+            queue: main_queue,
+            usingBlock: &*block
+        ];
+
+        let mut tokens: Vec<SendSyncPtr> = Vec::new();
+        if !token_frame.is_null() {
+            tokens.push(SendSyncPtr(token_frame));
+        }
+        if !token_bounds.is_null() {
+            tokens.push(SendSyncPtr(token_bounds));
+        }
+
+        if !tokens.is_empty() {
+            PLUGIN_VIEW_SIZE_OBSERVERS
+                .write()
+                .unwrap()
+                .insert(instance_id.to_string(), tokens);
+        }
+    }
+}
+
+fn calibrate_view_resizability(window: &NSWindow, container_view: *mut AnyObject, view: *mut AnyObject) -> bool {
+    if view.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let frame0: NSRect = msg_send![view, frame];
+        let w0 = frame0.size.width;
+        let h0 = frame0.size.height;
+
+        // If view has an intrinsic size, treat as fixed.
+        if view_intrinsic_size(view).is_some() {
+            return false;
+        }
+
+        // Try a small content resize and see if the view follows.
+        let target_w = (w0 + 120.0).max(200.0).min(2000.0);
+        let target_h = (h0 + 120.0).max(100.0).min(1500.0);
+        let _: () = msg_send![window, setContentSize: NSSize::new(target_w, target_h)];
+        if !container_view.is_null() {
+            let _: () = msg_send![container_view, layoutSubtreeIfNeeded];
+        }
+
+        let frame1: NSRect = msg_send![view, frame];
+        let w1 = frame1.size.width;
+        let h1 = frame1.size.height;
+
+        // Restore back near original so we don't "inflate" fixed UIs.
+        let restore_w = w0.max(200.0).min(2000.0);
+        let restore_h = h0.max(100.0).min(1500.0);
+        let _: () = msg_send![window, setContentSize: NSSize::new(restore_w, restore_h)];
+        if !container_view.is_null() {
+            let _: () = msg_send![container_view, layoutSubtreeIfNeeded];
+        }
+
+        // If the view grew significantly, it's window-resizable.
+        (w1 - w0).abs() > 20.0 || (h1 - h0).abs() > 20.0
     }
 }
 
@@ -201,6 +523,9 @@ pub fn open_audio_unit_ui(
                 windows.borrow_mut().remove(instance_id);
             });
 
+            // Clean up any observer we installed for the previous window.
+            remove_view_size_observer(instance_id);
+
             // Some plugins crash if we reuse the same view controller after the window closes.
             // Force a fresh requestViewController on next open.
             if let Some(vc) = take_cached_view_controller(instance_id) {
@@ -217,27 +542,48 @@ pub fn open_audio_unit_ui(
     // Determine window size based on the view's size
     let (window_width, window_height) = if let Some(au_view) = view {
         unsafe {
-            // Get the view's frame size
-            let frame: NSRect = msg_send![au_view, frame];
-            let preferred_size: NSSize = msg_send![au_view, fittingSize];
+            let mut width = 0.0;
+            let mut height = 0.0;
 
-            // Use preferredContentSize if available (AUv3 view controllers often set this)
-            // Otherwise fall back to frame size or fitting size
-            let width = if preferred_size.width > 10.0 {
-                preferred_size.width
-            } else if frame.size.width > 10.0 {
-                frame.size.width
-            } else {
-                600.0
-            };
+            if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+                if !vc.is_null() {
+                    let preferred: NSSize = msg_send![vc, preferredContentSize];
+                    if preferred.width > 10.0 && preferred.height > 10.0 {
+                        width = preferred.width;
+                        height = preferred.height;
+                    }
+                }
+            }
 
-            let height = if preferred_size.height > 10.0 {
-                preferred_size.height
-            } else if frame.size.height > 10.0 {
-                frame.size.height
-            } else {
-                400.0
-            };
+            if width <= 10.0 || height <= 10.0 {
+                if let Some((iw, ih)) = view_intrinsic_size(au_view) {
+                    width = iw;
+                    height = ih;
+                }
+            }
+
+            if width <= 10.0 || height <= 10.0 {
+                let fitting: NSSize = msg_send![au_view, fittingSize];
+                if fitting.width > 10.0 && fitting.height > 10.0 {
+                    width = fitting.width;
+                    height = fitting.height;
+                }
+            }
+
+            if width <= 10.0 || height <= 10.0 {
+                let frame: NSRect = msg_send![au_view, frame];
+                if frame.size.width > 10.0 && frame.size.height > 10.0 {
+                    width = frame.size.width;
+                    height = frame.size.height;
+                }
+            }
+
+            if width <= 10.0 {
+                width = 600.0;
+            }
+            if height <= 10.0 {
+                height = 400.0;
+            }
 
             // Clamp to reasonable sizes (min 200x100, max 2000x1500)
             (width.max(200.0).min(2000.0), height.max(100.0).min(1500.0))
@@ -254,7 +600,6 @@ pub fn open_audio_unit_ui(
 
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Resizable
         | NSWindowStyleMask::Miniaturizable;
 
     let window = unsafe {
@@ -295,8 +640,11 @@ pub fn open_audio_unit_ui(
         let level: isize = 3; // NSFloatingWindowLevel
         window.setLevel(level);
 
-        // ウィンドウ表示
-        window.makeKeyAndOrderFront(None);
+        // Always disable user resizing; window follows plugin view size.
+        set_window_resizable(&window, false);
+        set_window_fixed_content_size(&window, window_width, window_height);
+
+        // Note: Don't show the window yet; we calibrate sizing first.
 
         // =============================
         // 【重要修正 3 & 4】GPU描画対応とAuto Layout
@@ -316,24 +664,23 @@ pub fn open_audio_unit_ui(
             let _: () = msg_send![container_view, addSubview: au_view];
 
             // --- 制約(Anchor)で上下左右を貼り付け ---
-            // ただしプラグインが "autoresizingMask" でリサイズ対応かどうかを判定し、
-            // ウィンドウのスタイル (Resizable) とプラグインの内部抵抗力を切り替える
-
-            // autoresizingMask を読み取ってリサイズ対応か判定
-            let mask: u64 = msg_send![au_view, autoresizingMask];
-            // NSViewWidthSizable = 2, NSViewHeightSizable = 16
-            let is_resizable = (mask & (2u64 | 16u64)) == (2u64 | 16u64);
-
-            // ウィンドウの styleMask を取得して必要なら Resizable を付け外し
-            let current_style: u64 = msg_send![&*window, styleMask];
-            let resizable_flag: u64 = 8u64; // NSWindowStyleMaskResizable
-            if is_resizable {
-                let new_style = current_style | resizable_flag;
-                let _: () = msg_send![&*window, setStyleMask: new_style];
-            } else {
-                let new_style = current_style & !resizable_flag;
-                let _: () = msg_send![&*window, setStyleMask: new_style];
-            }
+            // Debug logging for diagnosis (e.g. ProQ4)
+            let mask_dbg: u64 = msg_send![au_view, autoresizingMask];
+            let intrinsic_dbg: NSSize = msg_send![au_view, intrinsicContentSize];
+            let fit_dbg: NSSize = msg_send![au_view, fittingSize];
+            let frame_dbg: NSRect = msg_send![au_view, frame];
+            println!(
+                "[AudioUnitUI] {} resizable={} mask=0x{:x} intrinsic=({:.1},{:.1}) fitting=({:.1},{:.1}) frame=({:.1},{:.1})",
+                instance_id,
+                false,
+                mask_dbg,
+                intrinsic_dbg.width,
+                intrinsic_dbg.height,
+                fit_dbg.width,
+                fit_dbg.height,
+                frame_dbg.size.width,
+                frame_dbg.size.height
+            );
 
             let leading_anchor: *mut AnyObject = msg_send![au_view, leadingAnchor];
             let trailing_anchor: *mut AnyObject = msg_send![au_view, trailingAnchor];
@@ -359,8 +706,8 @@ pub fn open_audio_unit_ui(
             let c4: *mut AnyObject = msg_send![bottom_anchor, constraintEqualToAnchor: c_bottom];
             let _: () = msg_send![c4, setActive: true];
 
-            // プラグインの抵抗力を条件付きで設定
-            let priority: f32 = if is_resizable { 250.0 } else { 1000.0 };
+            // Always use strong resistance; window is fixed to plugin size.
+            let priority: f32 = 1000.0;
             let orient_h: isize = 0; // Horizontal
             let orient_v: isize = 1; // Vertical
 
@@ -372,10 +719,27 @@ pub fn open_audio_unit_ui(
 
             // Layer設定の再確保
             let _: () = msg_send![au_view, setWantsLayer: true];
+
+            // Best-effort initial layout after constraints.
+            let _: () = msg_send![container_view, layoutSubtreeIfNeeded];
+
+            // Lock window to plugin preferred size and keep following it.
+            sync_fixed_window_to_view(&window, instance_id, au_view);
+            install_view_size_observer(instance_id, window.windowNumber(), au_view);
+
+            // Now show the window after setup.
+            window.makeKeyAndOrderFront(None);
         } else {
             // カスタムUIがない場合はプレースホルダー
             let label_text = format!("No custom UI available for {}", plugin_name);
             create_placeholder_view(&window, &label_text, mtm);
+
+            // Keep placeholder non-resizable too.
+            set_window_resizable(&window, false);
+            set_window_fixed_content_size(&window, window_width, window_height);
+
+            // Show window (placeholder)
+            window.makeKeyAndOrderFront(None);
         }
     }
 
@@ -397,6 +761,9 @@ pub fn open_audio_unit_ui(
 
 /// Close an AudioUnit UI window
 pub fn close_audio_unit_ui(instance_id: &str) {
+    // Remove size observer first (best-effort)
+    remove_view_size_observer(instance_id);
+
     let window_number = match PLUGIN_WINDOW_NUMBERS.write().unwrap().remove(instance_id) {
         Some(n) => n,
         None => return,
@@ -755,9 +1122,16 @@ pub fn close_all_plugin_windows() {
         None => return,
     };
 
-    let window_numbers: Vec<isize> = PLUGIN_WINDOW_NUMBERS.write().unwrap().drain().map(|(_, n)| n).collect();
+    let entries: Vec<(String, isize)> = PLUGIN_WINDOW_NUMBERS
+        .write()
+        .unwrap()
+        .drain()
+        .map(|(k, n)| (k, n))
+        .collect();
 
-    for window_number in window_numbers {
+    for (instance_id, window_number) in entries {
+        remove_view_size_observer(&instance_id);
+
         if let Some(window) = get_window_by_number(window_number, mtm) {
             window.close();
         }
