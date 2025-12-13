@@ -1650,7 +1650,7 @@ src-tauri/src/
 
 ---
 
-## 実装進捗 (2025-12-09 更新)
+## 実装進捗 (2025-12-13 更新)
 
 ### Phase 1: 基盤 ✅ 完了
 
@@ -1689,7 +1689,7 @@ src-tauri/src/
 | `device/enumerate.rs` | ✅ | 出力デバイス列挙 (aggregate対応) |
 | BusNode プラグイン統合 | ❌ | 未実装 |
 
-### Phase 5: API + UI ✅ API実装完了
+### Phase 5: API + UI ✅ 完了
 
 | ファイル | 状態 | 内容 |
 |----------|------|------|
@@ -1697,7 +1697,22 @@ src-tauri/src/
 | `api/dto.rs` | ✅ | 全DTO定義 (設計書通り) |
 | `api/commands.rs` | ✅ | Tauriコマンド実装 (Graph/Edge/Meter/System) |
 | `lib.rs` | ✅ | v2モジュール |
-| UI更新 | ❌ | 未着手 |
+| UI更新 | ✅ | V1パリティ達成 |
+
+### Phase 6: UI実装 ✅ 完了
+
+| ファイル | 状態 | 内容 |
+|----------|------|------|
+| `src/ui/SpectrumLayout.tsx` | ✅ | メインレイアウト、バス管理統合 |
+| `src/ui/LeftSidebar.tsx` | ✅ | Prismチャンネル・入力デバイス表示 |
+| `src/ui/RightPanel.tsx` | ✅ | 出力デバイス・バス一覧・Add Bus機能 |
+| `src/ui/CanvasView.tsx` | ✅ | ノード表示・ケーブル接続・ドラッグ&ドロップ |
+| `src/ui/MixerPanel.tsx` | ✅ | ミキサー画面、BusPanel統合 |
+| `src/ui/BusPanel.tsx` | ✅ | バス詳細/エフェクトチェーン表示（MixerPanelに統合） |
+| `src/hooks/useNodeDisplay.ts` | ✅ | ノード表示情報の共通化 |
+| `src/hooks/useIcons.ts` | ✅ | アイコン判定ロジック |
+| `src/hooks/useColors.ts` | ✅ | カラー判定ロジック |
+| `src/lib/api.ts` | ✅ | v2 API TypeScriptクライアント |
 
 ### 修正済みの問題
 
@@ -1765,16 +1780,25 @@ src-tauri/src/
 4. ~~**v2 API クライアント**~~ ✅ - `src/lib/api.ts` 作成完了
 5. ~~**Frontend移行**~~ ✅ - App.tsx を v2 API に完全移行
 6. ~~**Audio Engine初期化の改善**~~ ✅ - バックエンドで自動初期化、UIからの責務を分離
+7. ~~**V1 UIパリティ**~~ ✅ - BusPanel統合、アイコン/カラー統一
+
+### 現在の作業
+
+1. 🔄 **プラグイン追加のE2E実装** - UIからプラグイン選択→バックエンド反映→UI表示
+2. ⏳ **プラグインUI表示** - `open_plugin_ui` 呼び出しでAudioUnit GUI表示
+3. ⏳ **Lock-free最適化** - improvements.md の Pure ArcSwap 実装
 
 ### フロントエンド移行状況
 
 | ファイル | 状態 | 内容 |
 |----------|------|------|
-| `src/lib/api.ts` | ✅ 新規作成 | v2 API TypeScriptクライアント (全型定義・全関数) |
-| `src/lib/prismd.ts` | 🔄 レガシー | v1 API (現在App.tsxが使用中) |
-| `src/App.tsx` | 🔄 レガシー | prismd.ts を使用中、段階的移行が必要 |
-| `src/lib/prismd.v1.ts.bak` | 📦 バックアップ | prismd.ts のバックアップ |
-| `src/App.v1.tsx.bak` | 📦 バックアップ | App.tsx のバックアップ |
+| `src/lib/api.ts` | ✅ 完了 | v2 API TypeScriptクライアント (全型定義・全関数) |
+| `src/hooks/useDevices.ts` | ✅ 完了 | デバイス管理フック |
+| `src/hooks/useGraph.ts` | ✅ 完了 | グラフ状態管理フック |
+| `src/ui/SpectrumLayout.tsx` | ✅ 完了 | v2 API使用、バス管理統合 |
+| `src/ui/RightPanel.tsx` | ✅ 完了 | バス一覧/追加/削除 |
+| `src/ui/MixerPanel.tsx` | ✅ 完了 | BusPanel統合 |
+| `src/ui/BusPanel.tsx` | ✅ 完了 | エフェクトチェーン管理 |
 
 ---
 
