@@ -460,7 +460,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           busId: n.busId,
           channelCount: n.portCount || 2,
           plugins: n.plugins?.map((p: any) => ({
-            id: p.instance_id || p.id,
+            id: p.instance_id || p.instanceId || p.id,
             pluginId: p.plugin_id || p.pluginId,
             name: p.name,
             manufacturer: p.manufacturer || 'Unknown',

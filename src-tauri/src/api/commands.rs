@@ -385,27 +385,26 @@ pub async fn add_plugin_to_bus(
         .find(|p| p.id == plugin_id)
         .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
 
-    // Generate unique instance ID
-    let instance_id = uuid::Uuid::new_v4().to_string();
-    let plugin_name = plugin.name.clone();
-    let plugin_id_clone = plugin_id.clone();
-    let instance_id_clone = instance_id.clone();
+    // Create the real AudioUnit instance in the manager
+    let au_manager = crate::audio_unit::get_au_manager();
+    let instance_id = au_manager.create_instance(plugin)?;
 
+    // Add the plugin reference to the bus node
+    let plugin_name = plugin.name.clone();
+    let instance_id_clone = instance_id.clone();
     processor.with_graph_mut(|graph| {
         if let Some(node) = graph.get_node_mut(handle) {
             if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
+                bus.add_plugin(instance_id_clone.clone(), plugin_id.clone(), plugin_name);
+
                 if let Some(pos) = position {
-                    // Insert at specific position - add then reorder
-                    bus.add_plugin(instance_id_clone.clone(), plugin_id_clone.clone(), plugin_name.clone());
-                    // Get current order and move new plugin to position
+                    // Reorder if a position was specified
                     let mut ids: Vec<String> = bus.plugins().iter().map(|p| p.instance_id.clone()).collect();
-                    if pos < ids.len() - 1 {
-                        let new_id = ids.pop().unwrap();
-                        ids.insert(pos, new_id);
+                    if let Some(current_idx) = ids.iter().position(|id| id == &instance_id_clone) {
+                        let id = ids.remove(current_idx);
+                        ids.insert(pos.min(ids.len()), id);
                         bus.reorder_plugins(&ids);
                     }
-                } else {
-                    bus.add_plugin(instance_id_clone.clone(), plugin_id_clone.clone(), plugin_name.clone());
                 }
             }
         }
@@ -419,18 +418,22 @@ pub async fn remove_plugin_from_bus(bus_handle: u32, instance_id: String) -> Res
     let handle = NodeHandle::from_raw(bus_handle);
     let processor = get_graph_processor();
 
-    let mut found = false;
+    let mut found_in_bus = false;
     processor.with_graph_mut(|graph| {
         if let Some(node) = graph.get_node_mut(handle) {
             if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
                 if bus.remove_plugin(&instance_id).is_some() {
-                    found = true;
+                    found_in_bus = true;
                 }
             }
         }
     });
 
-    if found {
+    // Also remove from the manager to release resources
+    let au_manager = crate::audio_unit::get_au_manager();
+    let removed_from_manager = au_manager.remove_instance(&instance_id);
+
+    if found_in_bus || removed_from_manager {
         Ok(())
     } else {
         Err(format!("Plugin instance not found: {}", instance_id))

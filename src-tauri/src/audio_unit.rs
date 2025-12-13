@@ -1325,11 +1325,8 @@ impl AudioUnitManager {
 
         let mut instance = AudioUnitInstance::new(info, instance_id.clone())?;
 
-        // Pre-configure the instance for audio processing
-        // This ensures it's ready for the audio thread without needing locks
-        if let Err(e) = instance.configure(48000.0, 1024, 2) {
-            println!("[AudioUnit] Warning: Failed to pre-configure {}: {}", instance_id, e);
-        }
+        // Pre-configure the instance for audio processing. This is a critical step.
+        instance.configure(48000.0, 1024, 2)?;
 
         self.instances.write().insert(
             instance_id.clone(),

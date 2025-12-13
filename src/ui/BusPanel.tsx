@@ -32,11 +32,10 @@ export interface BusInfo {
 }
 
 interface PluginInfoDto {
-  id: string;
+  plugin_id: string;
   name: string;
   manufacturer: string;
-  plugin_type: string;
-  sandbox_safe: boolean;
+  category: string;
 }
 
 interface Props {
@@ -77,7 +76,7 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
   const handleAddPlugin = async (plugin: PluginInfoDto) => {
     if (!bus) return;
     try {
-      await addPluginToBus(bus.handle, plugin.id);
+      await addPluginToBus(bus.handle, plugin.plugin_id);
       setShowPluginBrowser(false);
       setPluginSearchQuery('');
       onPluginsChange?.();
@@ -200,7 +199,10 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
                     onDragStart={(e) => handleDragStart(e, idx)}
                     onDragOver={handleDragOver}
                     onDrop={(e) => handleDrop(e, idx)}
-                    onClick={() => handleOpenPluginUI(plugin.id)}
+                    onClick={() => {
+                      console.debug('BusPanel: opening plugin UI', plugin.id);
+                      handleOpenPluginUI(plugin.id)
+                    }}
                     className={`flex items-center gap-1.5 p-1.5 rounded border transition-all cursor-pointer hover:border-purple-400 ${
                       plugin.enabled
                         ? 'bg-purple-500/10 border-purple-500/30'
@@ -299,7 +301,7 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
                       <div className="space-y-1">
                         {byManufacturer[manufacturer].map(plugin => (
                           <button
-                            key={plugin.id}
+                            key={plugin.plugin_id}
                             onClick={() => handleAddPlugin(plugin)}
                             className="w-full flex items-center gap-3 p-3 rounded-lg bg-slate-800/50 hover:bg-purple-500/20 border border-transparent hover:border-purple-500/30 transition-all text-left group"
                           >
@@ -311,12 +313,7 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
                                 {plugin.name}
                               </div>
                               <div className="text-[10px] text-slate-500 flex items-center gap-2">
-                                <span>{plugin.plugin_type}</span>
-                                {plugin.sandbox_safe && (
-                                  <span className="px-1 py-0.5 rounded bg-green-500/20 text-green-400 text-[8px]">
-                                    Sandbox Safe
-                                  </span>
-                                )}
+                                <span>{plugin.category}</span>
                               </div>
                             </div>
                             <Plus className="w-4 h-4 text-slate-600 group-hover:text-purple-400 transition-colors" />
