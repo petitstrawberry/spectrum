@@ -130,6 +130,7 @@ pub use api::get_app_icon_by_pid;
 pub use api::get_output_runtime;
 // Output master
 pub use api::set_output_gain;
+pub use api::set_output_channel_gain;
 
 // =============================================================================
 // Legacy Commands (For backward compatibility)
@@ -394,6 +395,7 @@ pub fn run() {
             get_output_runtime,
             // v2 API - Output master
             set_output_gain,
+            set_output_channel_gain,
             // Legacy commands
             get_prism_clients,
             set_routing,

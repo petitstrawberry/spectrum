@@ -4,7 +4,7 @@ import { Maximize2, Volume2, Monitor } from 'lucide-react';
 import DetailView from './detail/DetailView';
 import type { BusInfo } from './detail/types';
 import type { UINode } from '../types/graph';
-import { dbToGain, gainToDb, setEdgeGainsBatch, getEdgeMeters, getNodeMeters } from '../lib/api';
+import { dbToGain, gainToDb, setEdgeGainsBatch, setEdgeMuted, getEdgeMeters, getNodeMeters } from '../lib/api';
 
 // =============================================================================
 // Canvas meter helpers (v1-style)
@@ -626,6 +626,11 @@ export default function MixerPanel({
   const activeMasterGain = Number(masterGains[selectedBase]);
   const activeMasterGainSafe = Number.isFinite(activeMasterGain) ? activeMasterGain : 1.0;
 
+  const masterMuteKey = `${String(focusedOutputId || 'none')}:${masterChannelMode}:${masterChannelMode === 'stereo' ? Math.floor(selectedBase / 2) : selectedBase}`;
+  const [masterMutedByKey, setMasterMutedByKey] = React.useState<Record<string, boolean>>({});
+  const [masterSavedGainByKey, setMasterSavedGainByKey] = React.useState<Record<string, number>>({});
+  const isMasterMuted = !!masterMutedByKey[masterMuteKey];
+
   const masterDb = gainToDb(activeMasterGainSafe);
   const masterLevel = dbToFader(isFinite(masterDb) ? Math.max(-100, Math.min(6, masterDb)) : -100);
   const masterDragRef = React.useRef<{ pointerId: number } | null>(null);
@@ -634,6 +639,7 @@ export default function MixerPanel({
   const masterEditInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [gainByStripId, setGainByStripId] = React.useState<Record<string, number>>({});
+  const [mutedByStripId, setMutedByStripId] = React.useState<Record<string, boolean>>({});
   const [editingStripId, setEditingStripId] = React.useState<string | null>(null);
   const [editingDbText, setEditingDbText] = React.useState<string>('');
   const editInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -648,6 +654,19 @@ export default function MixerPanel({
         if (next[s.id] == null) {
           const g = typeof s.sendLevel === 'number' ? s.sendLevel : 1.0;
           next[s.id] = Number.isFinite(g) ? g : 1.0;
+        }
+      }
+      return next;
+    });
+  }, [strips]);
+
+  React.useEffect(() => {
+    setMutedByStripId((prev) => {
+      const next = { ...prev };
+      for (const s of strips) {
+        if (!s?.id) continue;
+        if (next[s.id] == null) {
+          next[s.id] = !!s.muted;
         }
       }
       return next;
@@ -675,6 +694,23 @@ export default function MixerPanel({
     });
   };
 
+  const toggleStripMute = (strip: any) => {
+    if (!strip?.id) return;
+    const currentMuted = mutedByStripId[strip.id] ?? !!strip?.muted;
+    const nextMuted = !currentMuted;
+
+    const ids = (Array.isArray(strip.connectionIds) ? strip.connectionIds : [])
+      .map(parseEdgeId)
+      .filter((n: any) => typeof n === 'number' && Number.isFinite(n));
+    if (ids.length === 0) return;
+
+    setMutedByStripId((prev) => ({ ...prev, [strip.id]: nextMuted }));
+    void Promise.all(ids.map((id: number) => setEdgeMuted(id, nextMuted))).catch((err: any) => {
+      console.warn('[mixer] setEdgeMuted failed', err);
+      setMutedByStripId((prev) => ({ ...prev, [strip.id]: currentMuted }));
+    });
+  };
+
   const updateGainFromPointer = (strip: any, trackEl: HTMLElement, clientY: number, opts?: { commit?: boolean }) => {
     const rect = trackEl.getBoundingClientRect();
     const rel = (rect.bottom - clientY) / rect.height;
@@ -699,6 +735,31 @@ export default function MixerPanel({
 
     if (!onMasterGainChange) return;
     onMasterGainChange(gain, opts);
+  };
+
+  const toggleMasterMute = () => {
+    if (!masterEnabled) return;
+    if (!focusedOutputId) return;
+
+    if (!isMasterMuted) {
+      setMasterSavedGainByKey((prev) => ({ ...prev, [masterMuteKey]: activeMasterGainSafe }));
+      setMasterMutedByKey((prev) => ({ ...prev, [masterMuteKey]: true }));
+      if (masterChannelMode === 'mono') {
+        onMasterChannelGainChange?.(selectedBase, 0, { commit: true });
+      } else {
+        onMasterGainChange?.(0, { commit: true });
+      }
+      return;
+    }
+
+    const restore = masterSavedGainByKey[masterMuteKey];
+    const g = Number.isFinite(Number(restore)) ? Math.max(0, Math.min(4, Number(restore))) : 1.0;
+    setMasterMutedByKey((prev) => ({ ...prev, [masterMuteKey]: false }));
+    if (masterChannelMode === 'mono') {
+      onMasterChannelGainChange?.(selectedBase, g, { commit: true });
+    } else {
+      onMasterGainChange?.(g, { commit: true });
+    }
   };
 
   React.useEffect(() => {
@@ -837,6 +898,7 @@ export default function MixerPanel({
   };
 
   const masterEnabled = masterChannelMode === 'mono' ? !!onMasterChannelGainChange : !!onMasterGainChange;
+  const masterControlEnabled = masterEnabled && !isMasterMuted;
 
   return (
     <div className="bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30" style={{ height: mixerHeight }}>
@@ -949,7 +1011,7 @@ export default function MixerPanel({
               const iconColor = getStripIconColor(strip);
               const chLabel = getStripChannelLabel(strip);
               const title = getStripTitle(strip);
-              const isMuted = !!strip?.muted;
+              const isMuted = mutedByStripId[strip.id] ?? !!strip?.muted;
               const hasStereoMeter = mixerChannelMode === 'stereo' && Array.isArray(strip?.fromChannels) && strip.fromChannels.length >= 2;
               const gain = typeof gainByStripId[strip.id] === 'number'
                 ? gainByStripId[strip.id]
@@ -1051,7 +1113,15 @@ export default function MixerPanel({
                     )}
                   </div>
                   <div className="flex gap-1 mt-1 w-full px-1">
-                    <button className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>M</button>
+                      <button
+                        type="button"
+                        className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-500'}`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => toggleStripMute(strip)}
+                        aria-label={isMuted ? 'Unmute' : 'Mute'}
+                      >
+                        M
+                      </button>
                   </div>
                 </div>
               );
@@ -1124,6 +1194,7 @@ export default function MixerPanel({
               <div className="relative mr-2">
                 <FaderScale
                   onSelectDb={(dbSel) => {
+                    if (!masterControlEnabled) return;
                     const g = dbToGain(dbSel);
                     if (masterChannelMode === 'mono') {
                       onMasterChannelGainChange?.(selectedBase, g, { commit: true });
@@ -1133,10 +1204,10 @@ export default function MixerPanel({
                   }}
                 />
                 <div
-                  className={`w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700 ${masterEnabled ? 'cursor-ns-resize' : 'cursor-default opacity-50'}`}
+                  className={`w-2 h-full bg-slate-950 rounded-sm relative group/fader border border-slate-700 ${masterControlEnabled ? 'cursor-ns-resize' : 'cursor-default opacity-50'}`}
                   style={{ touchAction: 'none' }}
                   onPointerDown={(e: any) => {
-                    if (!masterEnabled) return;
+                    if (!masterControlEnabled) return;
                     e.preventDefault();
                     masterDragRef.current = { pointerId: e.pointerId };
                     try { (e.currentTarget as any).setPointerCapture(e.pointerId); } catch {}
@@ -1145,11 +1216,13 @@ export default function MixerPanel({
                   onPointerMove={(e: any) => {
                     const d = masterDragRef.current;
                     if (!d || d.pointerId !== e.pointerId) return;
+                    if (!masterControlEnabled) return;
                     updateMasterFromPointer(e.currentTarget, e.clientY);
                   }}
                   onPointerUp={(e: any) => {
                     const d = masterDragRef.current;
                     if (!d || d.pointerId !== e.pointerId) return;
+                    if (!masterControlEnabled) return;
                     updateMasterFromPointer(e.currentTarget, e.clientY, { commit: true });
                     masterDragRef.current = null;
                   }}
@@ -1157,7 +1230,7 @@ export default function MixerPanel({
                     masterDragRef.current = null;
                   }}
                 >
-                  <div className="absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10" style={{ bottom: `calc(${masterLevel}% - 5px)` }}></div>
+                  <div className={`absolute left-1/2 -translate-x-1/2 w-5 h-2.5 bg-slate-600 border border-slate-400 rounded-sm shadow pointer-events-none z-10 ${isMasterMuted ? 'grayscale opacity-50' : ''}`} style={{ bottom: `calc(${masterLevel}% - 5px)` }}></div>
                 </div>
               </div>
               <div className="flex gap-0.5 relative">
@@ -1177,11 +1250,13 @@ export default function MixerPanel({
             {(() => {
               const displayDbText = formatDb(masterDb);
               const dbFieldWidthCh = Math.max(4, Math.max(displayDbText.length, editingMasterDbText.length || 0));
-              const isDisabled = !masterEnabled;
+              const isDisabled = !masterControlEnabled;
 
               return (
                 <div className="mt-1 h-4 flex items-center justify-center">
-                  {editingMasterDb ? (
+                  {isMasterMuted ? (
+                    <div className="text-[8px] font-mono text-slate-500" style={{ width: `${dbFieldWidthCh}ch` }}>MUTE</div>
+                  ) : editingMasterDb ? (
                     <input
                       ref={(el) => { masterEditInputRef.current = el; }}
                       className="h-4 rounded bg-transparent border border-slate-700 text-[8px] font-mono text-slate-200 px-0 outline-none focus:border-slate-500 text-center box-border"
@@ -1219,6 +1294,19 @@ export default function MixerPanel({
                 </div>
               );
             })()}
+
+            <div className="flex gap-1 mt-1 w-full px-2">
+              <button
+                type="button"
+                disabled={!masterEnabled}
+                className={`flex-1 h-4 rounded text-[8px] font-bold border ${isMasterMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-500'} ${!masterEnabled ? 'opacity-50 cursor-default' : ''}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => toggleMasterMute()}
+                aria-label={isMasterMuted ? 'Unmute master' : 'Mute master'}
+              >
+                M
+              </button>
+            </div>
           </div>
         </div>
       </div>
