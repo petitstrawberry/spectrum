@@ -144,7 +144,6 @@ impl ToString for TransportType {
 
 /// Guess icon hint from device UID and transport type
 fn get_icon_hint(uid: &str, transport_type: &TransportType) -> String {
-    println!("UID: {}, Transport: {:?}", uid, transport_type);
     // Check exact UID hits first
     match uid {
         "BuiltInSpeakerDevice" => return "speaker".to_string(),
