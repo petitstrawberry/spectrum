@@ -291,10 +291,14 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
     setMasterGainsByOutputId((prev) => {
       const cur = Array.isArray(prev[focusedOutputId]) ? [...(prev[focusedOutputId] as number[])] : [];
-      const next = pc > 0 ? Array.from({ length: pc }, (_, i) => {
-        const v = Number(cur[i]);
-        return Number.isFinite(v) ? v : 1.0;
-      }) : cur;
+      const needLen = masterChannelMode === 'stereo' ? base + 2 : base + 1;
+      const targetLen = Math.max(pc, needLen, cur.length);
+      const next = targetLen > 0
+        ? Array.from({ length: targetLen }, (_, i) => {
+            const v = Number(cur[i]);
+            return Number.isFinite(v) ? v : 1.0;
+          })
+        : cur;
       if (masterChannelMode === 'stereo') {
         if (base < next.length) next[base] = g;
         if (base + 1 < next.length) next[base + 1] = g;
@@ -337,10 +341,13 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     setMasterGainsByOutputId((prev) => {
       const cur = Array.isArray(prev[focusedOutputId]) ? [...(prev[focusedOutputId] as number[])] : [];
       const pc = Math.max(0, focusedOutputPortCount | 0);
-      const next = pc > 0 ? Array.from({ length: pc }, (_, i) => {
-        const v = Number(cur[i]);
-        return Number.isFinite(v) ? v : 1.0;
-      }) : cur;
+      const targetLen = Math.max(pc, ch + 1, cur.length);
+      const next = targetLen > 0
+        ? Array.from({ length: targetLen }, (_, i) => {
+            const v = Number(cur[i]);
+            return Number.isFinite(v) ? v : 1.0;
+          })
+        : cur;
       if (ch < next.length) next[ch] = g;
       return { ...prev, [focusedOutputId]: next };
     });

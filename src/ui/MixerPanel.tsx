@@ -275,6 +275,14 @@ export default function MixerPanel({
   const strips = Array.isArray(mixerStrips) ? mixerStrips : [];
   const showStrips = strips.length > 0 && (selectedNode?.type === 'target' || selectedNode?.type === 'bus');
 
+  const selectedCh = Math.max(0, Number(focusedOutputChannel) || 0);
+  const selectedBase = masterChannelMode === 'stereo' ? Math.floor(selectedCh / 2) * 2 : selectedCh;
+  const masterPortCount = Math.max(
+    0,
+    Number(focusedOutputPortCount) || 0,
+    Array.isArray(masterGainsProp) ? masterGainsProp.length : 0,
+  );
+
   const masterGainsRef = React.useRef<number[]>([1.0, 1.0]);
   React.useEffect(() => {
     if (Array.isArray(masterGainsProp) && masterGainsProp.length > 0) {
@@ -284,9 +292,13 @@ export default function MixerPanel({
       });
     } else {
       const g = typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0;
-      masterGainsRef.current = [g, g];
+      if (masterPortCount > 0) {
+        masterGainsRef.current = Array.from({ length: masterPortCount }, () => g);
+      } else {
+        masterGainsRef.current = [g, g];
+      }
     }
-  }, [masterGainsProp, masterGainProp]);
+  }, [masterGainsProp, masterGainProp, masterPortCount]);
 
   // ---------------------------------------------------------------------------
   // Meters (canvas, v1-style): poll into refs + draw via rAF, no React re-render
@@ -330,8 +342,8 @@ export default function MixerPanel({
   const meterSourceRef = React.useRef<
     Map<
       string,
-      | { kind: 'edge'; ids: number[]; channel: 0 | 1 }
-      | { kind: 'node'; id: number; channel: 0 | 1 }
+      | { kind: 'edge'; ids: number[]; channel: number }
+      | { kind: 'node'; id: number; channel: number }
     >
   >(new Map());
 
@@ -391,8 +403,8 @@ export default function MixerPanel({
   React.useEffect(() => {
     const next = new Map<
       string,
-      | { kind: 'edge'; ids: number[]; channel: 0 | 1 }
-      | { kind: 'node'; id: number; channel: 0 | 1 }
+      | { kind: 'edge'; ids: number[]; channel: number }
+      | { kind: 'node'; id: number; channel: number }
     >();
 
     for (const s of strips) {
@@ -407,8 +419,11 @@ export default function MixerPanel({
 
     const handle = parseNodeHandleFromId(focusedOutputId);
     if (handle != null) {
-      next.set('master:L', { kind: 'node', id: handle, channel: 0 });
-      next.set('master:R', { kind: 'node', id: handle, channel: 1 });
+      // Master meters should follow selected channel/pair.
+      next.set('master:L', { kind: 'node', id: handle, channel: selectedBase });
+      if (masterChannelMode === 'stereo' && (masterPortCount === 0 || masterPortCount > 1)) {
+        next.set('master:R', { kind: 'node', id: handle, channel: selectedBase + 1 });
+      }
     }
 
     meterSourceRef.current = next;
@@ -417,7 +432,7 @@ export default function MixerPanel({
     for (const k of smoothedLevels.current.keys()) {
       if (!next.has(k)) smoothedLevels.current.delete(k);
     }
-  }, [strips, focusedOutputId]);
+  }, [strips, focusedOutputId, selectedBase, masterChannelMode, masterPortCount]);
 
   // Poll meters into refs (no setState). Use edge/node scoped APIs to keep payload small.
   React.useEffect(() => {
@@ -523,10 +538,12 @@ export default function MixerPanel({
           }
         } else {
           const peaks = nodeOutputPeaksByHandleRef.current.get(src.id) ?? [];
-          peak = peaks[src.channel] ?? peaks[0] ?? 0;
-          // Output meters should reflect post-master-gain level.
-          if (key === 'master:L') peak *= (Number(masterGainsRef.current?.[0]) || 1.0);
-          if (key === 'master:R') peak *= (Number(masterGainsRef.current?.[1]) || 1.0);
+          peak = peaks[src.channel] ?? 0;
+          // Output meters should reflect post-master-gain level for the selected channel(s).
+          if (key === 'master:L' || key === 'master:R') {
+            const g = Number(masterGainsRef.current?.[src.channel]);
+            peak *= Number.isFinite(g) ? g : 1.0;
+          }
         }
 
         // Convert to dB (meter is -60..0dB)
@@ -582,11 +599,11 @@ export default function MixerPanel({
         const n = Number(v);
         return Number.isFinite(n) ? n : 1.0;
       })
-    : [typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0,
-      typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0];
-
-  const selectedCh = Math.max(0, Number(focusedOutputChannel) || 0);
-  const selectedBase = masterChannelMode === 'stereo' ? Math.floor(selectedCh / 2) * 2 : selectedCh;
+    : (() => {
+        const g = typeof masterGainProp === 'number' && Number.isFinite(masterGainProp) ? masterGainProp : 1.0;
+        if (masterPortCount > 0) return Array.from({ length: masterPortCount }, () => g);
+        return [g, g];
+      })();
   const activeMasterGain = Number(masterGains[selectedBase]);
   const activeMasterGainSafe = Number.isFinite(activeMasterGain) ? activeMasterGain : 1.0;
 
@@ -932,17 +949,21 @@ export default function MixerPanel({
         </div>
         <div className="flex-1 flex gap-2 p-3 min-h-0">
           {/* Channel selector (v1-like) */}
-          <div className="w-14 flex flex-col gap-2 shrink-0">
+          <div className="w-14 flex flex-col gap-1 overflow-y-auto border-r border-slate-800 pr-2 min-h-0 shrink-0">
+            <div className="text-[8px] font-bold text-slate-600 mb-1 text-center shrink-0">
+              {masterChannelMode === 'stereo' ? 'PAIR' : 'CH'}
+            </div>
+
             <button
               type="button"
               disabled={!focusedOutputId}
               onClick={() => onToggleMasterChannelMode?.()}
               className={
-                `h-7 rounded-lg border text-[9px] font-bold transition-colors ` +
+                `w-full py-1 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
                 (!focusedOutputId
                   ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-not-allowed'
                   : masterChannelMode === 'stereo'
-                    ? 'border-slate-700 bg-slate-800 text-slate-200 hover:border-pink-500/50'
+                    ? 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'
                     : 'border-pink-500 bg-pink-500/15 text-white')
               }
               aria-label="Toggle master stereo/mono"
@@ -950,9 +971,9 @@ export default function MixerPanel({
               {masterChannelMode === 'stereo' ? 'ST' : 'MONO'}
             </button>
 
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
+            <div className="flex flex-col gap-1 min-h-0">
               {(() => {
-                const pc = Math.max(0, Number(focusedOutputPortCount) || 0);
+                const pc = masterPortCount;
                 if (!focusedOutputId || pc <= 0) {
                   return null;
                 }
@@ -969,10 +990,10 @@ export default function MixerPanel({
                         type="button"
                         onClick={() => onFocusOutputChannel?.(base)}
                         className={
-                          `h-7 rounded-lg border text-[9px] font-bold transition-colors ` +
+                          `w-full py-1.5 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
                           (isSel
                             ? 'border-pink-500 bg-pink-500/15 text-white'
-                            : 'border-slate-700 bg-slate-800 text-slate-200 hover:border-pink-500/50')
+                            : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300')
                         }
                         aria-label={`Select channels ${label}`}
                       >
@@ -992,10 +1013,10 @@ export default function MixerPanel({
                       type="button"
                       onClick={() => onFocusOutputChannel?.(ch)}
                       className={
-                        `h-7 rounded-lg border text-[9px] font-bold transition-colors ` +
+                        `w-full py-1.5 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
                         (isSel
                           ? 'border-pink-500 bg-pink-500/15 text-white'
-                          : 'border-slate-700 bg-slate-800 text-slate-200 hover:border-pink-500/50')
+                          : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300')
                       }
                       aria-label={`Select channel ${ch + 1}`}
                     >
@@ -1097,10 +1118,12 @@ export default function MixerPanel({
                   ref={(el) => setMeterCanvasRef(el as any, 'master:L')}
                   className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 pointer-events-none"
                 />
-                <canvas
-                  ref={(el) => setMeterCanvasRef(el as any, 'master:R')}
-                  className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5 pointer-events-none"
-                />
+                {masterChannelMode === 'stereo' ? (
+                  <canvas
+                    ref={(el) => setMeterCanvasRef(el as any, 'master:R')}
+                    className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5 pointer-events-none"
+                  />
+                ) : null}
                 <MeterScale />
               </div>
             </div>
