@@ -198,7 +198,6 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       return arr.map((n: any) => {
         const handle = n.handle ?? (n.id ?? 0);
         const id = `node_${handle}`;
-        const libraryId = id;
         const type: NodeType = n.type === 'sink' ? 'target' : (n.type === 'bus' ? 'bus' : 'source');
 
         // Base fields (defaults from useGraph)
@@ -208,8 +207,28 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         let color = n.color || 'text-cyan-400';
         let iconColor = n.iconColor || color;
 
-        // Normalize channelOffset/channel for prism sources and enrich with channelSources data
-        const channelOffset = n.channelOffset ?? n.channel ?? undefined;
+        // Normalize fields across UINode variants from useGraph
+        // - sink nodes use `sinkDeviceId` + `channelOffset`
+        // - some DTO-ish shapes may use snake_case
+        const channelOffset = (type === 'target')
+          ? (n.channelOffset ?? n.channel_offset ?? n.sink?.channel_offset ?? undefined)
+          : (n.channelOffset ?? n.channel ?? undefined);
+
+        const normalizedDeviceId = (type === 'target')
+          ? (n.deviceId ?? n.device_id ?? n.sinkDeviceId ?? n.sink_device_id ?? n.sink?.device_id ?? undefined)
+          : (n.deviceId ?? n.device_id ?? undefined);
+
+        // Use library-style ids where possible so CanvasView and other UI helpers
+        // can recognize node kinds (e.g. vout_... for output targets).
+        const libraryId = (() => {
+          if (type === 'target') {
+            const did = Number(normalizedDeviceId);
+            const off = Number(channelOffset);
+            if (!Number.isNaN(did) && !Number.isNaN(off)) return `vout_${did}_${off}`;
+          }
+          return id;
+        })();
+
         const srcType = n.sourceType === 'device' ? 'device' : 'prism';
 
         if (type === 'source' && (srcType === 'prism' || srcType === 'prism-channel') && typeof channelOffset === 'number') {
@@ -266,7 +285,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           channelCount: n.portCount || 2,
           channelOffset,
           sourceType: srcType === 'device' ? 'device' : 'prism-channel',
-          deviceId: n.deviceId ?? undefined,
+          deviceId: normalizedDeviceId,
           deviceName: undefined,
           channelMode: 'stereo',
           available: true,

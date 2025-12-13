@@ -1,7 +1,8 @@
-import { Headphones, Speaker, Monitor, Radio, Cast, Video, Volume2, Gamepad2, Globe, MessageSquare, Music } from 'lucide-react';
+import { Headphones, Speaker, Monitor, Radio, Cast, Volume2, Gamepad2, Globe, MessageSquare, Music } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export function getIconForDevice(iconHint?: string | null, name?: string): LucideIcon {
+  void name;
   // Use backend-provided `icon_hint` exclusively when present; do not perform
   // name-based heuristics in the UI. If `iconHint` is absent or unrecognized,
   // return a neutral generic icon.
