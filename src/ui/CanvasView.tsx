@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React, { useRef } from 'react';
 import { Trash2, Link as LinkIcon } from 'lucide-react';
+import { getNodePorts } from '../hooks/useNodeDisplay';
 
 interface Props {
   canvasRef: React.RefObject<HTMLDivElement>;
@@ -55,19 +56,6 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
   };
   const endWire = (_e: any, _nodeId: string, _portIdx: number) => {};
   const startWire = (_e: any, _nodeId: string, _portIdx: number) => {};
-
-  // Port helpers (mirrors v1)
-  const getPortCount = (n: any) => {
-    return n.channelCount || 2;
-  };
-  const getPortLabel = (n: any, portIndex: number) => {
-    // Prism source nodes with channelOffset show absolute channel numbers
-    if (n.type === 'source' && n.sourceType !== 'device' && typeof n.channelOffset === 'number') {
-      return `${n.channelOffset + portIndex + 1}`;
-    }
-    return `${portIndex + 1}`;
-  };
-  const isPortMono = (_n: any, _portIndex: number) => true; // UI treats ports as mono for now
   return (
     <div ref={canvasRef} className={`flex-1 bg-[#0b1120] relative overflow-hidden ${isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}>
       <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${canvasTransform.x}px, ${canvasTransform.y}px) scale(${canvasTransform.scale})` }}>
@@ -175,42 +163,40 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
               </div>
 
               <div className="p-2 space-y-1 relative">
-                {Array.from({length: portCount}).map((_, portIdx) => {
-                  const label = `CH ${getPortLabel(node, portIdx)}`;
-                  return (
-                    <div key={portIdx} className="flex items-center justify-between h-5 relative">
-                      <div className="w-3 relative h-full flex items-center">
-                        {(node.type === 'target' || node.type === 'bus') && (() => {
-                          const mono = isPortMono(node, portIdx);
-                          const bgClass = mono ? 'bg-slate-500' : 'bg-slate-600';
-                          const busBorder = node.type === 'bus' ? 'border-purple-400' : '';
-                          return (
+                {(() => {
+                  // 共通関数を使用してポート情報を取得
+                  const nodeType = node.type === 'target' ? 'sink' : node.type;
+                  const ports = getNodePorts({
+                    type: nodeType,
+                    portCount,
+                    channelOffset: node.channelOffset,
+                    sourceType: node.sourceType,
+                  });
+                  return ports.map((port) => {
+                    const busBorder = node.type === 'bus' ? 'border-purple-400' : '';
+                    return (
+                      <div key={port.index} className="flex items-center justify-between h-5 relative">
+                        <div className="w-3 relative h-full flex items-center">
+                          {port.isInput && (
                             <div
-                              className={`absolute -left-[15px] w-3 h-3 rounded-full border border-slate-400 hover:scale-125 cursor-crosshair z-20 top-[4px] ${bgClass} ${busBorder}`}
-                              onMouseUp={(e) => endWire(e, node.id, portIdx)}
+                              className={`absolute -left-[15px] w-3 h-3 rounded-full border border-slate-400 bg-slate-500 hover:scale-125 cursor-crosshair z-20 top-[4px] ${busBorder}`}
+                              onMouseUp={(e) => endWire(e, node.id, port.index)}
                             ></div>
-                          );
-                        })()}
+                          )}
+                        </div>
+                        <div className="text-[9px] font-mono flex-1 text-center text-slate-400">{port.label}</div>
+                        <div className="w-3 relative h-full flex items-center">
+                          {port.isOutput && (
+                            <div
+                              className={`absolute -right-[15px] w-3 h-3 rounded-full border border-slate-400 bg-slate-500 hover:scale-125 hover:bg-white cursor-crosshair z-20 top-[4px] ${busBorder}`}
+                              onMouseDown={(e) => startWire(e, node.id, port.index)}
+                            ></div>
+                          )}
+                        </div>
                       </div>
-                      <div className={`text-[9px] font-mono flex-1 text-center ${isPortMono(node, portIdx) ? 'text-slate-400' : 'text-slate-500'}`}>{label}</div>
-                      <div className="w-3 relative h-full flex items-center">
-                        {(node.type === 'source' || node.type === 'bus') && (
-                          (() => {
-                            const mono = isPortMono(node, portIdx);
-                            const bgClass = mono ? 'bg-slate-500' : 'bg-slate-600';
-                            const busBorder = node.type === 'bus' ? 'border-purple-400' : '';
-                            return (
-                              <div
-                                className={`absolute -right-[15px] w-3 h-3 rounded-full border border-slate-400 hover:scale-125 hover:bg-white cursor-crosshair z-20 top-[4px] ${bgClass} ${busBorder}`}
-                                onMouseDown={(e) => startWire(e, node.id, portIdx)}
-                              ></div>
-                            );
-                          })()
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  });
+                })()}
               </div>
             </div>
           );

@@ -30,12 +30,13 @@ pub struct SourceNode {
 }
 
 impl SourceNode {
-    /// Create a new source node for a Prism channel
+    /// Create a new source node for a Prism channel (stereo = 2 ports)
     pub fn new_prism(channel: u8, label: impl Into<String>) -> Self {
         Self {
             source_id: SourceId::PrismChannel { channel },
             label: label.into(),
-            output_buffers: vec![AudioBuffer::new()],
+            // Prism channels are stereo pairs
+            output_buffers: vec![AudioBuffer::new(), AudioBuffer::new()],
         }
     }
 
@@ -44,7 +45,17 @@ impl SourceNode {
         Self {
             source_id: SourceId::InputDevice { device_id, channel },
             label: label.into(),
-            output_buffers: vec![AudioBuffer::new()],
+            // Default to stereo for input devices
+            output_buffers: vec![AudioBuffer::new(), AudioBuffer::new()],
+        }
+    }
+
+    /// Create a new source node for an external input device with specified channel count
+    pub fn new_device_with_channels(device_id: u32, channel: u8, label: impl Into<String>, channel_count: usize) -> Self {
+        Self {
+            source_id: SourceId::InputDevice { device_id, channel },
+            label: label.into(),
+            output_buffers: (0..channel_count).map(|_| AudioBuffer::new()).collect(),
         }
     }
 

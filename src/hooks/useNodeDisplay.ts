@@ -203,3 +203,63 @@ export function getVirtualOutputDisplay(
     iconColor,
   };
 }
+
+// =============================================================================
+// Port Display Utilities
+// =============================================================================
+
+export interface PortInfo {
+  index: number;
+  label: string;
+  isInput: boolean;
+  isOutput: boolean;
+}
+
+export interface NodePortConfig {
+  type: 'source' | 'bus' | 'sink' | 'target';
+  portCount: number;
+  channelOffset?: number;
+  sourceType?: 'prism' | 'prism-channel' | 'device';
+}
+
+/**
+ * ノードのポート情報を取得
+ */
+export function getNodePorts(config: NodePortConfig): PortInfo[] {
+  const { type, portCount, channelOffset, sourceType } = config;
+  const ports: PortInfo[] = [];
+
+  for (let i = 0; i < portCount; i++) {
+    // ポートラベルの決定
+    let label: string;
+    if ((type === 'source' && sourceType !== 'device') && typeof channelOffset === 'number') {
+      // Prismソース: 絶対チャンネル番号を表示
+      label = `CH ${channelOffset + i + 1}`;
+    } else {
+      // その他: 相対チャンネル番号を表示
+      label = `CH ${i + 1}`;
+    }
+
+    // 入出力の決定
+    const isInput = type === 'sink' || type === 'target' || type === 'bus';
+    const isOutput = type === 'source' || type === 'bus';
+
+    ports.push({ index: i, label, isInput, isOutput });
+  }
+
+  return ports;
+}
+
+/**
+ * ポートラベルを取得（単一ポート用）
+ */
+export function getPortLabel(
+  portIndex: number,
+  channelOffset?: number,
+  isPrism: boolean = false
+): string {
+  if (isPrism && typeof channelOffset === 'number') {
+    return `CH ${channelOffset + portIndex + 1}`;
+  }
+  return `CH ${portIndex + 1}`;
+}

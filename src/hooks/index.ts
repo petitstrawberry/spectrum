@@ -16,9 +16,13 @@ export {
   getBusDisplay,
   getBusColor,
   getVirtualOutputDisplay,
+  getNodePorts,
+  getPortLabel,
   type ChannelSourceInfo,
   type DeviceInfo,
   type NodeDisplayInfo,
+  type PortInfo,
+  type NodePortConfig,
 } from './useNodeDisplay';
 export { getIconForApp, getIconForDevice } from './useIcons';
 export { getColorForDevice } from './useColors';
