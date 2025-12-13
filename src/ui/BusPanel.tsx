@@ -1,6 +1,21 @@
 // @ts-nocheck
 import React, { useState } from 'react';
-import { Workflow, Plus, Trash2, GripVertical, X, Search, Music } from 'lucide-react';
+import { Workflow, Plus, Trash2, GripVertical, X, Search, Music, ChevronUp, ChevronDown } from 'lucide-react';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  DragOverlay,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  arrayMove,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { getBusColor } from '../hooks/useNodeDisplay';
 import {
   getAvailablePlugins,
@@ -43,6 +58,138 @@ interface Props {
   onPluginsChange?: () => void;
 }
 
+function SortablePluginRow({
+  plugin,
+  idx,
+  dragDisabled,
+  anyDragging,
+  onOpen,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
+}: {
+  plugin: PluginInstance;
+  idx: number;
+  dragDisabled: boolean;
+  anyDragging: boolean;
+  onOpen: (instanceId: string) => void;
+  onRemove: (instanceId: string) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: plugin.id, disabled: dragDisabled });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      // Keep pointer-based dragging stable across trackpads.
+      // Prevent the browser from interpreting the gesture as scroll while dragging.
+      onPointerDownCapture={(e) => {
+        // If user starts on a button, buttons will stopPropagation.
+        // Otherwise allow drag.
+        (e.currentTarget as any).style.touchAction = 'none';
+      }}
+      onClick={() => {
+        // Avoid accidental open when the user was dragging.
+        if (isDragging || anyDragging) return;
+        console.debug('BusPanel: opening plugin UI', plugin.id);
+        onOpen(plugin.id);
+      }}
+      className={`flex items-center gap-1.5 p-1.5 rounded border cursor-pointer hover:border-purple-400 transition-colors ${
+        plugin.enabled
+          ? 'bg-purple-500/10 border-purple-500/30'
+          : 'bg-slate-800/50 border-slate-700 opacity-50'
+      } ${isDragging ? 'opacity-50' : ''}`}
+    >
+      <div className="w-4 text-[8px] text-slate-500 text-center select-none">{idx + 1}</div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[9px] font-medium text-slate-200 truncate">{plugin.name}</div>
+        <div className="text-[7px] text-slate-500 truncate">{plugin.manufacturer}</div>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onMoveUp();
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        disabled={!canMoveUp}
+        className={`w-4 h-4 rounded flex items-center justify-center text-slate-500 transition-colors ${
+          !canMoveUp
+            ? 'opacity-30 cursor-not-allowed'
+            : 'hover:text-slate-300 hover:bg-slate-700/40'
+        }`}
+        aria-label="Move plugin up"
+        title="Move up"
+      >
+        <ChevronUp className="w-2.5 h-2.5" />
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onMoveDown();
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        disabled={!canMoveDown}
+        className={`w-4 h-4 rounded flex items-center justify-center text-slate-500 transition-colors ${
+          !canMoveDown
+            ? 'opacity-30 cursor-not-allowed'
+            : 'hover:text-slate-300 hover:bg-slate-700/40'
+        }`}
+        aria-label="Move plugin down"
+        title="Move down"
+      >
+        <ChevronDown className="w-2.5 h-2.5" />
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove(plugin.id);
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="w-4 h-4 rounded flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-red-500/20 transition-colors"
+      >
+        <Trash2 className="w-2.5 h-2.5" />
+      </button>
+    </div>
+  );
+}
+
+function DragOverlayRow({ plugin, idx }: { plugin: PluginInstance; idx: number }) {
+  return (
+    <div
+      className={`flex items-center gap-1.5 p-1.5 rounded border cursor-grabbing border-purple-400 bg-purple-500/10`}
+      style={{
+        boxShadow: 'none',
+      }}
+    >
+      <div className="w-4 text-[8px] text-slate-300 text-center select-none">{idx + 1}</div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[9px] font-medium text-slate-100 truncate">{plugin.name}</div>
+        <div className="text-[7px] text-slate-400 truncate">{plugin.manufacturer}</div>
+      </div>
+    </div>
+  );
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -52,11 +199,25 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
   const [availablePlugins, setAvailablePlugins] = useState<PluginInfoDto[]>([]);
   const [pluginSearchQuery, setPluginSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [localPlugins, setLocalPlugins] = useState<PluginInstance[]>([]);
 
   const plugins = bus?.plugins || [];
   const busNum = bus?.busId ? parseInt(bus.busId.replace('bus_', ''), 10) || 1 : 1;
   const busColor = bus ? getBusColor(busNum) : 'text-purple-400';
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      // Smaller distance makes it easier to start dragging (trackpad-friendly).
+      activationConstraint: { distance: 3 },
+    })
+  );
+
+  React.useEffect(() => {
+    // Avoid resetting the list while dragging.
+    if (activeDragId) return;
+    setLocalPlugins(plugins);
+  }, [activeDragId, plugins, bus?.handle]);
 
   // Open plugin browser
   const handleOpenPluginBrowser = async () => {
@@ -105,36 +266,36 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
     }
   };
 
-  // Drag and drop reorder
-  const handleDragStart = (e: React.DragEvent, idx: number) => {
-    setDragIdx(idx);
-    e.dataTransfer.effectAllowed = 'move';
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-  };
-
-  const handleDrop = async (e: React.DragEvent, toIdx: number) => {
-    e.preventDefault();
-    if (!bus || dragIdx === null || dragIdx === toIdx) {
-      setDragIdx(null);
+  const handleReorder = async (newOrder: PluginInstance[]) => {
+    if (!bus) return;
+    const instanceIds = newOrder.map(p => p?.id).filter(Boolean);
+    if (instanceIds.length !== newOrder.length) {
+      console.error('Failed to reorder plugins: missing instance id(s)', { newOrder });
       return;
     }
-
-    const newOrder = [...plugins];
-    const [moved] = newOrder.splice(dragIdx, 1);
-    newOrder.splice(toIdx, 0, moved);
-
+    // Optimistic UI
+    setLocalPlugins(newOrder);
     try {
-      await reorderPlugins(bus.handle, newOrder.map(p => p.id));
+      await reorderPlugins(bus.handle, instanceIds);
       onPluginsChange?.();
     } catch (error) {
       console.error('Failed to reorder plugins:', error);
+      // Revert on failure
+      setLocalPlugins(plugins);
     }
+  };
 
-    setDragIdx(null);
+  const handleMovePlugin = async (fromIdx: number, toIdx: number) => {
+    if (!bus) return;
+    if (fromIdx === toIdx) return;
+    if (fromIdx < 0 || fromIdx >= localPlugins.length) return;
+    if (toIdx < 0 || toIdx >= localPlugins.length) return;
+
+    const newOrder = [...localPlugins];
+    const [moved] = newOrder.splice(fromIdx, 1);
+    newOrder.splice(toIdx, 0, moved);
+
+    await handleReorder(newOrder);
   };
 
   // Filter plugins by search query
@@ -187,47 +348,60 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
 
             {/* Plugin List */}
             <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
-              {plugins.length === 0 ? (
+              {localPlugins.length === 0 ? (
                 <div className="text-[10px] text-slate-600 text-center py-4">
                   No effects loaded
                 </div>
               ) : (
-                plugins.map((plugin, idx) => (
-                  <div
-                    key={plugin.id}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, idx)}
-                    onDragOver={handleDragOver}
-                    onDrop={(e) => handleDrop(e, idx)}
-                    onClick={() => {
-                      console.debug('BusPanel: opening plugin UI', plugin.id);
-                      handleOpenPluginUI(plugin.id)
-                    }}
-                    className={`flex items-center gap-1.5 p-1.5 rounded border transition-all cursor-pointer hover:border-purple-400 ${
-                      plugin.enabled
-                        ? 'bg-purple-500/10 border-purple-500/30'
-                        : 'bg-slate-800/50 border-slate-700 opacity-50'
-                    } ${dragIdx === idx ? 'opacity-50' : ''}`}
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragStart={(event) => {
+                    const id = event?.active?.id;
+                    setActiveDragId(typeof id === 'string' ? id : null);
+                  }}
+                  onDragCancel={() => setActiveDragId(null)}
+                  onDragEnd={async (event) => {
+                    const { active, over } = event;
+                    setActiveDragId(null);
+                    if (!active?.id || !over?.id) return;
+                    if (active.id === over.id) return;
+                    const oldIndex = localPlugins.findIndex(p => p.id === active.id);
+                    const newIndex = localPlugins.findIndex(p => p.id === over.id);
+                    if (oldIndex < 0 || newIndex < 0) return;
+                    const newOrder = arrayMove(localPlugins, oldIndex, newIndex);
+                    await handleReorder(newOrder);
+                  }}
+                >
+                  <SortableContext
+                    items={localPlugins.map(p => p.id)}
+                    strategy={verticalListSortingStrategy}
                   >
-                    <div className="cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400">
-                      <GripVertical className="w-2.5 h-2.5" />
-                    </div>
-                    <div className="w-3 text-[8px] text-slate-500 text-center">{idx + 1}</div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[9px] font-medium text-slate-200 truncate">{plugin.name}</div>
-                      <div className="text-[7px] text-slate-500 truncate">{plugin.manufacturer}</div>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemovePlugin(plugin.id);
-                      }}
-                      className="w-4 h-4 rounded flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-red-500/20 transition-colors"
-                    >
-                      <Trash2 className="w-2.5 h-2.5" />
-                    </button>
-                  </div>
-                ))
+                    {localPlugins.map((plugin, idx) => (
+                      <SortablePluginRow
+                        key={plugin.id}
+                        plugin={plugin}
+                        idx={idx}
+                        dragDisabled={loading}
+                        anyDragging={!!activeDragId}
+                        onOpen={(id) => void handleOpenPluginUI(id)}
+                        onRemove={(id) => void handleRemovePlugin(id)}
+                        onMoveUp={() => void handleMovePlugin(idx, idx - 1)}
+                        onMoveDown={() => void handleMovePlugin(idx, idx + 1)}
+                        canMoveUp={idx > 0}
+                        canMoveDown={idx < localPlugins.length - 1}
+                      />
+                    ))}
+                  </SortableContext>
+                  <DragOverlay>
+                    {activeDragId ? (() => {
+                      const idx = localPlugins.findIndex(p => p.id === activeDragId);
+                      const plugin = localPlugins.find(p => p.id === activeDragId);
+                      if (!plugin || idx < 0) return null;
+                      return <DragOverlayRow plugin={plugin} idx={idx} />;
+                    })() : null}
+                  </DragOverlay>
+                </DndContext>
               )}
             </div>
 
