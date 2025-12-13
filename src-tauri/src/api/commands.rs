@@ -457,6 +457,38 @@ pub async fn reorder_plugins(bus_handle: u32, instance_ids: Vec<String>) -> Resu
 }
 
 #[tauri::command]
+pub async fn set_plugin_enabled(
+    bus_handle: u32,
+    instance_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let handle = NodeHandle::from_raw(bus_handle);
+    let processor = get_graph_processor();
+
+    let mut found_in_bus = false;
+    processor.with_graph_mut(|graph| {
+        if let Some(node) = graph.get_node_mut(handle) {
+            if let Some(bus) = node.as_any_mut().downcast_mut::<BusNode>() {
+                if bus.set_plugin_enabled(&instance_id, enabled) {
+                    found_in_bus = true;
+                }
+            }
+        }
+    });
+
+    // Best-effort: also set AU manager's enabled flag (lock-free atomic).
+    // Even if the bus doesn't have the instance (stale UI), we keep behavior consistent.
+    let au_manager = crate::audio_unit::get_au_manager();
+    let _ = au_manager.set_enabled(&instance_id, enabled);
+
+    if found_in_bus {
+        Ok(())
+    } else {
+        Err(format!("Plugin instance not found in bus: {}", instance_id))
+    }
+}
+
+#[tauri::command]
 pub async fn open_plugin_ui(instance_id: String) -> Result<(), String> {
     // Verify the instance exists first
     let _au_instance = crate::audio_unit::get_au_manager()

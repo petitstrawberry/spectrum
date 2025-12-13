@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useState } from 'react';
-import { Workflow, Plus, Trash2, GripVertical, X, Search, Music, ChevronUp, ChevronDown } from 'lucide-react';
+import { Workflow, Plus, Trash2, GripVertical, X, Search, Music, ChevronUp, ChevronDown, Power, PowerOff } from 'lucide-react';
 import {
   DndContext,
   closestCenter,
@@ -23,6 +23,7 @@ import {
   removePluginFromBus,
   reorderPlugins,
   openPluginUI,
+  setPluginEnabled,
 } from '../lib/api';
 
 // =============================================================================
@@ -65,6 +66,7 @@ function SortablePluginRow({
   anyDragging,
   onOpen,
   onRemove,
+  onToggleEnabled,
   onMoveUp,
   onMoveDown,
   canMoveUp,
@@ -76,6 +78,7 @@ function SortablePluginRow({
   anyDragging: boolean;
   onOpen: (instanceId: string) => void;
   onRemove: (instanceId: string) => void;
+  onToggleEnabled: (instanceId: string, enabled: boolean) => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
   canMoveUp: boolean;
@@ -125,6 +128,26 @@ function SortablePluginRow({
         <div className="text-[9px] font-medium text-slate-200 truncate">{plugin.name}</div>
         <div className="text-[7px] text-slate-500 truncate">{plugin.manufacturer}</div>
       </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleEnabled(plugin.id, !plugin.enabled);
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        className={`w-4 h-4 rounded flex items-center justify-center transition-colors ${
+          plugin.enabled
+            ? 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/40'
+            : 'text-purple-300 hover:text-purple-200 hover:bg-purple-500/15'
+        }`}
+        aria-label={plugin.enabled ? 'Bypass plugin' : 'Enable plugin'}
+        title={plugin.enabled ? 'Bypass' : 'Enable'}
+      >
+        {plugin.enabled ? (
+          <Power className="w-2.5 h-2.5" />
+        ) : (
+          <PowerOff className="w-2.5 h-2.5" />
+        )}
+      </button>
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -257,6 +280,24 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
     }
   };
 
+  const handleSetPluginEnabled = async (instanceId: string, enabled: boolean) => {
+    if (!bus) return;
+
+    // Optimistic UI
+    const prev = localPlugins;
+    setLocalPlugins((current) =>
+      current.map((p) => (p.id === instanceId ? { ...p, enabled } : p))
+    );
+
+    try {
+      await setPluginEnabled(bus.handle, instanceId, enabled);
+      onPluginsChange?.();
+    } catch (error) {
+      console.error('Failed to set plugin enabled:', error);
+      setLocalPlugins(prev);
+    }
+  };
+
   // Open plugin UI
   const handleOpenPluginUI = async (instanceId: string) => {
     try {
@@ -386,6 +427,7 @@ export default function BusPanel({ bus, onPluginsChange }: Props) {
                         anyDragging={!!activeDragId}
                         onOpen={(id) => void handleOpenPluginUI(id)}
                         onRemove={(id) => void handleRemovePlugin(id)}
+                        onToggleEnabled={(id, enabled) => void handleSetPluginEnabled(id, enabled)}
                         onMoveUp={() => void handleMovePlugin(idx, idx - 1)}
                         onMoveDown={() => void handleMovePlugin(idx, idx + 1)}
                         canMoveUp={idx > 0}

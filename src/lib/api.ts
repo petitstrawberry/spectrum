@@ -280,6 +280,14 @@ export async function reorderPlugins(
   return invoke('reorder_plugins', { busHandle, instanceIds });
 }
 
+export async function setPluginEnabled(
+  busHandle: number,
+  instanceId: string,
+  enabled: boolean
+): Promise<void> {
+  return invoke('set_plugin_enabled', { busHandle, instanceId, enabled });
+}
+
 export async function openPluginUI(instanceId: string): Promise<void> {
   return invoke('open_plugin_ui', { instanceId });
 }

@@ -104,6 +104,7 @@ pub use api::get_available_plugins;
 pub use api::add_plugin_to_bus;
 pub use api::remove_plugin_from_bus;
 pub use api::reorder_plugins;
+pub use api::set_plugin_enabled;
 pub use api::open_plugin_ui;
 pub use api::close_plugin_ui;
 
@@ -368,6 +369,7 @@ pub fn run() {
             add_plugin_to_bus,
             remove_plugin_from_bus,
             reorder_plugins,
+            set_plugin_enabled,
             open_plugin_ui,
             close_plugin_ui,
             // v2 API - Meter

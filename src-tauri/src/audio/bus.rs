@@ -158,6 +158,22 @@ impl BusNode {
         new_chain.append(&mut self.plugin_chain);
         self.plugin_chain = new_chain;
     }
+
+    /// Enable/disable (bypass) a plugin instance in this bus.
+    ///
+    /// Returns true if the instance was found.
+    pub fn set_plugin_enabled(&mut self, instance_id: &str, enabled: bool) -> bool {
+        if let Some(p) = self
+            .plugin_chain
+            .iter_mut()
+            .find(|p| p.instance_id == instance_id)
+        {
+            p.enabled = enabled;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl AudioNode for BusNode {

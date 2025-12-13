@@ -775,7 +775,7 @@ pub fn cleanup_cached_view_controller(instance_id: &str) {
 }
 
 /// Open plugin UI by instance_id only
-/// 
+///
 /// This is a convenience wrapper that looks up the AudioUnit instance
 /// and opens its UI. Must be called from main thread.
 pub fn open_plugin_ui_by_instance_id(instance_id: &str) -> Result<(), String> {
