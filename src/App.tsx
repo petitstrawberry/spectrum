@@ -266,7 +266,7 @@ function EdgeFader({ edge, sourceNode, targetNode, meters, onGainChange, onMuted
 export default function App() {
   // Hooks
   const graph = useGraph();
-  const meters = useMeters({ enabled: true });
+  const meters = useMeters({ enabled: false });
   const devices = useDevices();
   const audio = useAudio();
 
