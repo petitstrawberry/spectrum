@@ -684,22 +684,67 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     });
   }, [selectedNodeData]);
 
+  const mixerTargetId = (selectedNodeData && (selectedNodeData.type === 'target' || selectedNodeData.type === 'bus'))
+    ? selectedNodeData.id
+    : null;
+
+  const mixerTargetPortCount = useMemo(() => {
+    if (!mixerTargetId) return 0;
+    const n: any = selectedNodeData;
+    const pc = Math.max(0, Number(n?.channelCount ?? n?.portCount ?? n?.port_count ?? 0) | 0);
+    // Buses are generally stereo unless otherwise specified.
+    if (pc > 0) return pc;
+    if (n?.type === 'bus') return 2;
+    return 0;
+  }, [mixerTargetId, selectedNodeData]);
+
+  const mixerSelectedChannel = useMemo(() => {
+    if (!mixerTargetId) return 0;
+    const ch = Number(focusedOutputChannelById[mixerTargetId] ?? 0);
+    return Number.isFinite(ch) ? Math.max(0, ch | 0) : 0;
+  }, [mixerTargetId, focusedOutputChannelById]);
+
+  const setMixerSelectedChannel = useCallback((ch: number) => {
+    if (!mixerTargetId) return;
+    const n = Math.max(0, Number(ch) | 0);
+    setFocusedOutputChannelById((prev) => ({ ...prev, [mixerTargetId]: n }));
+  }, [mixerTargetId]);
+
+  // Some graph providers mutate the connections array in-place; derive a fingerprint so memoized
+  // computations (like mixerStrips) still update on rewires without needing unrelated toggles.
+  const connectionsFingerprint = (connectionsFromGraph || [])
+    .map((c: any) => {
+      if (!c) return '';
+      return [
+        String(c.id ?? ''),
+        String(c.fromNodeId ?? ''),
+        String(c.fromChannel ?? ''),
+        String(c.toNodeId ?? ''),
+        String(c.toChannel ?? ''),
+        String(c.sendLevel ?? ''),
+        String(c.muted ?? ''),
+      ].join(':');
+    })
+    .join('|');
+
   // Mixer strips: input-side edges connected into the selected output/bus.
   // UI-only for now (no controls wired).
   const mixerStrips = useMemo(() => {
-    const targetId = (selectedNodeData && (selectedNodeData.type === 'target' || selectedNodeData.type === 'bus'))
-      ? selectedNodeData.id
-      : null;
+    const targetId = mixerTargetId;
     if (!targetId) return [];
 
-    const isFocusedTarget = !!focusedOutputId && targetId === focusedOutputId;
-    const sel = Math.max(0, focusedOutputChannel | 0);
+    const sel = Math.max(0, mixerSelectedChannel | 0);
     const base = mixerChannelMode === 'stereo' ? Math.floor(sel / 2) * 2 : sel;
 
     const allNodes = [...(nodesFromGraph || []), ...placedNodes];
     const nodesById = new Map<string, any>(allNodes.map((n: any) => [n.id, n]));
 
-    const incoming = (connectionsFromGraph || []).filter((c: any) => c && c.toNodeId === targetId);
+    const incoming0 = (connectionsFromGraph || []).filter((c: any) => c && c.toNodeId === targetId);
+    const incoming = incoming0.filter((c: any) => {
+      const toCh = Number(c?.toChannel);
+      if (mixerChannelMode === 'mono') return toCh === base;
+      return toCh === base || toCh === base + 1;
+    });
     if (incoming.length === 0) return [];
 
     const sorted = [...incoming].sort((a: any, b: any) => {
@@ -710,47 +755,15 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       return Number(a.toChannel) - Number(b.toChannel);
     });
 
-    const out: any[] = [];
-    for (let i = 0; i < sorted.length; i++) {
-      const c = sorted[i];
-      if (!c) continue;
-      const next = sorted[i + 1];
-
-      if (isFocusedTarget) {
-        const toCh = Number(c.toChannel);
-        if (mixerChannelMode === 'mono') {
-          if (toCh !== base) continue;
-        } else {
-          if (toCh !== base && toCh !== base + 1) continue;
-        }
-      }
-
-      const canPair = mixerChannelMode !== 'mono' && !!next &&
-        c.fromNodeId === next.fromNodeId &&
-        c.toNodeId === next.toNodeId &&
-        Number(c.fromChannel) % 2 === 0 &&
-        Number(next.fromChannel) === Number(c.fromChannel) + 1 &&
-        Number(next.toChannel) === Number(c.toChannel) + 1;
-
-      const sourceNode = nodesById.get(c.fromNodeId);
-      if (!sourceNode) continue;
-
-      if (canPair) {
+    // In MONO: operate per-channel.
+    if (mixerChannelMode === 'mono') {
+      const out: any[] = [];
+      for (const c of sorted) {
+        if (!c) continue;
+        const sourceNode = nodesById.get(c.fromNodeId);
+        if (!sourceNode) continue;
         out.push({
-          id: `${c.id}+${next.id}`,
-          connectionIds: [c.id, next.id],
-          sourceNode,
-          targetId,
-          fromChannels: [c.fromChannel, next.fromChannel],
-          toChannels: [c.toChannel, next.toChannel],
-          sendLevel: c.sendLevel,
-          muted: !!c.muted && !!next.muted,
-          stereoLinked: true,
-        });
-        i++;
-      } else {
-        out.push({
-          id: c.id,
+          id: String(c.id),
           connectionIds: [c.id],
           sourceNode,
           targetId,
@@ -759,12 +772,70 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           sendLevel: c.sendLevel,
           muted: !!c.muted,
           stereoLinked: false,
+          // laneEdgeIds omitted in mono
         });
       }
+      return out;
     }
 
+    // In ST: treat inputs as pairs (even/odd) for display; allow either lane to be connected.
+    const groups = new Map<string, any[]>();
+    for (const c of sorted) {
+      if (!c) continue;
+      const fromCh = Number(c.fromChannel);
+      const pairBase = Math.floor((Number.isFinite(fromCh) ? fromCh : 0) / 2) * 2;
+      const key = `${String(c.fromNodeId)}:pair${pairBase}`;
+      const arr = groups.get(key);
+      if (arr) arr.push(c);
+      else groups.set(key, [c]);
+    }
+
+    const out: any[] = [];
+    for (const [key, arr] of groups.entries()) {
+      if (!arr || arr.length === 0) continue;
+      const first = arr[0];
+      const sourceNode = nodesById.get(first.fromNodeId);
+      if (!sourceNode) continue;
+
+      const fromCh0 = Number(first.fromChannel);
+      const pairBase = Math.floor((Number.isFinite(fromCh0) ? fromCh0 : 0) / 2) * 2;
+
+      // Lane mapping is destination-based (L/R of the currently displayed target pair),
+      // so 1ch sources fanning out to stereo still meter on both sides.
+      const laneL = arr.filter((c: any) => {
+        const toCh = Number(c?.toChannel);
+        return Number.isFinite(toCh) && (toCh % 2 === 0);
+      });
+      const laneR = arr.filter((c: any) => {
+        const toCh = Number(c?.toChannel);
+        return Number.isFinite(toCh) && (toCh % 2 === 1);
+      });
+
+      const laneLIds = laneL.map((c: any) => c.id).filter((id: any) => id != null);
+      const laneRIds = laneR.map((c: any) => c.id).filter((id: any) => id != null);
+      const connectionIds = [...laneLIds, ...laneRIds];
+
+      if (connectionIds.length === 0) continue;
+
+      out.push({
+        id: `pair:${String(first.fromNodeId)}:${pairBase}:${String(targetId)}`,
+        connectionIds,
+        laneEdgeIds: [laneLIds, laneRIds],
+        sourceNode,
+        targetId,
+        fromChannels: [pairBase, pairBase + 1],
+        toChannels: [laneL[0]?.toChannel ?? null, laneR[0]?.toChannel ?? null],
+        sendLevel: first.sendLevel,
+        muted: [...laneL, ...laneR].every((c: any) => !!c?.muted),
+        stereoLinked: true,
+      });
+    }
+
+    // Stable ordering by source then pair base
+    out.sort((a: any, b: any) => String(a.id).localeCompare(String(b.id)));
     return out;
-  }, [selectedNodeData, connectionsFromGraph, nodesFromGraph, placedNodes, mixerChannelMode, focusedOutputId, focusedOutputChannel]);
+  }, [mixerTargetId, mixerSelectedChannel, connectionsFingerprint, nodesFromGraph, placedNodes, mixerChannelMode]);
+
 
   // Refresh graph when plugins change
   const handlePluginsChange = useCallback(() => {
@@ -1503,6 +1574,9 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         mixerStrips={mixerStrips}
         mixerChannelMode={mixerChannelMode}
         onToggleMixerChannelMode={toggleMixerChannelMode}
+        mixerTargetPortCount={mixerTargetPortCount}
+        mixerSelectedChannel={mixerSelectedChannel}
+        onMixerSelectedChannel={setMixerSelectedChannel}
         outputTargets={mixerOutputTargets}
         focusedOutputId={focusedOutputId}
         onFocusOutputId={handleFocusOutputId}

@@ -304,6 +304,14 @@ export default function CanvasView({
               <g
                 key={c.id}
                 className="pointer-events-auto group cursor-pointer"
+                onMouseDown={(e) => {
+                  // Keep current selection/focus when clicking a cable.
+                  e.stopPropagation();
+                }}
+                onPointerDown={(e) => {
+                  // Same for pointer events (trackpads/stylus).
+                  e.stopPropagation();
+                }}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (typeof onDisconnect !== 'function') return;
@@ -475,7 +483,27 @@ export default function CanvasView({
                     <span className="text-xs font-bold text-slate-200 truncate block">{node.label}</span>
                   )}
                 </div>
-                      <button onClick={(e) => {e.stopPropagation(); deleteNode(node.id)}} className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3 h-3"/></button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    // Background clears selection on pointer/mouse down; prevent that when deleting.
+                    e.stopPropagation();
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteNode(node.id);
+                  }}
+                  className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                  aria-label={`Delete node ${node.label}`}
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
               </div>
 
               <div className="h-[2px] bg-slate-800 relative overflow-hidden">

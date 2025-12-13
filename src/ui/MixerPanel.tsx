@@ -227,6 +227,9 @@ interface Props {
   mixerStrips?: any[];
   mixerChannelMode?: 'stereo' | 'mono';
   onToggleMixerChannelMode?: () => void;
+  mixerTargetPortCount?: number;
+  mixerSelectedChannel?: number;
+  onMixerSelectedChannel?: (ch: number) => void;
   outputTargets?: Array<{
     id: string;
     label: string;
@@ -258,6 +261,9 @@ export default function MixerPanel({
   mixerStrips = [],
   mixerChannelMode = 'stereo',
   onToggleMixerChannelMode,
+  mixerTargetPortCount = 0,
+  mixerSelectedChannel = 0,
+  onMixerSelectedChannel,
   outputTargets = [],
   focusedOutputId = null,
   onFocusOutputId,
@@ -273,7 +279,7 @@ export default function MixerPanel({
   onPluginsChange,
 }: Props) {
   const strips = Array.isArray(mixerStrips) ? mixerStrips : [];
-  const showStrips = strips.length > 0 && (selectedNode?.type === 'target' || selectedNode?.type === 'bus');
+  const hasMixerTarget = selectedNode?.type === 'target' || selectedNode?.type === 'bus';
 
   const selectedCh = Math.max(0, Number(focusedOutputChannel) || 0);
   const selectedBase = masterChannelMode === 'stereo' ? Math.floor(selectedCh / 2) * 2 : selectedCh;
@@ -409,12 +415,25 @@ export default function MixerPanel({
 
     for (const s of strips) {
       if (!s?.id) continue;
+
+      // Prefer explicit lane mapping when provided (lets ST show proper L/R even if only one lane is connected).
+      const lane = Array.isArray((s as any).laneEdgeIds) ? (s as any).laneEdgeIds : null;
+      if (lane && lane.length >= 2) {
+        const laneLRaw = Array.isArray(lane[0]) ? lane[0] : [];
+        const laneRRaw = Array.isArray(lane[1]) ? lane[1] : [];
+        const laneLIds = laneLRaw.map(parseEdgeId).filter((n: any) => typeof n === 'number' && Number.isFinite(n));
+        const laneRIds = laneRRaw.map(parseEdgeId).filter((n: any) => typeof n === 'number' && Number.isFinite(n));
+        if (laneLIds.length) next.set(`${s.id}:L`, { kind: 'edge', ids: laneLIds });
+        if (laneRIds.length) next.set(`${s.id}:R`, { kind: 'edge', ids: laneRIds });
+        continue;
+      }
+
       const ids = (Array.isArray(s.connectionIds) ? s.connectionIds : [])
         .map(parseEdgeId)
         .filter((n: any) => typeof n === 'number' && Number.isFinite(n));
       if (!ids.length) continue;
       next.set(`${s.id}:L`, { kind: 'edge', ids, channel: 0 });
-      next.set(`${s.id}:R`, { kind: 'edge', ids, channel: 1 });
+      if (ids.length >= 2) next.set(`${s.id}:R`, { kind: 'edge', ids, channel: 1 });
     }
 
     const handle = parseNodeHandleFromId(focusedOutputId);
@@ -755,15 +774,38 @@ export default function MixerPanel({
   const getStripChannelLabel = (strip: any) => {
     const n = strip?.sourceNode;
     const from = Array.isArray(strip?.fromChannels) ? strip.fromChannels : [];
+    const to = Array.isArray(strip?.toChannels) ? strip.toChannels : [];
+
+    // UI display follows mixer channel mode: ST prefers pairs, MONO prefers a single lane (with L/R bias).
+    if (mixerChannelMode === 'stereo') {
+      if (from.length >= 2) return `${Number(from[0]) + 1}-${Number(from[1]) + 1}`;
+      if (from.length === 1) {
+        const base = Math.floor(Number(from[0]) / 2) * 2;
+        return `${base + 1}-${base + 2}`;
+      }
+    }
+
+    // MONO: show destination-biased L/R when possible.
+    if (to.length === 1) {
+      const t = Number(to[0]);
+      if (Number.isFinite(t)) {
+        const lr = (t % 2 === 0) ? 'L' : 'R';
+        return `${t + 1}${lr}`;
+      }
+    }
+
+    if (from.length === 1) {
+      const ch = Number(from[0]);
+      const lr = (ch % 2 === 0) ? 'L' : 'R';
+      return `${ch + 1}${lr}`;
+    }
+
     // Prefer Prism channel offset when present.
     const off = Number(n?.channelOffset);
     if (!Number.isNaN(off) && (n?.sourceType === 'prism-channel' || n?.sourceType === 'prism')) {
       const abs = off <= 31 ? off * 2 : off;
       return `${abs + 1}-${abs + 2}`;
     }
-    // Fallback: derive from source ports.
-    if (from.length >= 2) return `${Number(from[0]) + 1}-${Number(from[1]) + 1}`;
-    if (from.length === 1) return `${Number(from[0]) + 1}`;
     return '—';
   };
 
@@ -820,13 +862,95 @@ export default function MixerPanel({
           </div>
         </div>
         <div className="flex-1 flex overflow-x-auto p-4 gap-2 items-stretch">
-          {showStrips ? (
-            strips.map((strip: any) => {
+          {hasMixerTarget ? (
+            <>
+              {/* Mixer channel selector (applies to output or bus) */}
+              <div className="w-14 flex flex-col gap-1 overflow-y-auto border-r border-slate-800 pr-2 min-h-0 shrink-0">
+                <div className="text-[8px] font-bold text-slate-600 mb-1 text-center shrink-0">
+                  {mixerChannelMode === 'stereo' ? 'PAIR' : 'CH'}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={mixerTargetPortCount <= 0 || typeof onToggleMixerChannelMode !== 'function'}
+                  onClick={() => onToggleMixerChannelMode?.()}
+                  className={
+                    `w-full py-1 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
+                    (mixerTargetPortCount <= 0 || typeof onToggleMixerChannelMode !== 'function'
+                      ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-not-allowed'
+                      : mixerChannelMode === 'stereo'
+                        ? 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'
+                        : 'border-pink-500 bg-pink-500/15 text-white')
+                  }
+                  aria-label="Toggle mixer stereo/mono"
+                >
+                  {mixerChannelMode === 'stereo' ? 'ST' : 'MONO'}
+                </button>
+
+                <div className="flex flex-col gap-1 min-h-0">
+                  {(() => {
+                    const pc = Math.max(0, Number(mixerTargetPortCount) | 0);
+                    if (pc <= 0) return null;
+
+                    if (mixerChannelMode === 'stereo') {
+                      const selectedPairBase = Math.floor(Number(mixerSelectedChannel) / 2) * 2;
+                      const rows: any[] = [];
+                      for (let base = 0; base < pc; base += 2) {
+                        const label = base + 1 < pc ? `${base + 1}-${base + 2}` : `${base + 1}`;
+                        const isSel = base === selectedPairBase;
+                        rows.push(
+                          <button
+                            key={`pair_${base}`}
+                            type="button"
+                            onClick={() => onMixerSelectedChannel?.(base)}
+                            className={
+                              `w-full py-1.5 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
+                              (isSel
+                                ? 'border-pink-500 bg-pink-500/15 text-white'
+                                : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300')
+                            }
+                            aria-label={`Select channels ${label}`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      }
+                      return rows;
+                    }
+
+                    const rows: any[] = [];
+                    for (let ch = 0; ch < pc; ch++) {
+                      const isSel = ch === Number(mixerSelectedChannel);
+                      rows.push(
+                        <button
+                          key={`ch_${ch}`}
+                          type="button"
+                          onClick={() => onMixerSelectedChannel?.(ch)}
+                          className={
+                            `w-full py-1.5 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
+                            (isSel
+                              ? 'border-pink-500 bg-pink-500/15 text-white'
+                              : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300')
+                          }
+                          aria-label={`Select channel ${ch + 1}`}
+                        >
+                          {ch + 1}
+                        </button>
+                      );
+                    }
+                    return rows;
+                  })()}
+                </div>
+              </div>
+
+              {strips.length > 0 ? (
+                strips.map((strip: any) => {
               const Icon = getStripIcon(strip);
               const iconColor = getStripIconColor(strip);
               const chLabel = getStripChannelLabel(strip);
               const title = getStripTitle(strip);
               const isMuted = !!strip?.muted;
+              const hasStereoMeter = mixerChannelMode === 'stereo' && Array.isArray(strip?.fromChannels) && strip.fromChannels.length >= 2;
               const gain = typeof gainByStripId[strip.id] === 'number'
                 ? gainByStripId[strip.id]
                 : (typeof strip.sendLevel === 'number' ? strip.sendLevel : 1.0);
@@ -882,10 +1006,12 @@ export default function MixerPanel({
                         ref={(el) => setMeterCanvasRef(el as any, `${strip.id}:L`)}
                         className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 pointer-events-none"
                       />
-                      <canvas
-                        ref={(el) => setMeterCanvasRef(el as any, `${strip.id}:R`)}
-                        className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5 pointer-events-none"
-                      />
+                      {hasStereoMeter ? (
+                        <canvas
+                          ref={(el) => setMeterCanvasRef(el as any, `${strip.id}:R`)}
+                          className="w-2 h-full rounded-sm border border-slate-800 bg-slate-950 ml-0.5 pointer-events-none"
+                        />
+                      ) : null}
                       <MeterScale />
                     </div>
                   </div>
@@ -929,12 +1055,14 @@ export default function MixerPanel({
                   </div>
                 </div>
               );
-            })
-          ) : (
-            <div className="flex-1 flex items-center justify-center min-w-0">
-              <div className="text-[10px] text-slate-600">No connected inputs for the selected output/bus</div>
-            </div>
-          )}
+                })
+              ) : (
+                <div className="flex-1 flex items-center justify-center min-w-0">
+                  <div className="text-[10px] text-slate-600">No connected inputs for the selected output/bus</div>
+                </div>
+              )}
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -948,87 +1076,6 @@ export default function MixerPanel({
           </div>
         </div>
         <div className="flex-1 flex gap-2 p-3 min-h-0">
-          {/* Channel selector (v1-like) */}
-          <div className="w-14 flex flex-col gap-1 overflow-y-auto border-r border-slate-800 pr-2 min-h-0 shrink-0">
-            <div className="text-[8px] font-bold text-slate-600 mb-1 text-center shrink-0">
-              {masterChannelMode === 'stereo' ? 'PAIR' : 'CH'}
-            </div>
-
-            <button
-              type="button"
-              disabled={!focusedOutputId}
-              onClick={() => onToggleMasterChannelMode?.()}
-              className={
-                `w-full py-1 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
-                (!focusedOutputId
-                  ? 'border-slate-800 bg-slate-900/30 opacity-40 cursor-not-allowed'
-                  : masterChannelMode === 'stereo'
-                    ? 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'
-                    : 'border-pink-500 bg-pink-500/15 text-white')
-              }
-              aria-label="Toggle master stereo/mono"
-            >
-              {masterChannelMode === 'stereo' ? 'ST' : 'MONO'}
-            </button>
-
-            <div className="flex flex-col gap-1 min-h-0">
-              {(() => {
-                const pc = masterPortCount;
-                if (!focusedOutputId || pc <= 0) {
-                  return null;
-                }
-
-                if (masterChannelMode === 'stereo') {
-                  const selectedPairBase = Math.floor(selectedCh / 2) * 2;
-                  const rows: any[] = [];
-                  for (let base = 0; base < pc; base += 2) {
-                    const label = base + 1 < pc ? `${base + 1}-${base + 2}` : `${base + 1}`;
-                    const isSel = base === selectedPairBase;
-                    rows.push(
-                      <button
-                        key={`pair_${base}`}
-                        type="button"
-                        onClick={() => onFocusOutputChannel?.(base)}
-                        className={
-                          `w-full py-1.5 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
-                          (isSel
-                            ? 'border-pink-500 bg-pink-500/15 text-white'
-                            : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300')
-                        }
-                        aria-label={`Select channels ${label}`}
-                      >
-                        {label}
-                      </button>
-                    );
-                  }
-                  return rows;
-                }
-
-                const rows: any[] = [];
-                for (let ch = 0; ch < pc; ch++) {
-                  const isSel = ch === selectedCh;
-                  rows.push(
-                    <button
-                      key={`ch_${ch}`}
-                      type="button"
-                      onClick={() => onFocusOutputChannel?.(ch)}
-                      className={
-                        `w-full py-1.5 rounded text-[9px] font-bold border transition-colors text-center shrink-0 ` +
-                        (isSel
-                          ? 'border-pink-500 bg-pink-500/15 text-white'
-                          : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300')
-                      }
-                      aria-label={`Select channel ${ch + 1}`}
-                    >
-                      {ch + 1}
-                    </button>
-                  );
-                }
-                return rows;
-              })()}
-            </div>
-          </div>
-
           <div className="flex-1 flex flex-col gap-1 overflow-y-auto min-h-0">
             {Array.isArray(outputTargets) && outputTargets.length > 0 ? (
               outputTargets.map((t) => {
