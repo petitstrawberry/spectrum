@@ -96,35 +96,24 @@ impl GraphProcessor {
 
     /// Set edge gain (hot path - uses RwLock for now, optimize later)
     pub fn set_edge_gain(&self, edge_id: EdgeId, gain: f32) -> bool {
-        let mut graph = self.graph.write();
-        let result = graph.set_edge_gain(edge_id, gain);
-        if result {
-            self.update_snapshot(&graph);
-        }
-        result
+        let graph = self.graph.read();
+        graph.set_edge_gain_atomic(edge_id, gain)
     }
 
     /// Set edge muted state
     pub fn set_edge_muted(&self, edge_id: EdgeId, muted: bool) -> bool {
-        let mut graph = self.graph.write();
-        let result = graph.set_edge_muted(edge_id, muted);
-        if result {
-            self.update_snapshot(&graph);
-        }
-        result
+        let graph = self.graph.read();
+        graph.set_edge_muted_atomic(edge_id, muted)
     }
 
     /// Batch update edge gains
     pub fn set_edge_gains_batch(&self, updates: &[(EdgeId, f32)]) -> usize {
-        let mut graph = self.graph.write();
+        let graph = self.graph.read();
         let mut count = 0;
         for &(edge_id, gain) in updates {
-            if graph.set_edge_gain(edge_id, gain) {
+            if graph.set_edge_gain_atomic(edge_id, gain) {
                 count += 1;
             }
-        }
-        if count > 0 {
-            self.update_snapshot(&graph);
         }
         count
     }
@@ -232,37 +221,26 @@ impl GraphProcessor {
 
         for &handle in &processing_order {
             // 3a. このノードへの入力を集約（エッジからミックス）
-            let incoming_edges: Vec<_> = edges
-                .iter()
-                .filter(|e| e.target == handle && e.is_active())
-                .cloned()
-                .collect();
+            for edge in edges.iter().filter(|e| e.target == handle && e.is_active()) {
+                let Some((source_node, target_node)) =
+                    graph.get_two_nodes_mut(edge.source, edge.target)
+                else {
+                    continue;
+                };
 
-            for edge in &incoming_edges {
-                // Get source output buffer samples
-                let (source_samples, source_peak): (Vec<f32>, f32) = 
-                    if let Some(source_node) = graph.get_node(edge.source) {
-                        if let Some(buf) = source_node.output_buffer(edge.source_port) {
-                            (buf.samples().to_vec(), buf.cached_peak())
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    };
+                let Some(source_buf) = source_node.output_buffer(edge.source_port) else {
+                    continue;
+                };
+
+                let gain = edge.gain();
 
                 // Calculate post-gain peak for metering
-                let post_gain_peak = source_peak * edge.gain.abs();
+                let post_gain_peak = source_buf.cached_peak() * gain.abs();
                 edge_meter_data.push((edge.id, post_gain_peak));
 
-                // Mix into target input buffer with gain applied
-                if let Some(target_node) = graph.get_node_mut(handle) {
-                    if let Some(tgt_buf) = target_node.input_buffer_mut(edge.target_port) {
-                        let mut temp = super::buffer::AudioBuffer::new();
-                        temp.write_samples(&source_samples);
-                        temp.set_valid_frames(frames);
-                        tgt_buf.mix_from(&temp, edge.gain);
-                    }
+                // Mix into target input buffer with gain applied (no allocations)
+                if let Some(tgt_buf) = target_node.input_buffer_mut(edge.target_port) {
+                    tgt_buf.mix_from(source_buf, gain);
                 }
             }
 
@@ -321,34 +299,23 @@ impl GraphProcessor {
         let mut edge_meter_data: Vec<(EdgeId, f32)> = Vec::new();
 
         for &handle in &processing_order {
-            let incoming_edges: Vec<_> = edges
-                .iter()
-                .filter(|e| e.target == handle && e.is_active())
-                .cloned()
-                .collect();
+            for edge in edges.iter().filter(|e| e.target == handle && e.is_active()) {
+                let Some((source_node, target_node)) =
+                    graph.get_two_nodes_mut(edge.source, edge.target)
+                else {
+                    continue;
+                };
 
-            for edge in &incoming_edges {
-                let (source_samples, source_peak): (Vec<f32>, f32) = 
-                    if let Some(source_node) = graph.get_node(edge.source) {
-                        if let Some(buf) = source_node.output_buffer(edge.source_port) {
-                            (buf.samples().to_vec(), buf.cached_peak())
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    };
+                let Some(source_buf) = source_node.output_buffer(edge.source_port) else {
+                    continue;
+                };
 
-                let post_gain_peak = source_peak * edge.gain.abs();
+                let gain = edge.gain();
+                let post_gain_peak = source_buf.cached_peak() * gain.abs();
                 edge_meter_data.push((edge.id, post_gain_peak));
 
-                if let Some(target_node) = graph.get_node_mut(handle) {
-                    if let Some(tgt_buf) = target_node.input_buffer_mut(edge.target_port) {
-                        let mut temp = super::buffer::AudioBuffer::new();
-                        temp.write_samples(&source_samples);
-                        temp.set_valid_frames(frames);
-                        tgt_buf.mix_from(&temp, edge.gain);
-                    }
+                if let Some(tgt_buf) = target_node.input_buffer_mut(edge.target_port) {
+                    tgt_buf.mix_from(source_buf, gain);
                 }
             }
 

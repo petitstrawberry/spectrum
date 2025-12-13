@@ -1,6 +1,8 @@
 //! Edge (Send) - All level control happens here
 
 use super::node::{NodeHandle, PortId};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// Edge の一意識別子
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,6 +34,42 @@ impl From<EdgeId> for u32 {
 ///
 /// ソースノードの出力ポートからターゲットノードの入力ポートへの接続。
 /// すべてのレベル制御はここで行う（Sends-on-Fader の核心）。
+#[derive(Debug)]
+pub struct EdgeParams {
+    gain_bits: AtomicU32,
+    muted: AtomicBool,
+}
+
+impl EdgeParams {
+    pub fn new(gain: f32, muted: bool) -> Self {
+        Self {
+            gain_bits: AtomicU32::new(gain.max(0.0).to_bits()),
+            muted: AtomicBool::new(muted),
+        }
+    }
+
+    #[inline(always)]
+    pub fn gain(&self) -> f32 {
+        f32::from_bits(self.gain_bits.load(Ordering::Relaxed))
+    }
+
+    #[inline(always)]
+    pub fn set_gain(&self, gain: f32) {
+        self.gain_bits
+            .store(gain.max(0.0).to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Edge {
     /// 一意な識別子
@@ -44,10 +82,8 @@ pub struct Edge {
     pub target: NodeHandle,
     /// ターゲットポート（チャンネル）
     pub target_port: PortId,
-    /// 送りレベル（リニアゲイン 0.0 ~ 2.0+）
-    pub gain: f32,
-    /// ミュート
-    pub muted: bool,
+    /// 送りレベル/ミュート（共有 & Atomic）
+    params: Arc<EdgeParams>,
 }
 
 impl Edge {
@@ -65,23 +101,34 @@ impl Edge {
             source_port,
             target,
             target_port,
-            gain: 1.0,
-            muted: false,
+            params: Arc::new(EdgeParams::new(1.0, false)),
         }
+    }
+
+    /// 送りレベル（リニアゲイン 0.0 ~ 2.0+）
+    #[inline(always)]
+    pub fn gain(&self) -> f32 {
+        self.params.gain()
+    }
+
+    /// ミュート
+    #[inline(always)]
+    pub fn muted(&self) -> bool {
+        self.params.muted()
     }
 
     /// このエッジが有効か（ミュートされておらず、ゲインがある）
     pub fn is_active(&self) -> bool {
-        !self.muted && self.gain > 0.0001
+        !self.muted() && self.gain() > 0.0001
     }
 
     /// Set gain (clamped to reasonable range)
-    pub fn set_gain(&mut self, gain: f32) {
-        self.gain = gain.max(0.0);
+    pub fn set_gain(&self, gain: f32) {
+        self.params.set_gain(gain);
     }
 
     /// Set muted state
-    pub fn set_muted(&mut self, muted: bool) {
-        self.muted = muted;
+    pub fn set_muted(&self, muted: bool) {
+        self.params.set_muted(muted);
     }
 }

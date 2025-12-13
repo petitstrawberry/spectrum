@@ -189,6 +189,25 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   // Nodes placed on the canvas (local UI state for visual feedback)
   const [placedNodes, setPlacedNodes] = useState<NodeData[]>([]);
 
+  const connectionsFromGraph: Connection[] = useMemo(() => {
+    const g = graph as any;
+    if (!g || !g.edges) return [];
+    try {
+      const arr = Array.from(g.edges.values());
+      return arr.map((e: any) => ({
+        id: `edge_${e.id}`,
+        fromNodeId: `node_${e.sourceHandle}`,
+        fromChannel: e.sourcePort,
+        toNodeId: `node_${e.targetHandle}`,
+        toChannel: e.targetPort,
+        sendLevel: e.gain,
+        muted: e.muted,
+      }));
+    } catch {
+      return [];
+    }
+  }, [graph]);
+
   // If a v2 graph is provided, derive canvas nodes from it (progressive migration)
   const nodesFromGraph: NodeData[] | null = (() => {
     const g = graph as any;
@@ -726,7 +745,26 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           isPanning={isPanning}
           canvasTransform={canvasTransform}
           nodes={[...(nodesFromGraph || []), ...placedNodes]}
+          connections={connectionsFromGraph}
           systemActiveOutputs={devices?.activeOutputs || []}
+          onConnect={async (fromNodeId: string, fromPortIdx: number, toNodeId: string, toPortIdx: number) => {
+            const g = (props as any).graph;
+            if (!g || typeof g.connect !== 'function') return;
+            if (!fromNodeId?.startsWith('node_') || !toNodeId?.startsWith('node_')) return;
+            const source = Number(fromNodeId.slice(5));
+            const target = Number(toNodeId.slice(5));
+            if (Number.isNaN(source) || Number.isNaN(target)) return;
+            await g.connect(source, fromPortIdx, target, toPortIdx, 1.0);
+          }}
+          onDisconnect={async (connectionId: string) => {
+            const g = (props as any).graph;
+            if (!g || typeof g.disconnect !== 'function') return;
+            if (typeof connectionId !== 'string') return;
+            if (!connectionId.startsWith('edge_')) return;
+            const edgeId = Number(connectionId.slice(5));
+            if (Number.isNaN(edgeId)) return;
+            await g.disconnect(edgeId);
+          }}
           onMoveNode={(id: string, x: number, y: number) => {
             // If rendering v2 nodes, update graph positions via provided graph prop
             if (id && id.startsWith('node_') && (props as any).graph) {

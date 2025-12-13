@@ -70,6 +70,33 @@ impl AudioGraph {
         }
     }
 
+    /// 2つのノードを同時に取得（可変）
+    ///
+    /// オーディオ処理中に source と target を同時に参照したいケース向け。
+    pub fn get_two_nodes_mut(
+        &mut self,
+        a: NodeHandle,
+        b: NodeHandle,
+    ) -> Option<(&mut (dyn AudioNode + '_), &mut (dyn AudioNode + '_))> {
+        if a == b {
+            return None;
+        }
+
+        // std::collections::HashMap では安定版に get_many_mut がないため、
+        // raw pointer を経由して 2つの要素を同時に借用する。
+        // Safety: a != b を保証し、この関数内で HashMap を構造変更しない。
+        let a_ptr = self
+            .nodes
+            .get_mut(&a)
+            .map(|boxed| boxed as *mut Box<dyn AudioNode>)?;
+        let b_ptr = self
+            .nodes
+            .get_mut(&b)
+            .map(|boxed| boxed as *mut Box<dyn AudioNode>)?;
+
+        unsafe { Some((&mut **a_ptr, &mut **b_ptr)) }
+    }
+
     /// すべてのノードハンドルを取得
     pub fn node_handles(&self) -> impl Iterator<Item = NodeHandle> + '_ {
         self.nodes.keys().copied()
@@ -124,8 +151,8 @@ impl AudioGraph {
     ) -> Option<EdgeId> {
         let id = self.add_edge(source, source_port, target, target_port)?;
         if let Some(edge) = self.edges.iter_mut().find(|e| e.id == id) {
-            edge.gain = gain;
-            edge.muted = muted;
+            edge.set_gain(gain);
+            edge.set_muted(muted);
         }
         Some(id)
     }
@@ -163,7 +190,7 @@ impl AudioGraph {
 
     /// エッジのゲインを更新（リビルド不要）
     pub fn set_edge_gain(&mut self, id: EdgeId, gain: f32) -> bool {
-        if let Some(edge) = self.edges.iter_mut().find(|e| e.id == id) {
+        if let Some(edge) = self.edges.iter().find(|e| e.id == id) {
             edge.set_gain(gain);
             true
         } else {
@@ -173,7 +200,27 @@ impl AudioGraph {
 
     /// エッジのミュートを更新（リビルド不要）
     pub fn set_edge_muted(&mut self, id: EdgeId, muted: bool) -> bool {
-        if let Some(edge) = self.edges.iter_mut().find(|e| e.id == id) {
+        if let Some(edge) = self.edges.iter().find(|e| e.id == id) {
+            edge.set_muted(muted);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// エッジのゲインを更新（&self でOK / Atomic）
+    pub fn set_edge_gain_atomic(&self, id: EdgeId, gain: f32) -> bool {
+        if let Some(edge) = self.edges.iter().find(|e| e.id == id) {
+            edge.set_gain(gain);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// エッジのミュートを更新（&self でOK / Atomic）
+    pub fn set_edge_muted_atomic(&self, id: EdgeId, muted: bool) -> bool {
+        if let Some(edge) = self.edges.iter().find(|e| e.id == id) {
             edge.set_muted(muted);
             true
         } else {

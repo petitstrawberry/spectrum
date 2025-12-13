@@ -1,21 +1,84 @@
 // @ts-nocheck
-import React, { useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2, Link as LinkIcon } from 'lucide-react';
 import { getNodePorts } from '../hooks/useNodeDisplay';
+
+type PatchConnection = {
+  id: string;
+  fromNodeId: string;
+  fromChannel: number;
+  toNodeId: string;
+  toChannel: number;
+  sendLevel?: number;
+  muted?: boolean;
+};
 
 interface Props {
   canvasRef: React.RefObject<HTMLDivElement>;
   isPanning: boolean;
   canvasTransform: { x: number; y: number; scale: number };
   nodes?: any[];
+  connections?: PatchConnection[];
+  onConnect?: (fromNodeId: string, fromPortIdx: number, toNodeId: string, toPortIdx: number) => void | Promise<void>;
+  onDisconnect?: (connectionId: string) => void | Promise<void>;
   onMoveNode?: (id: string, x: number, y: number) => void;
   onDeleteNode?: (id: string) => void;
   systemActiveOutputs?: number[];
 }
 
-export default function CanvasView({ canvasRef, isPanning, canvasTransform, nodes = [], onMoveNode, onDeleteNode, systemActiveOutputs = [] }: Props) {
+export default function CanvasView({
+  canvasRef,
+  isPanning,
+  canvasTransform,
+  nodes = [],
+  connections = [],
+  onConnect,
+  onDisconnect,
+  onMoveNode,
+  onDeleteNode,
+  systemActiveOutputs = [],
+}: Props) {
   const nodeLineMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const [wireStart, setWireStart] = useState<null | { nodeId: string; portIdx: number }>(null);
+  const [wirePos, setWirePos] = useState<null | { x: number; y: number }>(null);
+
+  const getCanvasPointFromEvent = (ev: MouseEvent | React.MouseEvent) => {
+    if (!canvasRef.current) return null;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scale = (canvasTransform && canvasTransform.scale) ? canvasTransform.scale : 1;
+    const tx = (canvasTransform && canvasTransform.x) ? canvasTransform.x : 0;
+    const ty = (canvasTransform && canvasTransform.y) ? canvasTransform.y : 0;
+    const x = ((ev.clientX as number) - rect.left - tx) / scale;
+    const y = ((ev.clientY as number) - rect.top - ty) / scale;
+    return { x, y };
+  };
+
+  useEffect(() => {
+    if (!wireStart) return;
+
+    const onMove = (ev: MouseEvent) => {
+      const p = getCanvasPointFromEvent(ev);
+      if (p) setWirePos(p);
+    };
+
+    const onUp = () => {
+      setWireStart(null);
+      setWirePos(null);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wireStart]);
 
   const handleNodeMouseDown = (e: any, id: string) => {
     e.stopPropagation();
@@ -54,14 +117,170 @@ export default function CanvasView({ canvasRef, isPanning, canvasTransform, node
   const deleteNode = (id: string) => {
     if (typeof onDeleteNode === 'function') onDeleteNode(id);
   };
-  const endWire = (_e: any, _nodeId: string, _portIdx: number) => {};
-  const startWire = (_e: any, _nodeId: string, _portIdx: number) => {};
+
+  const startWire = (e: any, nodeId: string, portIdx: number) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    setWireStart({ nodeId, portIdx });
+    const p = getCanvasPointFromEvent(e);
+    if (p) setWirePos(p);
+  };
+
+  const endWire = async (e: any, nodeId: string, portIdx: number) => {
+    e.stopPropagation();
+    if (!wireStart) return;
+    if (typeof onConnect !== 'function') {
+      setWireStart(null);
+      setWirePos(null);
+      return;
+    }
+
+    const from = wireStart;
+    setWireStart(null);
+    setWirePos(null);
+
+    if (!from?.nodeId || !nodeId) return;
+    if (from.nodeId === nodeId) return;
+
+    const fromNode = findNode(from.nodeId);
+    const toNode = findNode(nodeId);
+    if (!fromNode || !toNode) return;
+
+    const srcPortCount = Math.max(1, Number(fromNode.channelCount || 2));
+    const tgtPortCount = Math.max(1, Number(toNode.channelCount || 2));
+
+    const channelsToConnect: Array<{ srcPort: number; tgtPort: number }> = [];
+    const isStereoPair = !!e?.shiftKey;
+    if (isStereoPair) {
+      const srcBase = Math.floor(from.portIdx / 2) * 2;
+      const tgtBase = Math.floor(portIdx / 2) * 2;
+      if (srcBase < srcPortCount && tgtBase < tgtPortCount) {
+        channelsToConnect.push({ srcPort: srcBase, tgtPort: tgtBase });
+      }
+      if (srcBase + 1 < srcPortCount && tgtBase + 1 < tgtPortCount) {
+        channelsToConnect.push({ srcPort: srcBase + 1, tgtPort: tgtBase + 1 });
+      }
+    } else {
+      channelsToConnect.push({ srcPort: from.portIdx, tgtPort: portIdx });
+    }
+
+
+    try {
+      for (const c of channelsToConnect) {
+        const exists = connections.some((x) =>
+          x.fromNodeId === from.nodeId &&
+          x.fromChannel === c.srcPort &&
+          x.toNodeId === nodeId &&
+          x.toChannel === c.tgtPort
+        );
+        if (exists) continue;
+        await onConnect(from.nodeId, c.srcPort, nodeId, c.tgtPort);
+      }
+    } catch (err) {
+      console.error('connect failed', err);
+    }
+  };
+
+  const findNode = (id: string) => nodes.find((n: any) => n.id === id);
+
+  const getPortCenter = (node: any, portIdx: number, dir: 'in' | 'out') => {
+    // Node card geometry is defined here; keep in sync with layout constants.
+    const nodeWidth = 180;
+    const headerH = 36;
+    const meterH = 2;
+    const paddingTop = 8; // p-2
+    const rowStep = 24; // h-5 (20) + space-y-1 (4)
+    const dotSize = 12;
+    const dotOffsetTop = 4;
+    const dotInset = 15; // -left/-right
+
+    const x = dir === 'in'
+      ? (node.x - dotInset + dotSize / 2)
+      : (node.x + nodeWidth + dotInset - dotSize / 2);
+    const y = node.y + headerH + meterH + paddingTop + (portIdx * rowStep) + dotOffsetTop + dotSize / 2;
+    return { x, y };
+  };
+
+  const bezierPath = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const dx = Math.max(40, Math.min(140, Math.abs(b.x - a.x) * 0.35));
+    const c1 = { x: a.x + dx, y: a.y };
+    const c2 = { x: b.x - dx, y: b.y };
+    return `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`;
+  };
+
+  const renderedConnections = useMemo(() => {
+    const out: Array<{ id: string; d: string; muted?: boolean }>= [];
+    for (const c of connections) {
+      const fromNode = findNode(c.fromNodeId);
+      const toNode = findNode(c.toNodeId);
+      if (!fromNode || !toNode) continue;
+      const a = getPortCenter(fromNode, c.fromChannel, 'out');
+      const b = getPortCenter(toNode, c.toChannel, 'in');
+      out.push({ id: c.id, d: bezierPath(a, b), muted: c.muted });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections, nodes]);
   return (
     <div ref={canvasRef} className={`flex-1 bg-[#0b1120] relative overflow-hidden ${isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}>
       <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${canvasTransform.x}px, ${canvasTransform.y}px) scale(${canvasTransform.scale})` }}>
         <div className="absolute pointer-events-none opacity-20" style={{ backgroundImage: 'radial-gradient(#475569 1px, transparent 1px)', backgroundSize: '24px 24px', width: '4000px', height: '4000px', left: '-2000px', top: '-2000px' }}></div>
         <svg className="absolute pointer-events-none z-0" style={{ width: '4000px', height: '4000px', left: '-2000px', top: '-2000px', overflow: 'visible' }}>
-          <g transform="translate(2000, 2000)"></g>
+          <g transform="translate(2000, 2000)">
+            {renderedConnections.map((c) => (
+              <g
+                key={c.id}
+                className="pointer-events-auto group cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (typeof onDisconnect !== 'function') return;
+                  try {
+                    const r = onDisconnect(c.id);
+                    if (r && typeof (r as any).catch === 'function') (r as any).catch((err: any) => console.error('disconnect failed', err));
+                  } catch (err) {
+                    console.error('disconnect failed', err);
+                  }
+                }}
+              >
+                <path d={c.d} fill="none" stroke="transparent" strokeWidth={10} />
+                <path
+                  d={c.d}
+                  fill="none"
+                  className={
+                    (c.muted ? 'stroke-slate-700' : 'stroke-slate-400') +
+                    ' group-hover:stroke-red-400'
+                  }
+                  strokeWidth={2}
+                />
+              </g>
+            ))}
+
+            {wireStart && wirePos && (() => {
+              const fromNode = findNode(wireStart.nodeId);
+              if (!fromNode) return null;
+              const a = getPortCenter(fromNode, wireStart.portIdx, 'out');
+              const b = wirePos;
+              return (
+                <>
+                  <path
+                    d={bezierPath(a, b)}
+                    fill="none"
+                    stroke="#fff"
+                    strokeWidth={2}
+                    strokeDasharray="4,4"
+                  />
+                  {/* Stereo hint tooltip near cursor (v1 parity) */}
+                  <g transform={`translate(${b.x + 12}, ${b.y - 8})`}>
+                    <rect x="0" y="-10" width="100" height="16" rx="3" fill="rgba(15, 23, 42, 0.9)" stroke="rgba(100, 116, 139, 0.5)" strokeWidth="1" />
+                    <text x="6" y="1" fontSize="9" fill="#94a3b8" fontFamily="ui-monospace, monospace">
+                      <tspan fill="#22d3ee" fontWeight="bold">⇧ Shift</tspan>
+                      <tspan fill="#64748b"> : Stereo</tspan>
+                    </text>
+                  </g>
+                </>
+              );
+            })()}
+          </g>
         </svg>
         <div className="p-4 text-slate-500">Canvas area (v1 layout)</div>
 

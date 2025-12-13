@@ -290,8 +290,8 @@ impl From<crate::audio::Edge> for EdgeInfoDto {
             source_port: edge.source_port.into(),
             target: edge.target.raw(),
             target_port: edge.target_port.into(),
-            gain: edge.gain,
-            muted: edge.muted,
+            gain: edge.gain(),
+            muted: edge.muted(),
         }
     }
 }
