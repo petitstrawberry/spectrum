@@ -443,6 +443,45 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       }));
   }, [nodesFromGraph, placedNodes]);
 
+  // Get selected bus data for MixerPanel
+  const selectedBusData = useMemo(() => {
+    if (!selectedBusId) return null;
+    const g = graph as any;
+    if (!g || !g.nodes) return null;
+    try {
+      for (const n of g.nodes.values()) {
+        if (n.type !== 'bus') continue;
+        const nodeId = `node_${n.handle}`;
+        if (nodeId !== selectedBusId) continue;
+        return {
+          id: nodeId,
+          handle: n.handle,
+          label: n.label || `Bus ${n.handle}`,
+          busId: n.busId,
+          channelCount: n.portCount || 2,
+          plugins: n.plugins?.map((p: any) => ({
+            id: p.instance_id || p.id,
+            pluginId: p.plugin_id || p.pluginId,
+            name: p.name,
+            manufacturer: p.manufacturer || 'Unknown',
+            enabled: p.enabled !== false,
+          })) || [],
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }, [selectedBusId, graph]);
+
+  // Refresh graph when plugins change
+  const handlePluginsChange = useCallback(() => {
+    const g = (props as any).graph;
+    if (g && typeof g.refresh === 'function') {
+      g.refresh();
+    }
+  }, [props]);
+
   // Delete bus handler
   const handleDeleteBus = useCallback(async (busId: string) => {
     if (!busId?.startsWith('node_')) return;
@@ -910,10 +949,11 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           onOpenPrismApp={() => { if (devices?.refresh) devices.refresh().catch(console.error); }}
         />
         <div className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
-        <CanvasView
-          canvasRef={canvasRef}
-          isPanning={isPanning}
-          canvasTransform={canvasTransform}
+        <div className="flex-1 relative flex flex-col">
+          <CanvasView
+            canvasRef={canvasRef}
+            isPanning={isPanning}
+            canvasTransform={canvasTransform}
           nodes={[...(nodesFromGraph || []), ...placedNodes]}
           connections={connectionsFromGraph}
           systemActiveOutputs={devices?.activeOutputs || []}
@@ -1037,7 +1077,8 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
               }
             }
           }}
-        />
+          />
+        </div>
         <div className="w-1 bg-transparent hover:bg-pink-500/50 cursor-ew-resize z-20 shrink-0 transition-colors" />
         <RightPanel
           width={rightSidebarWidth}
@@ -1054,7 +1095,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
       <div className="h-1 bg-transparent hover:bg-purple-500/50 cursor-ns-resize z-40 shrink-0 transition-colors" />
 
-      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} />
+      <MixerPanel mixerHeight={mixerHeight} masterWidth={masterWidth} channelSources={channelSources} selectedBus={selectedBusData} onPluginsChange={handlePluginsChange} />
     </div>
   );
 }

@@ -1,32 +1,29 @@
 // @ts-nocheck
 import React from 'react';
-import { Workflow, Maximize2, Volume2, Monitor, Music } from 'lucide-react';
-import { getIconForApp } from '../hooks/useIcons';
+import { Maximize2, Volume2, Monitor } from 'lucide-react';
+import BusPanel, { BusInfo } from './BusPanel';
+
+// =============================================================================
+// Types
+// =============================================================================
 
 interface Props {
   mixerHeight: number;
   masterWidth: number;
   channelSources?: any[];
+  selectedBus?: BusInfo | null;
+  onPluginsChange?: () => void;
 }
 
-export default function MixerPanel({ mixerHeight, masterWidth, channelSources = [] }: Props) {
+export default function MixerPanel({ mixerHeight, masterWidth, channelSources = [], selectedBus, onPluginsChange }: Props) {
   return (
     <div className="bg-[#0f172a] border-t border-slate-800 flex shrink-0 shadow-[0_-10px_40px_rgba(0,0,0,0.3)] z-30" style={{ height: mixerHeight }}>
+      {/* Bus Detail Section */}
       <div className="w-64 bg-[#1a1f2e] border-r border-slate-700 flex flex-col shrink-0">
-        <div className="h-8 bg-purple-900/30 border-b border-purple-500/30 flex items-center px-4 justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <Workflow className="w-3 h-3 text-purple-400" />
-            <span className="text-[10px] font-bold text-purple-300 uppercase tracking-widest">Bus Detail</span>
-          </div>
-        </div>
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center text-slate-600">
-            <Workflow className="w-8 h-8 mx-auto mb-2 opacity-30" />
-            <div className="text-[10px]">Select a bus to view details</div>
-          </div>
-        </div>
+        <BusPanel bus={selectedBus} onPluginsChange={onPluginsChange} />
       </div>
 
+      {/* Mixer Channels */}
       <div className="flex-1 flex flex-col min-w-0 bg-[#162032]">
         <div className="h-8 bg-slate-900/50 border-b border-slate-800 flex items-center px-4 justify-between shrink-0">
           <div className="flex items-center gap-3">
@@ -67,6 +64,7 @@ export default function MixerPanel({ mixerHeight, masterWidth, channelSources = 
 
       <div className="w-1 bg-transparent hover:bg-amber-500/50 cursor-ew-resize z-40 shrink-0 transition-colors" />
 
+      {/* Master Section */}
       <div className="bg-[#111827] border-l border-slate-800 flex flex-col shrink-0 relative shadow-2xl min-h-0" style={{ width: masterWidth }}>
         <div className="p-2 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between shrink-0">
           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
