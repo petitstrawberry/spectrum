@@ -88,12 +88,14 @@ export interface PluginInstanceDto {
   name: string;
   manufacturer: string;
   enabled: boolean;
+  /** base64(plist binary) - only included in persisted GraphState */
+  state?: string;
 }
 
 export type NodeInfoDto =
-  | { type: 'source'; handle: number; source_id: SourceIdDto; port_count: number; label: string; sub_label?: string }
-  | { type: 'bus'; handle: number; bus_id: string; label: string; port_count: number; plugins: PluginInstanceDto[] }
-  | { type: 'sink'; handle: number; sink: OutputSinkDto; port_count: number; label: string };
+  | { type: 'source'; handle: number; stable_id: string; source_id: SourceIdDto; port_count: number; label: string; sub_label?: string }
+  | { type: 'bus'; handle: number; stable_id: string; bus_id: string; label: string; port_count: number; plugins: PluginInstanceDto[] }
+  | { type: 'sink'; handle: number; stable_id: string; sink: OutputSinkDto; port_count: number; label: string };
 
 export interface EdgeInfoDto {
   id: number;
@@ -143,11 +145,30 @@ export interface GraphMetersDto {
 
 // --- State Types ---
 
+export interface NodePositionDto {
+  x: number;
+  y: number;
+}
+
+export interface UIStateDto {
+  // Stable-keyed positions (preferred)
+  node_positions: Record<string, NodePositionDto>;
+  // Backward-compat (old files) may include this
+  node_positions_by_handle?: Record<number, NodePositionDto>;
+
+  // Optional layout UI state
+  left_sidebar_width?: number;
+  right_sidebar_width?: number;
+  mixer_height?: number;
+  master_width?: number;
+  canvas_transform?: { x: number; y: number; scale: number };
+}
+
 export interface GraphStateDto {
   version: number;
   nodes: NodeInfoDto[];
   edges: EdgeInfoDto[];
-  ui_state?: any;
+  ui_state?: UIStateDto;
 }
 
 // --- System Types ---
@@ -342,12 +363,22 @@ export async function loadGraphState(state: GraphStateDto): Promise<void> {
   return invoke('load_graph_state', { state });
 }
 
-export async function persistState(): Promise<void> {
-  return invoke('persist_state');
+export async function persistState(uiState?: UIStateDto): Promise<void> {
+  return invoke('persist_state', { uiState });
 }
 
-export async function restoreState(): Promise<boolean> {
-  return invoke<boolean>('restore_state');
+// Cache UI state in backend memory (used for app-exit save).
+export async function setUiStateCache(uiState: UIStateDto): Promise<void> {
+  await invoke('set_ui_state_cache', { uiState });
+}
+
+// Best-effort background persistence (should return quickly; backend writes asynchronously).
+export async function persistStateBackground(uiState?: UIStateDto): Promise<void> {
+  return invoke('persist_state_background', { uiState });
+}
+
+export async function restoreState(): Promise<UIStateDto | null> {
+  return invoke<UIStateDto | null>('restore_state');
 }
 
 // =============================================================================

@@ -17,10 +17,12 @@ import {
   setEdgeMuted,
   persistState,
   restoreState,
+  setUiStateCache,
   type SourceIdDto,
   type OutputSinkDto,
   type NodeInfoDto,
   type EdgeInfoDto,
+  type UIStateDto,
 } from '../lib/api';
 import type { UINode, UIEdge } from '../types/graph';
 import {
@@ -261,6 +263,33 @@ function edgeInfoToUIEdge(info: EdgeInfoDto): UIEdge {
   };
 }
 
+function stableIdForSourceId(sourceId: SourceIdDto): string {
+  const t = (sourceId as any)?.type;
+  if (t === 'prism_channel') return `source:prism:${(sourceId as any).channel}`;
+  if (t === 'input_device') return `source:device:${(sourceId as any).device_id}:${(sourceId as any).channel}`;
+  // Fallback to backend variant names if they slip through
+  if (t === 'prism') return `source:prism:${(sourceId as any).channel}`;
+  if (t === 'device') return `source:device:${(sourceId as any).device_id}:${(sourceId as any).channel}`;
+  return 'source:unknown';
+}
+
+function stableIdForSink(sink: OutputSinkDto): string {
+  return `sink:${sink.device_id}:${sink.channel_offset}:${sink.channel_count}`;
+}
+
+function stableIdForNodeInfo(info: NodeInfoDto): string {
+  const sid = (info as any).stable_id;
+  if (typeof sid === 'string' && sid.trim() !== '') return sid;
+  switch (info.type) {
+    case 'source':
+      return stableIdForSourceId((info as any).source_id);
+    case 'bus':
+      return `bus:${(info as any).bus_id}`;
+    case 'sink':
+      return stableIdForSink((info as any).sink);
+  }
+}
+
 // =============================================================================
 // useGraph Hook
 // =============================================================================
@@ -293,6 +322,10 @@ export interface UseGraphReturn {
   refresh: () => Promise<void>;
   save: () => Promise<void>;
 
+  // UI state helpers (canvas pan/zoom)
+  initialCanvasTransform?: { x: number; y: number; scale: number } | null;
+  updateCanvasTransform?: (t: { x: number; y: number; scale: number }) => void;
+
   // Helpers
   getNodeByHandle: (handle: number) => UINode | undefined;
   getEdgesForNode: (handle: number) => UIEdge[];
@@ -303,14 +336,95 @@ export interface UseGraphReturn {
 export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   const { autoRestore = true } = options;
 
+  const isTauri = typeof window !== 'undefined'
+    && ((window as any).__TAURI_INTERNALS__ != null || (window as any).__TAURI__ != null);
+
   const [nodes, setNodes] = useState<Map<number, UINode>>(new Map());
   const [edges, setEdges] = useState<Map<number, UIEdge>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Position tracking (not synced to backend)
-  const positionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const initializedRef = useRef(false);
+  const dirtyRef = useRef(false);
+  const persistInFlightRef = useRef<Promise<void> | null>(null);
+  const uiCacheTimerRef = useRef<number | null>(null);
+
+  // Canvas pan/zoom state lives in SpectrumLayout, but we persist it here.
+  const [initialCanvasTransform, setInitialCanvasTransform] = useState<{ x: number; y: number; scale: number } | null>(null);
+  const canvasTransformRef = useRef<{ x: number; y: number; scale: number }>({ x: 0, y: 0, scale: 1 });
+
+  // Position tracking (stable across sessions)
+  const positionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  // Bridge for newly-created nodes / early events before stable_id is known
+  const pendingPositionsByHandleRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const handleToStableIdRef = useRef<Map<number, string>>(new Map());
   const nextPositionRef = useRef({ x: 100, y: 100 });
+
+  const buildUiState = useCallback((): UIStateDto => {
+    const node_positions: Record<string, { x: number; y: number }> = {};
+    for (const [stableId, pos] of positionsRef.current.entries()) {
+      node_positions[stableId] = { x: pos.x, y: pos.y };
+    }
+    return {
+      node_positions,
+      canvas_transform: {
+        x: canvasTransformRef.current.x,
+        y: canvasTransformRef.current.y,
+        scale: canvasTransformRef.current.scale,
+      },
+    };
+  }, []);
+
+  const markDirty = useCallback((reason: string) => {
+    dirtyRef.current = true;
+    try {
+      console.log('[useGraph] marked dirty', { reason });
+    } catch {
+      // ignore
+    }
+
+    // Keep backend UI-state cache fresh (no disk write).
+    // This enables saving only on "app exit" while still restoring latest UI.
+    if (!isTauri) return;
+    if (uiCacheTimerRef.current != null) {
+      window.clearTimeout(uiCacheTimerRef.current);
+      uiCacheTimerRef.current = null;
+    }
+    uiCacheTimerRef.current = window.setTimeout(() => {
+      uiCacheTimerRef.current = null;
+      try {
+        void setUiStateCache(buildUiState());
+      } catch (e) {
+        console.warn('[useGraph] setUiStateCache failed', e);
+      }
+    }, 250);
+  }, [buildUiState, isTauri]);
+  const flushPersist = useCallback(async (opts?: { force?: boolean; reason?: string }): Promise<void> => {
+    if (!isTauri) return;
+    if (!initializedRef.current) return;
+    if (isLoading) return;
+
+    const force = opts?.force ?? false;
+    const reason = opts?.reason ?? 'flush';
+
+    if (!force && !dirtyRef.current) return;
+    if (persistInFlightRef.current) return persistInFlightRef.current;
+
+    // Clear dirty optimistically; if persist fails we set it back.
+    dirtyRef.current = false;
+    const p = persistState(buildUiState())
+      .catch((e) => {
+        dirtyRef.current = true;
+        console.error('[useGraph] persist failed', { reason, e });
+        throw e;
+      })
+      .finally(() => {
+        persistInFlightRef.current = null;
+      });
+
+    persistInFlightRef.current = p;
+    return p;
+  }, [buildUiState, isLoading, isTauri]);
 
   // Auto-assign position for new nodes
   const getNextPosition = useCallback(() => {
@@ -331,10 +445,18 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       const newNodes = new Map<number, UINode>();
       for (const info of graphDto.nodes) {
         const handle = 'handle' in info ? info.handle : 0;
-        const existingPos = positionsRef.current.get(handle);
-        const position = existingPos || getNextPosition();
-        if (!existingPos) {
-          positionsRef.current.set(handle, position);
+        const stableId = stableIdForNodeInfo(info);
+        handleToStableIdRef.current.set(handle, stableId);
+
+        const stablePos = positionsRef.current.get(stableId);
+        const pendingPos = pendingPositionsByHandleRef.current.get(handle);
+        const position = stablePos || pendingPos || getNextPosition();
+
+        if (!stablePos) {
+          positionsRef.current.set(stableId, position);
+        }
+        if (pendingPos) {
+          pendingPositionsByHandleRef.current.delete(handle);
         }
         newNodes.set(handle, nodeInfoToUINode(info, position));
       }
@@ -358,20 +480,62 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       setIsLoading(true);
       try {
         if (autoRestore) {
-          const restored = await restoreState();
-          if (restored) {
-            console.log('[useGraph] Restored state from disk');
+          if (isTauri) {
+            const uiState = await restoreState();
+            if (uiState?.node_positions) {
+              for (const [stableId, v] of Object.entries(uiState.node_positions)) {
+                if (!stableId) continue;
+                const x = Number((v as any)?.x);
+                const y = Number((v as any)?.y);
+                if (Number.isFinite(x) && Number.isFinite(y)) {
+                  positionsRef.current.set(stableId, { x, y });
+                }
+              }
+              console.log('[useGraph] Restored UI state from disk');
+            }
+
+            // Restore canvas pan/zoom if present.
+            const t = (uiState as any)?.canvas_transform ?? (uiState as any)?.canvasTransform;
+            if (t) {
+              const x = Number((t as any).x);
+              const y = Number((t as any).y);
+              const scale = Number((t as any).scale);
+              if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(scale)) {
+                canvasTransformRef.current = { x, y, scale };
+                setInitialCanvasTransform({ x, y, scale });
+                console.log('[useGraph] Restored canvas transform from disk', { x, y, scale });
+              }
+            }
           }
         }
         await refresh();
+
+        // Prime backend cache after refresh so exit-save has something even without further edits.
+        if (isTauri) {
+          try {
+            void setUiStateCache(buildUiState());
+          } catch {
+            // ignore
+          }
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to initialize');
       } finally {
         setIsLoading(false);
+        initializedRef.current = true;
       }
     };
     init();
   }, [autoRestore, refresh]);
+
+  const updateCanvasTransform = useCallback((t: { x: number; y: number; scale: number }) => {
+    const x = Number((t as any)?.x);
+    const y = Number((t as any)?.y);
+    const scale = Number((t as any)?.scale);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
+    canvasTransformRef.current = { x, y, scale };
+    markDirty('canvasTransform');
+  }, [markDirty]);
 
   // Node Operations
   const addSource = useCallback(async (
@@ -381,10 +545,13 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   ): Promise<number> => {
     const handle = await addSourceNode(sourceId, label);
     const pos = position || getNextPosition();
-    positionsRef.current.set(handle, pos);
+    pendingPositionsByHandleRef.current.set(handle, pos);
+    // If we can compute a stable id immediately, prefer it.
+    positionsRef.current.set(stableIdForSourceId(sourceId), pos);
     await refresh();
+    markDirty('addSource');
     return handle;
-  }, [getNextPosition, refresh]);
+  }, [getNextPosition, refresh, markDirty]);
 
   const addBusNode_ = useCallback(async (
     label: string,
@@ -393,10 +560,11 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   ): Promise<number> => {
     const handle = await addBusNode(label, portCount);
     const pos = position || getNextPosition();
-    positionsRef.current.set(handle, pos);
+    pendingPositionsByHandleRef.current.set(handle, pos);
     await refresh();
+    markDirty('addBus');
     return handle;
-  }, [getNextPosition, refresh]);
+  }, [getNextPosition, refresh, markDirty]);
 
   const addSinkNode_ = useCallback(async (
     sink: OutputSinkDto,
@@ -405,19 +573,32 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   ): Promise<number> => {
     const handle = await addSinkNode(sink, label);
     const pos = position || getNextPosition();
-    positionsRef.current.set(handle, pos);
+    pendingPositionsByHandleRef.current.set(handle, pos);
+    positionsRef.current.set(stableIdForSink(sink), pos);
     await refresh();
+    markDirty('addSink');
     return handle;
-  }, [getNextPosition, refresh]);
+  }, [getNextPosition, refresh, markDirty]);
 
   const deleteNode = useCallback(async (handle: number): Promise<void> => {
     await removeNode(handle);
-    positionsRef.current.delete(handle);
+    const stableId = handleToStableIdRef.current.get(handle);
+    if (stableId) {
+      positionsRef.current.delete(stableId);
+    }
+    pendingPositionsByHandleRef.current.delete(handle);
+    handleToStableIdRef.current.delete(handle);
     await refresh();
-  }, [refresh]);
+    markDirty('deleteNode');
+  }, [refresh, markDirty]);
 
   const updateNodePosition = useCallback((handle: number, x: number, y: number) => {
-    positionsRef.current.set(handle, { x, y });
+    const stableId = handleToStableIdRef.current.get(handle);
+    if (stableId) {
+      positionsRef.current.set(stableId, { x, y });
+    } else {
+      pendingPositionsByHandleRef.current.set(handle, { x, y });
+    }
     setNodes(prev => {
       const node = prev.get(handle);
       if (!node) return prev;
@@ -425,7 +606,8 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       newNodes.set(handle, { ...node, x, y });
       return newNodes;
     });
-  }, []);
+    markDirty('moveNode');
+  }, [markDirty]);
 
   // Edge Operations
   const connect = useCallback(async (
@@ -437,13 +619,15 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   ): Promise<number> => {
     const edgeId = await addEdge(source, sourcePort, target, targetPort, gain, false);
     await refresh();
+    markDirty('connect');
     return edgeId;
-  }, [refresh]);
+  }, [refresh, markDirty]);
 
   const disconnect = useCallback(async (edgeId: number): Promise<void> => {
     await removeEdge(edgeId);
     await refresh();
-  }, [refresh]);
+    markDirty('disconnect');
+  }, [refresh, markDirty]);
 
   const setGain_ = useCallback(async (edgeId: number, gain: number): Promise<void> => {
     await setEdgeGain(edgeId, gain);
@@ -455,7 +639,8 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       newEdges.set(edgeId, { ...edge, gain });
       return newEdges;
     });
-  }, []);
+    markDirty('setGain');
+  }, [markDirty]);
 
   const setMuted_ = useCallback(async (edgeId: number, muted: boolean): Promise<void> => {
     await setEdgeMuted(edgeId, muted);
@@ -466,12 +651,13 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       newEdges.set(edgeId, { ...edge, muted });
       return newEdges;
     });
-  }, []);
+    markDirty('setMuted');
+  }, [markDirty]);
 
   // Save
   const save = useCallback(async (): Promise<void> => {
-    await persistState();
-  }, []);
+    await flushPersist({ force: true, reason: 'manualSave' });
+  }, [flushPersist]);
 
   // Helpers
   const getNodeByHandle = useCallback((handle: number): UINode | undefined => {
@@ -508,6 +694,8 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     setMuted: setMuted_,
     refresh,
     save,
+    initialCanvasTransform,
+    updateCanvasTransform,
     getNodeByHandle,
     getEdgesForNode,
     getIncomingEdges,

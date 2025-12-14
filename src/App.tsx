@@ -278,6 +278,25 @@ export default function App() {
   const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
   const canvasRef = useRef<HTMLDivElement>(null);
 
+  const appliedInitialCanvasTransformRef = useRef(false);
+  useEffect(() => {
+    if (appliedInitialCanvasTransformRef.current) return;
+    const t = (graph as any)?.initialCanvasTransform;
+    if (!t) return;
+    const x = Number(t.x);
+    const y = Number(t.y);
+    const scale = Number(t.scale);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
+    setCanvasTransform({ x, y, scale });
+    appliedInitialCanvasTransformRef.current = true;
+  }, [graph]);
+
+  useEffect(() => {
+    const g = graph as any;
+    if (!g || typeof g.updateCanvasTransform !== 'function') return;
+    g.updateCanvasTransform(canvasTransform);
+  }, [graph, canvasTransform.x, canvasTransform.y, canvasTransform.scale]);
+
   // Wire drawing state
   const [drawingWire, setDrawingWire] = useState<{
     fromNode: number;

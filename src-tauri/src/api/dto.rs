@@ -48,6 +48,9 @@ pub struct PluginInstanceDto {
     #[serde(default)]
     pub manufacturer: String,
     pub enabled: bool,
+    /// Optional plugin fullState serialized as base64(plist binary)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +59,8 @@ pub enum NodeInfoDto {
     #[serde(rename = "source")]
     Source {
         handle: NodeHandle,
+        #[serde(default)]
+        stable_id: String,
         source_id: SourceIdDto,
         port_count: u8,
         label: String,
@@ -65,6 +70,8 @@ pub enum NodeInfoDto {
     #[serde(rename = "bus")]
     Bus {
         handle: NodeHandle,
+        #[serde(default)]
+        stable_id: String,
         bus_id: String,
         label: String,
         port_count: u8,
@@ -73,6 +80,8 @@ pub enum NodeInfoDto {
     #[serde(rename = "sink")]
     Sink {
         handle: NodeHandle,
+        #[serde(default)]
+        stable_id: String,
         sink: OutputSinkDto,
         port_count: u8,
         label: String,
@@ -210,8 +219,38 @@ pub struct NodePosition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasTransformDto {
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+}
+
+fn is_empty_map_kv<K, V>(m: &HashMap<K, V>) -> bool {
+    m.is_empty()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UIStateDto {
-    pub node_positions: HashMap<NodeHandle, NodePosition>,
+    /// Stable-keyed node positions (preferred).
+    /// Keys are strings like `source:prism:0`, `bus:<bus_id>`, etc.
+    #[serde(default)]
+    pub node_positions: HashMap<String, NodePosition>,
+
+    /// Backward-compat: old handle-keyed positions.
+    #[serde(default, skip_serializing_if = "is_empty_map_kv")]
+    pub node_positions_by_handle: HashMap<NodeHandle, NodePosition>,
+
+    /// Optional layout UI state (v1 parity): panel sizes and canvas pan/zoom.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_sidebar_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_sidebar_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mixer_height: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_transform: Option<CanvasTransformDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

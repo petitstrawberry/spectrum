@@ -102,6 +102,7 @@ interface SpectrumLayoutProps {
 
 export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const { devices, graph, meters } = props;
+  const hasGraph = !!graph && typeof (graph as any).addSource === 'function' && typeof (graph as any).nodes?.values === 'function';
   // For visual parity we keep local state where needed
   const [showSettings, setShowSettings] = useState(false);
   const [showPluginBrowser, setShowPluginBrowser] = useState(false);
@@ -185,6 +186,29 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
   const canvasTransformRef = useRef(canvasTransform);
   useEffect(() => { canvasTransformRef.current = canvasTransform; }, [canvasTransform]);
+
+  // Restore initial canvas transform from persisted UI state (v2 graph).
+  const appliedInitialCanvasTransformRef = useRef(false);
+  useEffect(() => {
+    if (!hasGraph) return;
+    if (appliedInitialCanvasTransformRef.current) return;
+    const t = (graph as any)?.initialCanvasTransform;
+    if (!t) return;
+    const x = Number(t.x);
+    const y = Number(t.y);
+    const scale = Number(t.scale);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
+    setCanvasTransform({ x, y, scale });
+    appliedInitialCanvasTransformRef.current = true;
+  }, [hasGraph, graph]);
+
+  // Keep persisted UI state in sync.
+  useEffect(() => {
+    if (!hasGraph) return;
+    const g = graph as any;
+    if (!g || typeof g.updateCanvasTransform !== 'function') return;
+    g.updateCanvasTransform(canvasTransform);
+  }, [hasGraph, graph, canvasTransform.x, canvasTransform.y, canvasTransform.scale]);
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
 
@@ -705,10 +729,38 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
   })();
 
+  // Merge v2 graph nodes with legacy locally-placed nodes, but avoid duplicates.
+  // During the migration period both sources can contain the same `node_<handle>` entries.
+  const mergedNodes: NodeData[] = (() => {
+    const primary = nodesFromGraph || [];
+    const ids = new Set<string>();
+    const out: NodeData[] = [];
+
+    for (const n of primary) {
+      if (!n || !n.id) continue;
+      if (ids.has(n.id)) continue;
+      ids.add(n.id);
+      out.push(n);
+    }
+
+    // v2 mode: audio graph is the single source of truth.
+    // Do not merge `placedNodes` to avoid conflicting local state.
+    if (!hasGraph) {
+      for (const n of placedNodes) {
+        if (!n || !n.id) continue;
+        if (ids.has(n.id)) continue;
+        ids.add(n.id);
+        out.push(n);
+      }
+    }
+
+    return out;
+  })();
+
   // If an output node becomes system-disabled (greyed out), force-clear focus/selection
   // so its cables are not highlighted anymore.
   useEffect(() => {
-    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    const allNodes = mergedNodes;
     const activeNums = Array.isArray(devices?.activeOutputs)
       ? (devices!.activeOutputs as any[])
           .map((v: any) => Number(v))
@@ -746,8 +798,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
 
   // Extract bus nodes for RightPanel
   const busNodes = useMemo(() => {
-    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
-    return allNodes
+    return mergedNodes
       .filter((n: any) => n.type === 'bus')
       .map((n: any) => ({
         id: n.id,
@@ -792,8 +843,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   // Selected node for a general-purpose detail view (bus/source/target)
   const selectedNodeData = useMemo(() => {
     if (!selectedNodeId) return null;
-    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
-    return allNodes.find((n: any) => n && n.id === selectedNodeId) || null;
+    return mergedNodes.find((n: any) => n && n.id === selectedNodeId) || null;
   }, [selectedNodeId, nodesFromGraph, placedNodes]);
 
   const mixerChannelMode = useMemo<'stereo' | 'mono'>(() => {
@@ -868,8 +918,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     const sel = Math.max(0, mixerSelectedChannel | 0);
     const base = mixerChannelMode === 'stereo' ? Math.floor(sel / 2) * 2 : sel;
 
-    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
-    const nodesById = new Map<string, any>(allNodes.map((n: any) => [n.id, n]));
+    const nodesById = new Map<string, any>(mergedNodes.map((n: any) => [n.id, n]));
 
     const incoming0 = (connectionsFromGraph || []).filter((c: any) => c && c.toNodeId === targetId);
     const incoming = incoming0.filter((c: any) => {
@@ -1003,7 +1052,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   }, []);
 
   const mixerOutputTargets = useMemo(() => {
-    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
+    const allNodes = mergedNodes;
     const activeNums = Array.isArray(devices?.activeOutputs)
       ? (devices!.activeOutputs as any[])
           .map((v: any) => Number(v))
@@ -1068,8 +1117,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
 
     // Do not allow focusing a system-disabled (greyed) output node.
-    const allNodes = [...(nodesFromGraph || []), ...placedNodes];
-    const n = allNodes.find((x: any) => x && x.id === outputNodeId);
+    const n = mergedNodes.find((x: any) => x && x.id === outputNodeId);
     const activeNums = Array.isArray(devices?.activeOutputs)
       ? (devices!.activeOutputs as any[])
           .map((v: any) => Number(v))
@@ -1343,34 +1391,12 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                   }
                 }
 
-                // If a v2 graph is provided, use it so the graph state (and positions) are updated and reflected
-                if ((props as any).graph && typeof (props as any).graph.addSource === 'function') {
-                  // Optimistic UI: add a pending local node so the user sees immediate feedback
-                  const pendingId = `node_pending_${Date.now()}`;
-                  setPlacedNodes(prev => [...prev, {
-                    id: pendingId,
-                    libraryId: id,
-                    type: 'source',
-                    label,
-                    subLabel,
-                    icon: nodeIcon,
-                    color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
-                    deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
-                    x: canvasX,
-                    y: canvasY,
-                    volume: 1,
-                    muted: false,
-                    channelCount: nodeChannels,
-                    channelMode: 'stereo'
-                  }]);
-
+                // v2 mode: audio graph is authoritative. Do not add local placed nodes.
+                if (hasGraph) {
                   try {
                     const handle = await (props as any).graph.addSource(sourceId, label, { x: canvasX, y: canvasY });
-                    // graph.addSource will refresh graph state; remove pending placeholder
-                    setPlacedNodes(prev => prev.filter(n => n.id !== pendingId));
                     console.debug('added node via graph.addSource', handle);
                   } catch (e) {
-                    // On failure, leave pending node as fallback local visual
                     console.error('graph.addSource failed', e);
                   }
                 } else {
@@ -1396,23 +1422,25 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                 }
               } catch (err) {
                 console.error('addSourceNode/graph.addSource failed, falling back to local node', err);
-                // Fallback: still show a local visual node so UI feedback is visible
-                setPlacedNodes(prev => [...prev, {
-                  id: `node_local_${Date.now()}`,
-                  libraryId: id,
-                  type: 'source',
-                  label,
-                  subLabel,
-                  icon: nodeIcon,
-                  color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
-                  deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
-                  x: canvasX,
-                  y: canvasY,
-                  volume: 1,
-                  muted: false,
-                  channelCount: nodeChannels,
-                  channelMode: 'stereo',
-                }]);
+                if (!hasGraph) {
+                  // Fallback (legacy): still show a local visual node so UI feedback is visible
+                  setPlacedNodes(prev => [...prev, {
+                    id: `node_local_${Date.now()}`,
+                    libraryId: id,
+                    type: 'source',
+                    label,
+                    subLabel,
+                    icon: nodeIcon,
+                    color: typeof colorValue !== 'undefined' ? colorValue : 'text-cyan-400',
+                    deviceName: id.startsWith('dev_') ? (otherInputDevices.find((d:any)=>d.deviceId === Number(id.slice(4)))?.name) : undefined,
+                    x: canvasX,
+                    y: canvasY,
+                    volume: 1,
+                    muted: false,
+                    channelCount: nodeChannels,
+                    channelMode: 'stereo',
+                  }]);
+                }
               }
             }
             // handle virtual output sinks (id like 'vout_<device>_<offset>')
@@ -1430,7 +1458,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                 const sink = { device_id: parentDeviceId, channel_offset: offset, channel_count: nodeChannelsLocal };
                 const labelText = vEntry ? vEntry.name : `Out ${offset + 1}-${offset + nodeChannelsLocal}`;
                 try {
-                  if ((props as any).graph && typeof (props as any).graph.addSink === 'function') {
+                  if (hasGraph && typeof (props as any).graph.addSink === 'function') {
                     const handle = await (props as any).graph.addSink(sink, labelText, { x: canvasX, y: canvasY });
                     console.debug('added sink via graph.addSink', handle);
                   } else {
@@ -1453,21 +1481,23 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                   }
                 } catch (err) {
                   console.error('addSinkNode/graph.addSink failed, falling back to local sink node', err);
-                  setPlacedNodes(prev => [...prev, {
-                    id: `node_local_${Date.now()}`,
-                    libraryId: id,
-                    type: 'target',
-                    label: labelText,
-                    subLabel: `${nodeChannelsLocal}ch Output`,
-                    icon: nodeIconLocal,
-                    color: colorValueLocal,
-                    x: canvasX,
-                    y: canvasY,
-                    volume: 1,
-                    muted: false,
-                    channelCount: nodeChannelsLocal,
-                    channelMode: 'stereo',
-                  }]);
+                  if (!hasGraph) {
+                    setPlacedNodes(prev => [...prev, {
+                      id: `node_local_${Date.now()}`,
+                      libraryId: id,
+                      type: 'target',
+                      label: labelText,
+                      subLabel: `${nodeChannelsLocal}ch Output`,
+                      icon: nodeIconLocal,
+                      color: colorValueLocal,
+                      x: canvasX,
+                      y: canvasY,
+                      volume: 1,
+                      muted: false,
+                      channelCount: nodeChannelsLocal,
+                      channelMode: 'stereo',
+                    }]);
+                  }
                 }
               }
             }
@@ -1620,7 +1650,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
             canvasTransform={canvasTransform}
             onCanvasWheel={handleCanvasWheel}
             onCanvasPanStart={handleCanvasPanStart}
-          nodes={[...(nodesFromGraph || []), ...placedNodes]}
+          nodes={mergedNodes}
           connections={connectionsFromGraph}
           systemActiveOutputs={devices?.activeOutputs || []}
           selectedNodeId={selectedNodeId}
@@ -1665,7 +1695,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           }}
           onDeleteNode={async (id: string) => {
             // find node to determine if it's a device-backed node
-            const node = (nodesFromGraph || placedNodes).find(n => n.id === id);
+            const node = mergedNodes.find(n => n.id === id);
             // stop capture if this node represents a physical input device
             if (node && node.libraryId && node.libraryId.startsWith('dev_')) {
               const deviceId = Number(node.libraryId.slice(4));

@@ -7,7 +7,89 @@ use crate::audio::{AudioNode, EdgeId, NodeHandle, PortId};
 use crate::audio::source::SourceNode;
 use crate::audio::bus::BusNode;
 use crate::audio::sink::SinkNode;
+use crate::UiStateCache;
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use tauri::State;
+
+// =============================================================================
+// State Logging
+// =============================================================================
+
+/// State log level:
+/// - 0: off (default in release)
+/// - 1: summary (default in debug builds)
+/// - 2: verbose (set `SPECTRUM_STATE_LOG=2`)
+fn state_log_level() -> u8 {
+    if let Ok(v) = std::env::var("SPECTRUM_STATE_LOG") {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "2" || v == "verbose" {
+            2
+        } else if v == "0" || v == "off" || v == "false" {
+            0
+        } else {
+            1
+        }
+    } else if cfg!(debug_assertions) {
+        1
+    } else {
+        0
+    }
+}
+
+fn state_log_summary(msg: impl AsRef<str>) {
+    if state_log_level() >= 1 {
+        println!("[state] {}", msg.as_ref());
+    }
+}
+
+fn state_log_verbose(msg: impl AsRef<str>) {
+    if state_log_level() >= 2 {
+        println!("[state] {}", msg.as_ref());
+    }
+}
+
+fn state_uptime_ms() -> u128 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
+}
+
+static RESTORE_CALL_SEQ: AtomicU64 = AtomicU64::new(0);
+static PERSIST_CALL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+// =============================================================================
+// Stable Node IDs (for persistence)
+// =============================================================================
+
+fn stable_id_for_source_id(source_id: &SourceIdDto) -> String {
+    match source_id {
+        SourceIdDto::PrismChannel { channel } => format!("source:prism:{}", channel),
+        SourceIdDto::InputDevice { device_id, channel } => {
+            format!("source:device:{}:{}", device_id, channel)
+        }
+    }
+}
+
+fn stable_id_for_bus_id(bus_id: &str) -> String {
+    format!("bus:{}", bus_id)
+}
+
+fn stable_id_for_sink(sink: &OutputSinkDto) -> String {
+    format!(
+        "sink:{}:{}:{}",
+        sink.device_id, sink.channel_offset, sink.channel_count
+    )
+}
+
+fn compute_stable_id_for_node(node: &NodeInfoDto) -> String {
+    match node {
+        NodeInfoDto::Source { source_id, .. } => stable_id_for_source_id(source_id),
+        NodeInfoDto::Bus { bus_id, .. } => stable_id_for_bus_id(bus_id),
+        NodeInfoDto::Sink { sink, .. } => stable_id_for_sink(sink),
+    }
+}
 
 // =============================================================================
 // Device Commands
@@ -68,6 +150,27 @@ pub async fn add_source_node(
 ) -> Result<u32, String> {
     let processor = get_graph_processor();
 
+    // De-dup: ensure only one node exists per logical source (Prism channel / device input).
+    // This guards against UI races / double-dispatch and keeps the patch graph consistent.
+    let target_stable_id = stable_id_for_source_id(&source_id);
+    if let Some(existing) = processor.with_graph(|graph| {
+        for handle in graph.node_handles() {
+            let Some(node) = graph.get_node(handle) else { continue };
+            let Some(source_node) = node.as_any().downcast_ref::<SourceNode>() else { continue };
+            let existing_id = stable_id_for_source_id(&SourceIdDto::from(source_node.source_id().clone()));
+            if existing_id == target_stable_id {
+                return Some(handle.raw());
+            }
+        }
+        None
+    }) {
+        println!(
+            "[api] add_source_node de-dup: source_id={:?} -> existing_handle={}",
+            source_id, existing
+        );
+        return Ok(existing);
+    }
+
     // Debug log: indicate frontend requested adding a source
     println!("[api] add_source_node invoked: source_id={:?}, label={:?}", source_id, label);
     let node: Box<dyn AudioNode> = match source_id {
@@ -100,6 +203,25 @@ pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, 
     let processor = get_graph_processor();
     let port_count = port_count.unwrap_or(2);
 
+    // De-dup: avoid accidentally creating multiple identical buses (common during UI/dev refreshes).
+    // We treat (label + port_count) as the logical identity.
+    if let Some(existing) = processor.with_graph(|graph| {
+        for handle in graph.node_handles() {
+            let Some(node) = graph.get_node(handle) else { continue };
+            let Some(bus) = node.as_any().downcast_ref::<BusNode>() else { continue };
+            if bus.label() == label && bus.input_port_count() == port_count as usize {
+                return Some(handle.raw());
+            }
+        }
+        None
+    }) {
+        println!(
+            "[api] add_bus_node de-dup: label={:?} port_count={} -> existing_handle={} ",
+            label, port_count, existing
+        );
+        return Ok(existing);
+    }
+
     let bus_id = format!("bus_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
     let node: Box<dyn AudioNode> = if port_count == 2 {
         Box::new(crate::audio::bus::BusNode::new_stereo(&bus_id, &label))
@@ -114,6 +236,27 @@ pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, 
 #[tauri::command]
 pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result<u32, String> {
     let processor = get_graph_processor();
+
+    // De-dup: ensure only one node exists per logical sink (device + offset + count).
+    let target_stable_id = stable_id_for_sink(&sink);
+    if let Some(existing) = processor.with_graph(|graph| {
+        for handle in graph.node_handles() {
+            let Some(node) = graph.get_node(handle) else { continue };
+            let Some(sink_node) = node.as_any().downcast_ref::<SinkNode>() else { continue };
+            let dto = OutputSinkDto::from(sink_node.sink_id().clone());
+            let existing_id = stable_id_for_sink(&dto);
+            if existing_id == target_stable_id {
+                return Some(handle.raw());
+            }
+        }
+        None
+    }) {
+        println!(
+            "[api] add_sink_node de-dup: sink={:?} -> existing_handle={}",
+            sink, existing
+        );
+        return Ok(existing);
+    }
 
     // Debug log: indicate frontend requested adding a sink
     println!("[api] add_sink_node invoked: sink={:?}, label={:?}", sink, label);
@@ -328,6 +471,9 @@ pub async fn get_graph() -> Result<GraphDto, String> {
 
                             NodeInfoDto::Source {
                                 handle: handle.raw(),
+                                stable_id: stable_id_for_source_id(&SourceIdDto::from(
+                                    source_node.source_id().clone(),
+                                )),
                                 source_id: SourceIdDto::from(source_node.source_id().clone()),
                                 port_count: node.output_port_count() as u8,
                                 label,
@@ -337,6 +483,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                             // Fallback if downcast fails
                             NodeInfoDto::Source {
                                 handle: handle.raw(),
+                                stable_id: stable_id_for_source_id(&SourceIdDto::PrismChannel { channel: 0 }),
                                 source_id: SourceIdDto::PrismChannel { channel: 0 },
                                 port_count: node.output_port_count() as u8,
                                 label: node.label().to_string(),
@@ -387,6 +534,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                             NodeInfoDto::Bus {
                                 handle: handle.raw(),
                                 bus_id: bus_node.bus_id().to_string(),
+                                stable_id: stable_id_for_bus_id(bus_node.bus_id()),
                                 label: node.label().to_string(),
                                 port_count: node.input_port_count() as u8,
                                 plugins: plugins
@@ -424,6 +572,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                             name,
                                             manufacturer,
                                             enabled: p.enabled,
+                                            state: None,
                                         }
                                     })
                                     .collect(),
@@ -432,6 +581,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                             NodeInfoDto::Bus {
                                 handle: handle.raw(),
                                 bus_id: "unknown".to_string(),
+                                stable_id: stable_id_for_bus_id("unknown"),
                                 label: node.label().to_string(),
                                 port_count: node.input_port_count() as u8,
                                 plugins: Vec::new(),
@@ -441,20 +591,24 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                     crate::audio::NodeType::Sink => {
                         // Downcast to SinkNode to get sink_id
                         if let Some(sink_node) = node.as_any().downcast_ref::<SinkNode>() {
+                            let sink_dto = OutputSinkDto::from(sink_node.sink_id().clone());
                             NodeInfoDto::Sink {
                                 handle: handle.raw(),
-                                sink: OutputSinkDto::from(sink_node.sink_id().clone()),
+                                stable_id: stable_id_for_sink(&sink_dto),
+                                sink: sink_dto,
                                 port_count: node.input_port_count() as u8,
                                 label: node.label().to_string(),
                             }
                         } else {
+                            let sink_dto = OutputSinkDto {
+                                device_id: 0,
+                                channel_offset: 0,
+                                channel_count: node.input_port_count() as u8,
+                            };
                             NodeInfoDto::Sink {
                                 handle: handle.raw(),
-                                sink: OutputSinkDto {
-                                    device_id: 0,
-                                    channel_offset: 0,
-                                    channel_count: node.input_port_count() as u8,
-                                },
+                                stable_id: stable_id_for_sink(&sink_dto),
+                                sink: sink_dto,
                                 port_count: node.input_port_count() as u8,
                                 label: node.label().to_string(),
                             }
@@ -898,14 +1052,33 @@ pub async fn get_edge_meters(ids: Vec<u32>) -> Result<Vec<EdgeMeterDto>, String>
 // =============================================================================
 
 #[tauri::command]
-pub async fn save_graph_state() -> Result<GraphStateDto, String> {
-    let graph_dto = get_graph().await?;
+pub async fn save_graph_state(ui_state: Option<UIStateDto>) -> Result<GraphStateDto, String> {
+    use base64::Engine;
+
+    let mut graph_dto = get_graph().await?;
+
+    // Capture plugin parameter state (AU fullState) for all known instances.
+    // This can be large, so we only populate it for persisted GraphState.
+    let au_manager = crate::audio_unit::get_au_manager();
+    let states = au_manager.collect_all_instance_states();
+
+    for node in &mut graph_dto.nodes {
+        if let NodeInfoDto::Bus { plugins, .. } = node {
+            for p in plugins.iter_mut() {
+                let state = states
+                    .get(&p.instance_id)
+                    .and_then(|s| s.as_ref())
+                    .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
+                p.state = state;
+            }
+        }
+    }
 
     Ok(GraphStateDto {
-        version: 1,
+        version: 3,
         nodes: graph_dto.nodes,
         edges: graph_dto.edges,
-        ui_state: None, // UI state is managed by frontend
+        ui_state,
     })
 }
 
@@ -913,31 +1086,34 @@ pub async fn save_graph_state() -> Result<GraphStateDto, String> {
 pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
     let processor = get_graph_processor();
 
-    // Lookup table for filling missing plugin metadata from old saved state.
-    let mut plugin_lookup: HashMap<String, (String, String)> = HashMap::new();
+    state_log_summary(format!(
+        "load_graph_state: begin version={} nodes={} edges={} ui_state={}",
+        state.version,
+        state.nodes.len(),
+        state.edges.len(),
+        if state.ui_state.is_some() { "yes" } else { "no" }
+    ));
+
+    // Reset AudioUnit instances (plugin chain state belongs to the graph state).
+    crate::audio_unit::get_au_manager().remove_all_instances();
+
+    // Lookup table for plugin info by ID (for recreating AU instances on restore).
+    let mut plugin_lookup: HashMap<String, crate::audio_unit::AudioUnitInfo> = HashMap::new();
     for p in crate::audio_unit::get_effect_audio_units() {
-        plugin_lookup.insert(
-            p.id.clone(),
-            (p.name.clone(), p.manufacturer.clone()),
-        );
+        plugin_lookup.insert(p.id.clone(), p);
     }
     for p in crate::audio_unit::get_instrument_audio_units() {
-        plugin_lookup.insert(
-            p.id.clone(),
-            (p.name.clone(), p.manufacturer.clone()),
-        );
+        plugin_lookup.insert(p.id.clone(), p);
     }
     for p in crate::audio_unit::get_generator_audio_units() {
-        plugin_lookup.insert(
-            p.id.clone(),
-            (p.name.clone(), p.manufacturer.clone()),
-        );
+        plugin_lookup.insert(p.id.clone(), p);
     }
 
     // Clear existing graph and rebuild from state
     processor.with_graph_mut(|graph| {
         // Clear existing nodes and edges
         let handles: Vec<_> = graph.node_handles().collect();
+        state_log_verbose(format!("load_graph_state: clearing existing nodes={}", handles.len()));
         for handle in handles {
             graph.remove_node(handle);
         }
@@ -945,11 +1121,42 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
 
     // Recreate nodes
     let mut handle_mapping: std::collections::HashMap<u32, NodeHandle> = std::collections::HashMap::new();
+    let mut stable_to_handle: std::collections::HashMap<String, NodeHandle> = std::collections::HashMap::new();
+
+    let mut recreated_nodes: usize = 0;
+    let mut deduped_nodes: usize = 0;
 
     for node_info in &state.nodes {
+        // De-dup nodes by stable id to guard against already-corrupted state files.
+        // If duplicates exist, we map all old handles to the first recreated node.
+        let stable_id = match node_info {
+            NodeInfoDto::Source { stable_id, .. }
+            | NodeInfoDto::Bus { stable_id, .. }
+            | NodeInfoDto::Sink { stable_id, .. } => {
+                if stable_id.trim().is_empty() {
+                    compute_stable_id_for_node(node_info)
+                } else {
+                    stable_id.clone()
+                }
+            }
+        };
+
+        let old_handle_u32 = match node_info {
+            NodeInfoDto::Source { handle, .. }
+            | NodeInfoDto::Bus { handle, .. }
+            | NodeInfoDto::Sink { handle, .. } => *handle,
+        };
+
+        if let Some(existing) = stable_to_handle.get(&stable_id) {
+            handle_mapping.insert(old_handle_u32, *existing);
+            deduped_nodes += 1;
+            continue;
+        }
+
         let (old_handle, new_handle) = match node_info {
             NodeInfoDto::Source {
                 handle,
+                stable_id: _,
                 source_id,
                 port_count,
                 label,
@@ -971,53 +1178,84 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
                 };
                 (*handle, processor.add_node(node))
             }
-            NodeInfoDto::Bus { handle, bus_id, label, port_count, plugins } => {
+            NodeInfoDto::Bus { handle, stable_id: _, bus_id, label, port_count, plugins } => {
+                use base64::Engine;
+
                 let mut bus = BusNode::new(bus_id.clone(), label.clone(), *port_count as usize);
-                // Add plugins
+                let au_manager = crate::audio_unit::get_au_manager();
+
+                // Recreate plugin instances in the AU manager and rebuild the chain.
                 for plugin in plugins {
-                    let mut name = plugin.name.clone();
-                    let mut manufacturer = plugin.manufacturer.clone();
-
-                    let missing = {
-                        let n = name.trim();
-                        let m = manufacturer.trim();
-
-                        n.is_empty()
-                            || m.is_empty()
-                            || m.eq_ignore_ascii_case("unknown")
+                    let Some(info) = plugin_lookup.get(&plugin.plugin_id) else {
+                        eprintln!("[state] Missing plugin {} (skipping)", plugin.plugin_id);
+                        continue;
                     };
-                    if missing {
-                        if let Some((n, m)) = plugin_lookup.get(&plugin.plugin_id) {
-                            if name.trim().is_empty() {
-                                name = n.clone();
-                            }
-                            if manufacturer.trim().is_empty()
-                                || manufacturer.trim().eq_ignore_ascii_case("unknown")
-                            {
-                                manufacturer = m.clone();
-                            }
+
+                    let instance_id = match au_manager.create_instance(info) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            eprintln!("[state] Failed to create instance for {}: {}", plugin.plugin_id, e);
+                            continue;
                         }
-                    }
+                    };
+
+                    // Prefer saved metadata if present; otherwise use current plugin info.
+                    let name = if plugin.name.trim().is_empty() {
+                        info.name.clone()
+                    } else {
+                        plugin.name.clone()
+                    };
+                    let manufacturer = if plugin.manufacturer.trim().is_empty()
+                        || plugin.manufacturer.trim().eq_ignore_ascii_case("unknown")
+                    {
+                        info.manufacturer.clone()
+                    } else {
+                        plugin.manufacturer.clone()
+                    };
 
                     bus.add_plugin(
-                        plugin.instance_id.clone(),
+                        instance_id.clone(),
                         plugin.plugin_id.clone(),
                         name,
                         manufacturer,
                     );
+
+                    // Enabled state (both bus and AU manager).
+                    let _ = bus.set_plugin_enabled(&instance_id, plugin.enabled);
+                    let _ = au_manager.set_enabled(&instance_id, plugin.enabled);
+
+                    // Full state (plugin parameters).
+                    if let Some(state_b64) = &plugin.state {
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(state_b64) {
+                            let _ = au_manager.set_instance_full_state(&instance_id, &bytes);
+                        } else {
+                            eprintln!("[state] Failed to decode plugin state for {}", plugin.plugin_id);
+                        }
+                    }
                 }
+
                 (*handle, processor.add_node(Box::new(bus)))
             }
-            NodeInfoDto::Sink { handle, sink, label, .. } => {
+            NodeInfoDto::Sink { handle, stable_id: _, sink, label, .. } => {
                 let sink_id = crate::audio::sink::SinkId::from(sink.clone());
                 let node = SinkNode::new(sink_id, label.clone());
                 (*handle, processor.add_node(Box::new(node)))
             }
         };
+        stable_to_handle.insert(stable_id, new_handle);
         handle_mapping.insert(old_handle, new_handle);
+        recreated_nodes += 1;
     }
 
+    state_log_summary(format!(
+        "load_graph_state: recreated_nodes={} dedup_skipped_nodes={} mapped_handles={} ",
+        recreated_nodes,
+        deduped_nodes,
+        handle_mapping.len()
+    ));
+
     // Recreate edges with mapped handles
+    let mut recreated_edges: usize = 0;
     for edge_info in &state.edges {
         let source_handle = handle_mapping
             .get(&edge_info.source)
@@ -1034,14 +1272,20 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
             edge_info.gain,
             edge_info.muted,
         );
+        recreated_edges += 1;
     }
+
+    state_log_summary(format!("load_graph_state: recreated_edges={}", recreated_edges));
 
     Ok(())
 }
 
 #[tauri::command]
-pub async fn persist_state() -> Result<(), String> {
+pub async fn persist_state(ui_state: Option<UIStateDto>) -> Result<(), String> {
     use std::fs;
+
+    let call_id = PERSIST_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let uptime = state_uptime_ms();
 
     // Get app data directory
     let app_data = dirs::data_dir()
@@ -1052,45 +1296,233 @@ pub async fn persist_state() -> Result<(), String> {
     fs::create_dir_all(&app_data)
         .map_err(|e| format!("Failed to create app data directory: {}", e))?;
 
-    // Save graph state
-    let state = save_graph_state().await?;
+    let state_file = app_data.join("graph_state.json");
+
+    // Save graph state.
+    // Guard against clobbering a non-empty on-disk graph with an empty in-memory graph
+    // (which can happen early during app startup / dev refresh).
+    let mut state = save_graph_state(ui_state).await?;
+
+    // Best-effort: read existing on-disk state so we can avoid destructive early writes.
+    let existing_state: Option<GraphStateDto> = if state_file.exists() {
+        fs::read_to_string(&state_file)
+            .ok()
+            .and_then(|s| serde_json::from_str::<GraphStateDto>(&s).ok())
+    } else {
+        None
+    };
+
+    // Guard #1: never clobber non-empty with empty.
+    if state.nodes.is_empty() && state.edges.is_empty() {
+        if let Some(existing) = &existing_state {
+            if !existing.nodes.is_empty() || !existing.edges.is_empty() {
+                state_log_summary(format!(
+                    "persist_state#{} @{}ms: refusing to clobber non-empty graph with empty snapshot; updating ui_state only",
+                    call_id, uptime
+                ));
+                state.nodes = existing.nodes.clone();
+                state.edges = existing.edges.clone();
+            }
+        }
+    }
+
+    // Guard #2 (startup): refuse a snapshot that drops all edges if the existing saved graph had edges.
+    // This matches the observed failure mode where graph_state.json becomes partial and overrides a valid old file.
+    if uptime < 8_000 && state.edges.is_empty() {
+        if let Some(existing) = &existing_state {
+            if !existing.edges.is_empty() {
+                state_log_summary(format!(
+                    "persist_state#{} @{}ms: refusing early edge-drop (snapshot edges=0, existing edges={}); keeping existing graph",
+                    call_id,
+                    uptime,
+                    existing.edges.len()
+                ));
+                state.nodes = existing.nodes.clone();
+                state.edges = existing.edges.clone();
+            }
+        }
+    }
+
+    state_log_summary(format!(
+        "persist_state#{} @{}ms: writing {} (nodes={} edges={} ui_state={})",
+        call_id,
+        uptime,
+        state_file.display(),
+        state.nodes.len(),
+        state.edges.len(),
+        if state.ui_state.is_some() { "yes" } else { "no" }
+    ));
+
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
-    let state_file = app_data.join("graph_state_v2.json");
     fs::write(&state_file, json)
         .map_err(|e| format!("Failed to write state file: {}", e))?;
 
     Ok(())
 }
 
+/// Persist state in the background (returns immediately).
+/// Useful if the frontend ever re-enables periodic autosave without blocking the UI.
 #[tauri::command]
-pub async fn restore_state() -> Result<bool, String> {
+pub async fn persist_state_background(ui_state: Option<UIStateDto>) -> Result<(), String> {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = persist_state(ui_state).await {
+            state_log_summary(format!("persist_state_background: persist_state failed: {}", e));
+        }
+    });
+    Ok(())
+}
+
+/// Update the in-memory UI state cache (no disk I/O).
+/// The app will flush this once on process exit.
+#[tauri::command]
+pub async fn set_ui_state_cache(
+    state: State<'_, UiStateCache>,
+    ui_state: UIStateDto,
+) -> Result<(), String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "UiStateCache mutex poisoned".to_string())?;
+    *guard = Some(ui_state);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_state() -> Result<Option<UIStateDto>, String> {
     use std::fs;
+
+    let call_id = RESTORE_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let uptime = state_uptime_ms();
 
     // Get app data directory
     let app_data = dirs::data_dir()
         .ok_or("Could not find app data directory")?
         .join("spectrum");
 
-    let state_file = app_data.join("graph_state_v2.json");
+    let state_file_new = app_data.join("graph_state.json");
 
-    // Check if state file exists
-    if !state_file.exists() {
-        return Ok(false); // No state to restore
+    if !state_file_new.exists() {
+        state_log_summary(format!(
+            "restore_state#{} @{}ms: no graph_state.json found",
+            call_id, uptime
+        ));
+        return Ok(None);
     }
 
-    // Read and parse state file
-    let json = fs::read_to_string(&state_file)
+    let mut state: GraphStateDto;
+
+    let json = fs::read_to_string(&state_file_new)
         .map_err(|e| format!("Failed to read state file: {}", e))?;
 
-    let state: GraphStateDto = serde_json::from_str(&json)
+    state = serde_json::from_str::<GraphStateDto>(&json)
         .map_err(|e| format!("Failed to parse state file: {}", e))?;
 
-    // Load the state
-    load_graph_state(state).await?;
+    state_log_summary(format!(
+        "restore_state#{} @{}ms: parsed graph_state.json (version={} nodes={} edges={})",
+        call_id,
+        uptime,
+        state.version,
+        state.nodes.len(),
+        state.edges.len()
+    ));
 
-    Ok(true)
+    state_log_summary(format!(
+        "restore_state#{} @{}ms: selected nodes={} edges={}",
+        call_id,
+        uptime,
+        state.nodes.len(),
+        state.edges.len()
+    ));
+
+    // Normalize node stable IDs (older state files may not have them).
+    let mut filled_stable_ids: usize = 0;
+    for node in &mut state.nodes {
+        let needs_fill = match node {
+            NodeInfoDto::Source { stable_id, .. }
+            | NodeInfoDto::Bus { stable_id, .. }
+            | NodeInfoDto::Sink { stable_id, .. } => stable_id.trim().is_empty(),
+        };
+
+        if needs_fill {
+            let computed = compute_stable_id_for_node(node);
+            match node {
+                NodeInfoDto::Source { stable_id, .. }
+                | NodeInfoDto::Bus { stable_id, .. }
+                | NodeInfoDto::Sink { stable_id, .. } => {
+                    *stable_id = computed;
+                    filled_stable_ids += 1;
+                }
+            }
+        }
+    }
+    if filled_stable_ids > 0 {
+        state_log_summary(format!(
+            "restore_state#{} @{}ms: filled missing stable_id count={}",
+            call_id, uptime, filled_stable_ids
+        ));
+    }
+
+    // Normalize UIState: if legacy handle-keyed positions exist, convert them to stable-keyed.
+    if let Some(ui) = state.ui_state.as_mut() {
+        state_log_verbose(format!(
+            "restore_state#{} @{}ms: ui_state positions(stable)={} positions(by_handle)={} ",
+            call_id,
+            uptime,
+            ui.node_positions.len(),
+            ui.node_positions_by_handle.len()
+        ));
+        if ui.node_positions.is_empty() && !ui.node_positions_by_handle.is_empty() {
+            let mut handle_to_stable: HashMap<u32, String> = HashMap::new();
+            for node in &state.nodes {
+                match node {
+                    NodeInfoDto::Source { handle, stable_id, .. }
+                    | NodeInfoDto::Bus { handle, stable_id, .. }
+                    | NodeInfoDto::Sink { handle, stable_id, .. } => {
+                        let sid = if stable_id.trim().is_empty() {
+                            compute_stable_id_for_node(node)
+                        } else {
+                            stable_id.clone()
+                        };
+                        handle_to_stable.insert(*handle, sid);
+                    }
+                }
+            }
+
+            let mut converted: usize = 0;
+
+            for (h, pos) in ui.node_positions_by_handle.iter() {
+                if let Some(stable_id) = handle_to_stable.get(h) {
+                    ui.node_positions
+                        .insert(stable_id.clone(), pos.clone());
+                    converted += 1;
+                }
+            }
+
+            state_log_summary(format!(
+                "restore_state#{} @{}ms: converted legacy node_positions_by_handle -> node_positions count={}",
+                call_id, uptime, converted
+            ));
+        }
+
+        // Clear legacy map so frontend doesn't accidentally use it.
+        ui.node_positions_by_handle.clear();
+    }
+
+    // Load the state
+    let ui_state = state.ui_state.clone();
+    state_log_summary(format!(
+        "restore_state#{} @{}ms: loading graph into runtime",
+        call_id, uptime
+    ));
+    load_graph_state(state).await?;
+    state_log_summary(format!(
+        "restore_state#{} @{}ms: load_graph_state completed",
+        call_id, uptime
+    ));
+
+    Ok(ui_state)
 }
 
 // =============================================================================

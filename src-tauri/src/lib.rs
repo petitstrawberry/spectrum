@@ -25,6 +25,8 @@ mod vdsp;           // vDSP hardware acceleration
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Mutex;
+use tauri::Manager;
 
 // Re-export prismd types
 pub use prismd::{ClientInfo, ClientRoutingUpdate, RoutingUpdate};
@@ -77,6 +79,15 @@ pub struct AllLevels {
 }
 
 // =============================================================================
+// Shared App State
+// =============================================================================
+
+/// Latest UI state snapshot from the frontend, stored in memory.
+/// Used to persist once on app exit without writing on every UI change.
+#[derive(Default)]
+pub struct UiStateCache(pub Mutex<Option<api::dto::UIStateDto>>);
+
+// =============================================================================
 // v2 API Commands (New)
 // =============================================================================
 
@@ -117,7 +128,9 @@ pub use api::get_edge_meters;
 pub use api::save_graph_state;
 pub use api::load_graph_state;
 pub use api::persist_state;
+pub use api::persist_state_background;
 pub use api::restore_state;
+pub use api::set_ui_state_cache;
 
 // System Commands
 pub use api::start_audio;
@@ -316,8 +329,9 @@ fn get_processes() -> Vec<PrismProcess> {
 /// Generate Tauri command handlers
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(UiStateCache::default())
         .setup(|_app| {
             // Initialize audio engine on app startup
             println!("[Spectrum] Initializing audio engine...");
@@ -383,7 +397,9 @@ pub fn run() {
             save_graph_state,
             load_graph_state,
             persist_state,
+            persist_state_background,
             restore_state,
+            set_ui_state_cache,
             // v2 API - System
             start_audio,
             stop_audio,
@@ -416,6 +432,22 @@ pub fn run() {
             get_plugins,
             get_processes,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // Save state only when the app is exiting (Cmd+Q, Quit menu, etc.).
+        // Do NOT save on window close.
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            let ui_state = match app_handle.state::<UiStateCache>().0.lock() {
+                Ok(guard) => guard.clone(),
+                Err(_) => None,
+            };
+
+            // Best-effort synchronous flush; runs during shutdown.
+            let _ = tauri::async_runtime::block_on(async {
+                crate::api::persist_state(ui_state).await
+            });
+        }
+    });
 }
