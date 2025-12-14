@@ -4,7 +4,7 @@
  * Rebuilt with v2 Pure Sends-on-Fader architecture
  */
 
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useCallback, useMemo } from 'react';
 import {
   Settings,
   Workflow,
@@ -274,39 +274,7 @@ export default function App() {
   const [selectedNodeHandle, setSelectedNodeHandle] = useState<number | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Canvas state
-  const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
-  const canvasRef = useRef<HTMLDivElement>(null);
-
-  const appliedInitialCanvasTransformRef = useRef(false);
-  useEffect(() => {
-    if (appliedInitialCanvasTransformRef.current) return;
-    const t = (graph as any)?.initialCanvasTransform;
-    if (!t) return;
-    const x = Number(t.x);
-    const y = Number(t.y);
-    const scale = Number(t.scale);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
-    setCanvasTransform({ x, y, scale });
-    appliedInitialCanvasTransformRef.current = true;
-  }, [graph]);
-
-  useEffect(() => {
-    const g = graph as any;
-    if (!g || typeof g.updateCanvasTransform !== 'function') return;
-    g.updateCanvasTransform(canvasTransform);
-  }, [graph, canvasTransform.x, canvasTransform.y, canvasTransform.scale]);
-
-  // Wire drawing state
-  const [drawingWire, setDrawingWire] = useState<{
-    fromNode: number;
-    fromPort: number;
-    isOutput: boolean;
-    startX: number;
-    startY: number;
-    currentX: number;
-    currentY: number;
-  } | null>(null);
+  // NOTE: V1 canvas pan/zoom + wiring UI is handled by SpectrumLayout.
 
   // Node array for iteration (convert Map to array)
   const nodesArray = useMemo(() => Array.from(graph.nodes.values()), [graph.nodes]);
@@ -320,111 +288,9 @@ export default function App() {
   // Selected node
   const selectedNode = selectedNodeHandle !== null ? nodesById.get(selectedNodeHandle) : null;
 
-  // Port mouse down handler
-  const handlePortMouseDown = useCallback((nodeHandle: number, portIndex: number, isInput: boolean, e: React.MouseEvent) => {
-    const node = nodesById.get(nodeHandle);
-    if (!node) return;
-
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    // For outputs, we start drawing a wire
-    // For inputs, we check if there's a wire being drawn
-    if (!isInput) {
-      setDrawingWire({
-        fromNode: nodeHandle,
-        fromPort: portIndex,
-        isOutput: true,
-        startX: node.x + 192, // Right side of node
-        startY: node.y + 50 + portIndex * 16,
-        currentX: (e.clientX - rect.left - canvasTransform.x) / canvasTransform.scale,
-        currentY: (e.clientY - rect.top - canvasTransform.y) / canvasTransform.scale,
-      });
-    }
-  }, [nodesById, canvasTransform]);
-
-  // Canvas mouse move for wire drawing
-  useEffect(() => {
-    if (!drawingWire) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect) return;
-
-      setDrawingWire(prev => prev ? {
-        ...prev,
-        currentX: (e.clientX - rect.left - canvasTransform.x) / canvasTransform.scale,
-        currentY: (e.clientY - rect.top - canvasTransform.y) / canvasTransform.scale,
-      } : null);
-    };
-
-    const handleMouseUp = () => {
-      setDrawingWire(null);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [drawingWire, canvasTransform]);
-
-  // Handle canvas wheel for zoom
-  const handleCanvasWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setCanvasTransform(prev => ({
-      ...prev,
-      scale: Math.max(0.25, Math.min(2, prev.scale * delta)),
-    }));
-  }, []);
-
-  // Handle canvas pan
-  const [isPanning, setIsPanning] = useState(false);
-  const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
-
-  const handleCanvasPanStart = useCallback((e: React.MouseEvent) => {
-    if (e.button === 1 || (e.button === 0 && e.altKey)) {
-      e.preventDefault();
-      setIsPanning(true);
-      panStart.current = {
-        x: e.clientX,
-        y: e.clientY,
-        canvasX: canvasTransform.x,
-        canvasY: canvasTransform.y,
-      };
-    }
-  }, [canvasTransform]);
-
-  useEffect(() => {
-    if (!isPanning) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!panStart.current) return;
-      const dx = e.clientX - panStart.current.x;
-      const dy = e.clientY - panStart.current.y;
-      setCanvasTransform(prev => ({
-        ...prev,
-        x: panStart.current!.canvasX + dx,
-        y: panStart.current!.canvasY + dy,
-      }));
-    };
-
-    const handleMouseUp = () => {
-      setIsPanning(false);
-      panStart.current = null;
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isPanning]);
+  const handlePortMouseDown = useCallback((..._args: any[]) => {}, []);
+  const handleCanvasWheel = useCallback((..._args: any[]) => {}, []);
+  const handleCanvasPanStart = useCallback((..._args: any[]) => {}, []);
 
   // Add source node handler
   const handleAddSource = useCallback(async (type: 'prism' | 'device', deviceId?: number, channel?: number) => {
@@ -471,6 +337,15 @@ export default function App() {
     void handlePortMouseDown; void handleCanvasWheel; void handleCanvasPanStart; void handleAddSource; void handleAddBus; void handleAddSink; void selectedNodeEdges;
     void setSelectedNodeHandle; void showSettings; void setShowSettings;
   })();
+
+  // Initial restore/getGraph can take a moment; show a minimal loading screen instead of a white flash.
+  if ((devices as any)?.isLoading || (graph as any)?.isLoading) {
+    return (
+      <div className="w-screen h-screen bg-[#0f172a] flex items-center justify-center">
+        <div className="text-slate-400 text-xs font-bold tracking-widest uppercase">Loading…</div>
+      </div>
+    );
+  }
 
   return <SpectrumLayout devices={devices} graph={graph} meters={meters} />;
 }

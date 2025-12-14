@@ -173,6 +173,33 @@ pub async fn add_source_node(
 
     // Debug log: indicate frontend requested adding a source
     println!("[api] add_source_node invoked: source_id={:?}, label={:?}", source_id, label);
+    // If this is a physical input device, ensure capture is running for it.
+    // Prism capture is handled separately by start_audio/start_capture.
+    if let SourceIdDto::InputDevice { device_id, .. } = source_id {
+        match crate::capture::start_input_capture(device_id) {
+            Ok(true) => {
+                state_log_summary(format!(
+                    "add_source_node: started input capture for device_id={}",
+                    device_id
+                ));
+            }
+            Ok(false) => {
+                // Not fatal; device might be missing or have no channels.
+                state_log_summary(format!(
+                    "add_source_node: input capture not started for device_id={} (returned false)",
+                    device_id
+                ));
+            }
+            Err(e) => {
+                // Not fatal; allow graph operations even if capture can't start.
+                eprintln!(
+                    "[api] add_source_node: start_input_capture failed for device_id={}: {}",
+                    device_id, e
+                );
+            }
+        }
+    }
+
     let node: Box<dyn AudioNode> = match source_id {
         SourceIdDto::PrismChannel { channel } => {
             let label = label.unwrap_or_else(|| format!("Prism Ch {}", channel));
@@ -1123,6 +1150,10 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
     let mut handle_mapping: std::collections::HashMap<u32, NodeHandle> = std::collections::HashMap::new();
     let mut stable_to_handle: std::collections::HashMap<String, NodeHandle> = std::collections::HashMap::new();
 
+    // Track physical input devices referenced by the restored graph.
+    // We'll ensure capture is running for them after the graph is rebuilt.
+    let mut restore_input_devices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
     let mut recreated_nodes: usize = 0;
     let mut deduped_nodes: usize = 0;
 
@@ -1167,6 +1198,7 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
                         Box::new(SourceNode::new_prism(*channel, label.clone()))
                     }
                     SourceIdDto::InputDevice { device_id, channel } => {
+                        restore_input_devices.insert(*device_id);
                         let port_count = (*port_count).max(1) as usize;
                         Box::new(SourceNode::new_device_with_channels(
                             *device_id,
@@ -1277,6 +1309,34 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
 
     state_log_summary(format!("load_graph_state: recreated_edges={}", recreated_edges));
 
+    // Ensure capture is running for any non-Prism input devices referenced by the restored graph.
+    // We intentionally do NOT fail restore if capture cannot start (device missing, permissions, etc.).
+    if !restore_input_devices.is_empty() {
+        let mut started: usize = 0;
+        let mut failed: usize = 0;
+        for device_id in restore_input_devices.iter().copied() {
+            match crate::capture::start_input_capture(device_id) {
+                Ok(true) => started += 1,
+                Ok(false) => {
+                    // returned false is not necessarily an error (e.g. no channels)
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!(
+                        "[state] load_graph_state: start_input_capture failed for device_id={}: {}",
+                        device_id, e
+                    );
+                }
+            }
+        }
+        state_log_summary(format!(
+            "load_graph_state: ensured input captures for devices={} started={} failed={}",
+            restore_input_devices.len(),
+            started,
+            failed
+        ));
+    }
+
     Ok(())
 }
 
@@ -1379,12 +1439,66 @@ pub async fn persist_state_background(ui_state: Option<UIStateDto>) -> Result<()
 #[tauri::command]
 pub async fn set_ui_state_cache(
     state: State<'_, UiStateCache>,
-    ui_state: UIStateDto,
+    mut ui_state: UIStateDto,
 ) -> Result<(), String> {
+    fn is_default_canvas_transform(t: &CanvasTransformDto) -> bool {
+        t.x.abs() <= 0.001 && t.y.abs() <= 0.001 && (t.scale - 1.0).abs() <= 0.001
+    }
+
+    // Emit a minimal log when pan/zoom differs from default, even without verbose mode.
+    // This helps confirm whether the frontend is actually pushing updated canvas transforms.
+    if let Some(t) = ui_state.canvas_transform.as_ref() {
+        let non_default = t.x.abs() > 0.001 || t.y.abs() > 0.001 || (t.scale - 1.0).abs() > 0.001;
+        if non_default {
+            state_log_summary(format!(
+                "set_ui_state_cache @{}ms: canvas_transform=({}, {}, {})",
+                state_uptime_ms(),
+                t.x,
+                t.y,
+                t.scale
+            ));
+        }
+    }
+
+    // Verbose diagnostics to confirm the frontend is pushing pan/zoom.
+    if state_log_level() >= 2 {
+        let ct = ui_state
+            .canvas_transform
+            .as_ref()
+            .map(|t| (t.x, t.y, t.scale));
+        let pos_len = ui_state.node_positions.len();
+        state_log_verbose(format!(
+            "set_ui_state_cache @{}ms: canvas_transform={:?} node_positions={} ",
+            state_uptime_ms(),
+            ct,
+            pos_len
+        ));
+    }
     let mut guard = state
         .0
         .lock()
         .map_err(|_| "UiStateCache mutex poisoned".to_string())?;
+
+    // Do not clobber a meaningful (non-default) transform with a default/None one.
+    // This can happen during dev reloads or shutdown ordering; we prefer preserving the last real view.
+    let existing_transform = guard
+        .as_ref()
+        .and_then(|s| s.canvas_transform.as_ref())
+        .cloned();
+    if let Some(existing) = existing_transform {
+        let incoming_is_default = match ui_state.canvas_transform.as_ref() {
+            None => true,
+            Some(t) => is_default_canvas_transform(t),
+        };
+        if incoming_is_default && !is_default_canvas_transform(&existing) {
+            state_log_summary(format!(
+                "set_ui_state_cache @{}ms: preserving existing canvas_transform (incoming default)",
+                state_uptime_ms()
+            ));
+            ui_state.canvas_transform = Some(existing);
+        }
+    }
+
     *guard = Some(ui_state);
     Ok(())
 }
@@ -1528,6 +1642,85 @@ pub async fn restore_state() -> Result<Option<UIStateDto>, String> {
 // =============================================================================
 // System Commands
 // =============================================================================
+
+/// Open Prism.app (companion app for channel assignment)
+/// Uses URL scheme prism://popup for popup mode
+#[tauri::command]
+pub async fn open_prism_app() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // If Prism.app is already running, just send the deep link.
+        if let Ok(out) = Command::new("pgrep").args(["-f", "Prism.app"]).output() {
+            if !out.stdout.is_empty() {
+                if Command::new("open")
+                    .arg("prism://popup?size=800x600")
+                    .spawn()
+                    .is_ok()
+                {
+                    println!("[Spectrum] Prism.app already running, sent popup deep link");
+                    return Ok(true);
+                }
+
+                // Fallback: bring to front using AppleScript
+                let _ = Command::new("osascript")
+                    .args(["-e", "tell application \"Prism\" to activate"])
+                    .spawn();
+                println!("[Spectrum] Prism.app already running, activated");
+                return Ok(true);
+            }
+        }
+
+        // Try to open via URL scheme first (this registers/opens Prism.app)
+        if Command::new("open")
+            .arg("prism://popup?size=800x600")
+            .spawn()
+            .is_ok()
+        {
+            println!("[Spectrum] Opened Prism.app via URL scheme (popup mode)");
+            return Ok(true);
+        }
+
+        // Fallback: Try common locations for Prism.app
+        let possible_paths = [
+            "/Applications/Prism.app",
+            "~/Applications/Prism.app",
+            // Development build locations
+            "../prism-app/src-tauri/target/release/bundle/macos/Prism.app",
+            "../prism-app/src-tauri/target/debug/bundle/macos/Prism.app",
+        ];
+
+        for path in &possible_paths {
+            let expanded_path = shellexpand::tilde(path);
+            if std::path::Path::new(expanded_path.as_ref()).exists() {
+                if Command::new("open")
+                    .args(["-a", expanded_path.as_ref()])
+                    .spawn()
+                    .is_ok()
+                {
+                    println!("[Spectrum] Opened Prism.app from {}", expanded_path);
+                    return Ok(true);
+                }
+            }
+        }
+
+        // Last resort: open by bundle name
+        Command::new("open")
+            .args(["-a", "Prism"])
+            .spawn()
+            .map(|_| {
+                println!("[Spectrum] Opened Prism.app by name");
+                true
+            })
+            .map_err(|e| format!("Could not find or open Prism.app: {}", e))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("open_prism_app is only supported on macOS".to_string())
+    }
+}
 
 #[tauri::command]
 pub async fn start_audio(device_id: u32) -> Result<(), String> {

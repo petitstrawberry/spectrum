@@ -339,6 +339,16 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   const isTauri = typeof window !== 'undefined'
     && ((window as any).__TAURI_INTERNALS__ != null || (window as any).__TAURI__ != null);
 
+  // Some runtimes don't expose expected globals immediately; once any backend invoke succeeds
+  // we can treat the environment as "Tauri available" for persistence/cache operations.
+  const tauriAvailableRef = useRef(false);
+
+  // Coalesce UI-state cache updates to avoid spamming invoke during gestures.
+  // Ensures "latest wins" while allowing at most one in-flight invoke at a time.
+  const uiStateCacheInFlightRef = useRef<Promise<void> | null>(null);
+  const uiStateCachePendingRef = useRef<UIStateDto | null>(null);
+  const uiStateCacheLastSentKeyRef = useRef<string | null>(null);
+
   const [nodes, setNodes] = useState<Map<number, UINode>>(new Map());
   const [edges, setEdges] = useState<Map<number, UIEdge>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
@@ -375,6 +385,47 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
     };
   }, []);
 
+  const pumpUiStateCache = useCallback((reason: string) => {
+    if (!(isTauri || tauriAvailableRef.current)) return;
+    if (uiStateCacheInFlightRef.current) return;
+
+    const run = async () => {
+      try {
+        while (true) {
+          const next = uiStateCachePendingRef.current;
+          if (!next) break;
+          uiStateCachePendingRef.current = null;
+
+          const key = JSON.stringify(next);
+          if (uiStateCacheLastSentKeyRef.current === key) {
+            continue;
+          }
+
+          await setUiStateCache(next);
+          uiStateCacheLastSentKeyRef.current = key;
+          tauriAvailableRef.current = true;
+        }
+      } catch (e) {
+        // Best-effort; keep pending state so a later call may retry.
+        console.warn('[useGraph] setUiStateCache failed', { reason, e });
+      } finally {
+        uiStateCacheInFlightRef.current = null;
+        // Handle race: a pending update may have been queued right as we were finishing.
+        if (uiStateCachePendingRef.current) {
+          pumpUiStateCache(reason);
+        }
+      }
+    };
+
+    uiStateCacheInFlightRef.current = run();
+  }, [isTauri]);
+
+  const queueUiStateCacheUpdate = useCallback((reason: string) => {
+    if (!(isTauri || tauriAvailableRef.current)) return;
+    uiStateCachePendingRef.current = buildUiState();
+    pumpUiStateCache(reason);
+  }, [buildUiState, isTauri, pumpUiStateCache]);
+
   const markDirty = useCallback((reason: string) => {
     dirtyRef.current = true;
     try {
@@ -383,24 +434,20 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       // ignore
     }
 
-    // Keep backend UI-state cache fresh (no disk write).
-    // This enables saving only on "app exit" while still restoring latest UI.
-    if (!isTauri) return;
+    // Keep backend UI-state cache fresh (no disk write). This enables saving only on "app exit" while still restoring latest UI.
+    if (!(isTauri || tauriAvailableRef.current)) return;
     if (uiCacheTimerRef.current != null) {
       window.clearTimeout(uiCacheTimerRef.current);
       uiCacheTimerRef.current = null;
     }
     uiCacheTimerRef.current = window.setTimeout(() => {
       uiCacheTimerRef.current = null;
-      try {
-        void setUiStateCache(buildUiState());
-      } catch (e) {
-        console.warn('[useGraph] setUiStateCache failed', e);
-      }
-    }, 250);
-  }, [buildUiState, isTauri]);
+      queueUiStateCacheUpdate(reason);
+    }, 1000);
+  }, [isTauri, queueUiStateCacheUpdate]);
+
   const flushPersist = useCallback(async (opts?: { force?: boolean; reason?: string }): Promise<void> => {
-    if (!isTauri) return;
+    if (!(isTauri || tauriAvailableRef.current)) return;
     if (!initializedRef.current) return;
     if (isLoading) return;
 
@@ -441,6 +488,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   const refresh = useCallback(async () => {
     try {
       const graphDto = await getGraph();
+      tauriAvailableRef.current = true;
 
       const newNodes = new Map<number, UINode>();
       for (const info of graphDto.nodes) {
@@ -480,8 +528,14 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       setIsLoading(true);
       try {
         if (autoRestore) {
-          if (isTauri) {
-            const uiState = await restoreState();
+          // Best-effort: in web mode this will throw; we just skip restore.
+          let uiState: UIStateDto | null = null;
+          try {
+            uiState = await restoreState();
+            tauriAvailableRef.current = true;
+          } catch {
+            uiState = null;
+          }
             if (uiState?.node_positions) {
               for (const [stableId, v] of Object.entries(uiState.node_positions)) {
                 if (!stableId) continue;
@@ -506,17 +560,12 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
                 console.log('[useGraph] Restored canvas transform from disk', { x, y, scale });
               }
             }
-          }
         }
         await refresh();
 
         // Prime backend cache after refresh so exit-save has something even without further edits.
-        if (isTauri) {
-          try {
-            void setUiStateCache(buildUiState());
-          } catch {
-            // ignore
-          }
+        if (isTauri || tauriAvailableRef.current) {
+          queueUiStateCacheUpdate('initPrime');
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to initialize');
@@ -526,16 +575,38 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
       }
     };
     init();
-  }, [autoRestore, refresh]);
+  }, [autoRestore, refresh, queueUiStateCacheUpdate]);
 
   const updateCanvasTransform = useCallback((t: { x: number; y: number; scale: number }) => {
     const x = Number((t as any)?.x);
     const y = Number((t as any)?.y);
     const scale = Number((t as any)?.scale);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
+
     canvasTransformRef.current = { x, y, scale };
-    markDirty('canvasTransform');
-  }, [markDirty]);
+
+    // Pan/zoom changes are committed at gesture end (wheel idle / mouseup).
+    // Push to backend cache immediately (no debounce) so we don't miss the last gesture.
+    dirtyRef.current = true;
+
+    if (!(isTauri || tauriAvailableRef.current)) return;
+
+    // For pan/zoom we bypass the coalescing pump and directly invoke once.
+    // This avoids any edge-case where a single end-of-gesture update could get dropped.
+    const next = buildUiState();
+    const key = JSON.stringify(next);
+    if (uiStateCacheLastSentKeyRef.current === key) return;
+    uiStateCacheLastSentKeyRef.current = key;
+    void setUiStateCache(next)
+      .then(() => {
+        tauriAvailableRef.current = true;
+      })
+      .catch((e) => {
+        // Best-effort; allow future retries.
+        uiStateCacheLastSentKeyRef.current = null;
+        console.warn('[useGraph] setUiStateCache failed', { reason: 'canvasTransform', e });
+      });
+  }, [buildUiState, isTauri]);
 
   // Node Operations
   const addSource = useCallback(async (

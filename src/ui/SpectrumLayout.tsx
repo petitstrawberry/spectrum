@@ -37,6 +37,7 @@ import { getColorForDevice } from '../hooks/useColors';
 import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, getVirtualOutputDisplay, getBusDisplay } from '../hooks/useNodeDisplay';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { addSourceNode, addSinkNode, removeNode, setOutputGain, setOutputChannelGain } from '../lib/api';
+import { openPrismApp } from '../lib/prismd';
 
 // --- Types ---
 
@@ -187,6 +188,24 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const canvasTransformRef = useRef(canvasTransform);
   useEffect(() => { canvasTransformRef.current = canvasTransform; }, [canvasTransform]);
 
+  const commitCanvasTransform = useCallback((t?: { x: number; y: number; scale: number }) => {
+    if (!hasGraph) return;
+    const g = graph as any;
+    if (!g || typeof g.updateCanvasTransform !== 'function') return;
+    g.updateCanvasTransform(t ?? canvasTransformRef.current);
+  }, [hasGraph, graph]);
+
+  const wheelCommitTimerRef = useRef<number | null>(null);
+  const scheduleWheelCommit = useCallback(() => {
+    if (wheelCommitTimerRef.current != null) {
+      window.clearTimeout(wheelCommitTimerRef.current);
+    }
+    wheelCommitTimerRef.current = window.setTimeout(() => {
+      wheelCommitTimerRef.current = null;
+      commitCanvasTransform();
+    }, 150);
+  }, [commitCanvasTransform]);
+
   // Restore initial canvas transform from persisted UI state (v2 graph).
   const appliedInitialCanvasTransformRef = useRef(false);
   useEffect(() => {
@@ -198,17 +217,17 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     const y = Number(t.y);
     const scale = Number(t.scale);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
-    setCanvasTransform({ x, y, scale });
+    const next = { x, y, scale };
+    canvasTransformRef.current = next;
+    setCanvasTransform(next);
     appliedInitialCanvasTransformRef.current = true;
-  }, [hasGraph, graph]);
-
-  // Keep persisted UI state in sync.
-  useEffect(() => {
-    if (!hasGraph) return;
-    const g = graph as any;
-    if (!g || typeof g.updateCanvasTransform !== 'function') return;
-    g.updateCanvasTransform(canvasTransform);
-  }, [hasGraph, graph, canvasTransform.x, canvasTransform.y, canvasTransform.scale]);
+  }, [
+    hasGraph,
+    graph,
+    (graph as any)?.initialCanvasTransform?.x,
+    (graph as any)?.initialCanvasTransform?.y,
+    (graph as any)?.initialCanvasTransform?.scale,
+  ]);
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
 
@@ -229,18 +248,26 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         const scaleChange = nextScale / prev.scale;
         const nextX = mouseX - (mouseX - prev.x) * scaleChange;
         const nextY = mouseY - (mouseY - prev.y) * scaleChange;
-        return { x: nextX, y: nextY, scale: nextScale };
+        const next = { x: nextX, y: nextY, scale: nextScale };
+        canvasTransformRef.current = next;
+        return next;
       });
+      scheduleWheelCommit();
       return;
     }
 
     // Two-finger scroll for panning
-    setCanvasTransform((prev: any) => ({
-      ...prev,
-      x: prev.x - e.deltaX,
-      y: prev.y - e.deltaY,
-    }));
-  }, []);
+    setCanvasTransform((prev: any) => {
+      const next = {
+        ...prev,
+        x: prev.x - e.deltaX,
+        y: prev.y - e.deltaY,
+      };
+      canvasTransformRef.current = next;
+      return next;
+    });
+    scheduleWheelCommit();
+  }, [scheduleWheelCommit]);
 
   const handleCanvasPanStart = useCallback((e: any) => {
     // Only start pan if clicking on empty canvas (not on nodes/cables)
@@ -259,11 +286,15 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       if (!panStart.current) return;
       const dx = ev.clientX - panStart.current.x;
       const dy = ev.clientY - panStart.current.y;
-      setCanvasTransform((prev: any) => ({
-        ...prev,
-        x: panStart.current!.canvasX + dx,
-        y: panStart.current!.canvasY + dy,
-      }));
+      setCanvasTransform((prev: any) => {
+        const next = {
+          ...prev,
+          x: panStart.current!.canvasX + dx,
+          y: panStart.current!.canvasY + dy,
+        };
+        canvasTransformRef.current = next;
+        return next;
+      });
     };
 
     const handlePanEnd = () => {
@@ -273,13 +304,16 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       document.removeEventListener('mouseup', handlePanEnd);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+
+      // Persist pan once at the end of the gesture.
+      commitCanvasTransform();
     };
 
     document.body.style.cursor = 'grabbing';
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', handlePanMove);
     document.addEventListener('mouseup', handlePanEnd);
-  }, []);
+  }, [commitCanvasTransform]);
 
   const handleResizeStart = useCallback((
     e: any,
@@ -678,13 +712,38 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           icon = display.icon;
           iconColor = display.iconColor;
         } else if (type === 'target') {
-          // Sinkの表示情報
-          const display = getSinkDeviceDisplay(n.label || 'Output', n.portCount || 2);
-          label = display.label;
-          subLabel = display.subLabel;
-          displayTitle = display.label;
-          icon = display.icon;
-          iconColor = display.iconColor;
+          // Target(sink) display:
+          // - If it's a virtual output (vout_*), prefer the same display logic as RightPanel.
+          // - Otherwise fall back to generic sink display.
+          if (typeof libraryId === 'string' && libraryId.startsWith('vout_')) {
+            const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === libraryId);
+            if (vEntry) {
+              const display = getVirtualOutputDisplay(
+                vEntry.name,
+                vEntry.channels || vEntry.channelCount || 2,
+                vEntry.iconHint
+              );
+              label = display.label;
+              subLabel = display.subLabel;
+              displayTitle = display.label;
+              icon = display.icon;
+              iconColor = display.iconColor;
+            } else {
+              const display = getSinkDeviceDisplay(n.label || 'Output', n.portCount || 2);
+              label = display.label;
+              subLabel = display.subLabel;
+              displayTitle = display.label;
+              icon = display.icon;
+              iconColor = display.iconColor;
+            }
+          } else {
+            const display = getSinkDeviceDisplay(n.label || 'Output', n.portCount || 2);
+            label = display.label;
+            subLabel = display.subLabel;
+            displayTitle = display.label;
+            icon = display.icon;
+            iconColor = display.iconColor;
+          }
         } else if (type === 'bus') {
           // Busの表示情報
           const display = getBusDisplay(n.busId || 'bus_1', n.portCount || 2, n.plugins?.length || 0);
@@ -1452,9 +1511,12 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                 // Lookup virtual output metadata from devices hook
                 const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === id);
                 const nodeChannelsLocal = vEntry ? (vEntry.channels || vEntry.channelCount || 2) : (typeof nodeChannels === 'number' ? nodeChannels : 2);
-                // Prefer device-specific icon + name to match RightPanel
-                const nodeIconLocal = getIconForDevice(vEntry?.iconHint, vEntry?.name) || Monitor;
-                const colorValueLocal = vEntry ? getColorForDevice(vEntry?.name, vEntry?.iconHint) : (typeof colorValue !== 'undefined' ? colorValue : 'text-pink-400');
+                // Use the same display logic as RightPanel for icon + color.
+                const display = vEntry
+                  ? getVirtualOutputDisplay(vEntry.name, nodeChannelsLocal, vEntry.iconHint)
+                  : null;
+                const nodeIconLocal = (display?.icon as any) || Monitor;
+                const colorValueLocal = (display?.iconColor as any) || (typeof colorValue !== 'undefined' ? colorValue : 'text-pink-400');
                 const sink = { device_id: parentDeviceId, channel_offset: offset, channel_count: nodeChannelsLocal };
                 const labelText = vEntry ? vEntry.name : `Out ${offset + 1}-${offset + nodeChannelsLocal}`;
                 try {
@@ -1471,6 +1533,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                       subLabel: `${nodeChannelsLocal}ch Output`,
                       icon: nodeIconLocal,
                       color: colorValueLocal,
+                      iconColor: colorValueLocal,
                       x: canvasX,
                       y: canvasY,
                       volume: 1,
@@ -1490,6 +1553,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                       subLabel: `${nodeChannelsLocal}ch Output`,
                       icon: nodeIconLocal,
                       color: colorValueLocal,
+                      iconColor: colorValueLocal,
                       x: canvasX,
                       y: canvasY,
                       volume: 1,
@@ -1624,7 +1688,13 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           stopCapture={devices?.stopCapture}
           isLibraryItemUsed={isLibraryItemUsed}
           handleLibraryMouseDown={handleLibraryMouseDown}
-          onOpenPrismApp={() => { if (devices?.refresh) devices.refresh().catch(console.error); }}
+          onOpenPrismApp={() => {
+            openPrismApp()
+              .catch(console.error)
+              .finally(() => {
+                if (devices?.refresh) devices.refresh().catch(console.error);
+              });
+          }}
         />
         <div
           className="w-1 bg-transparent hover:bg-cyan-500/50 cursor-ew-resize z-20 shrink-0 transition-colors"

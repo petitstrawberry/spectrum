@@ -25,8 +25,11 @@ mod vdsp;           // vDSP hardware acceleration
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
+
+static DID_EXIT_FLUSH: AtomicBool = AtomicBool::new(false);
 
 // Re-export prismd types
 pub use prismd::{ClientInfo, ClientRoutingUpdate, RoutingUpdate};
@@ -137,6 +140,7 @@ pub use api::start_audio;
 pub use api::stop_audio;
 pub use api::stop_output_runtime;
 pub use api::get_system_status;
+pub use api::open_prism_app;
 pub use api::set_buffer_size;
 pub use api::get_app_icon_by_pid;
 // Output runtime
@@ -333,34 +337,42 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(UiStateCache::default())
         .setup(|_app| {
-            // Initialize audio engine on app startup
-            println!("[Spectrum] Initializing audio engine...");
+            // IMPORTANT: Do not block `setup` with CoreAudio init.
+            // Blocking here delays first paint and results in a white window.
+            println!("[Spectrum] Scheduling audio engine init...");
 
-            // Start capture first so the initial output can render actual audio.
-            if let Err(e) = crate::capture::start_capture() {
-                eprintln!("[Spectrum] Warning: Failed to start capture on startup: {}", e);
-            }
+            tauri::async_runtime::spawn_blocking(|| {
+                println!("[Spectrum] Initializing audio engine...");
 
-            // Find preferred output device (aggregate or system default)
-            if let Some(device_id) = crate::device::find_preferred_output_device() {
-                match crate::audio::output::start_output_v2(device_id) {
-                    Ok(_) => {
-                        let channels = crate::device::get_device_output_channels(device_id);
-                        println!("[Spectrum] Audio engine initialized successfully");
-                        println!("[Spectrum] Using output device: {} ({} channels)", device_id, channels);
-                    }
-                    Err(e) => {
-                        eprintln!("[Spectrum] Warning: Failed to initialize audio engine: {}", e);
-                        eprintln!("[Spectrum] The app will start without audio output.");
-
-                        // Best-effort cleanup if output fails.
-                        crate::capture::stop_capture();
-                    }
+                // Start capture first so the initial output can render actual audio.
+                if let Err(e) = crate::capture::start_capture() {
+                    eprintln!("[Spectrum] Warning: Failed to start capture on startup: {}", e);
                 }
-            } else {
-                eprintln!("[Spectrum] Warning: No suitable output device found");
-                eprintln!("[Spectrum] The app will start without audio output.");
-            }
+
+                // Find preferred output device (aggregate or system default)
+                if let Some(device_id) = crate::device::find_preferred_output_device() {
+                    match crate::audio::output::start_output_v2(device_id) {
+                        Ok(_) => {
+                            let channels = crate::device::get_device_output_channels(device_id);
+                            println!("[Spectrum] Audio engine initialized successfully");
+                            println!(
+                                "[Spectrum] Using output device: {} ({} channels)",
+                                device_id, channels
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("[Spectrum] Warning: Failed to initialize audio engine: {}", e);
+                            eprintln!("[Spectrum] The app will start without audio output.");
+
+                            // Best-effort cleanup if output fails.
+                            crate::capture::stop_capture();
+                        }
+                    }
+                } else {
+                    eprintln!("[Spectrum] Warning: No suitable output device found");
+                    eprintln!("[Spectrum] The app will start without audio output.");
+                }
+            });
 
             Ok(())
         })
@@ -405,6 +417,7 @@ pub fn run() {
             stop_audio,
             stop_output_runtime,
             get_system_status,
+            open_prism_app,
             get_app_icon_by_pid,
             set_buffer_size,
             // v2 API - Output runtime
@@ -438,16 +451,30 @@ pub fn run() {
     app.run(|app_handle, event| {
         // Save state only when the app is exiting (Cmd+Q, Quit menu, etc.).
         // Do NOT save on window close.
-        if let tauri::RunEvent::ExitRequested { .. } = event {
-            let ui_state = match app_handle.state::<UiStateCache>().0.lock() {
-                Ok(guard) => guard.clone(),
-                Err(_) => None,
-            };
-
-            // Best-effort synchronous flush; runs during shutdown.
-            let _ = tauri::async_runtime::block_on(async {
-                crate::api::persist_state(ui_state).await
-            });
+        let should_flush = matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit { .. }
+        );
+        if !should_flush {
+            return;
         }
+
+        // Ensure we only flush once even if both events fire.
+        if DID_EXIT_FLUSH.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let ui_state = match app_handle.state::<UiStateCache>().0.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => None,
+        };
+
+        println!(
+            "[Spectrum] Exit flush: ui_state_cached={}",
+            if ui_state.is_some() { "yes" } else { "no" }
+        );
+
+        // Best-effort synchronous flush; runs during shutdown.
+        let _ = tauri::async_runtime::block_on(async { crate::api::persist_state(ui_state).await });
     });
 }

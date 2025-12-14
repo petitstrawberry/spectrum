@@ -107,6 +107,64 @@ thread_local! {
     static OPEN_PLUGIN_WINDOWS: RefCell<HashMap<String, Retained<NSWindow>>> = RefCell::new(HashMap::new());
 }
 
+fn activate_app_and_focus_plugin_window(window: &NSWindow, mtm: MainThreadMarker, reason: &str) {
+    unsafe {
+        let app = NSApplication::sharedApplication(mtm);
+        let _: () = msg_send![&app, activateIgnoringOtherApps: true];
+
+        // Observe app focus state to diagnose "menu opens but clicks don't register".
+        let app_is_active: bool = msg_send![&app, isActive];
+        let key_window: *mut AnyObject = msg_send![&app, keyWindow];
+
+        // Pointer identity for debugging.
+        let this_window_ptr: *const NSWindow = window as *const NSWindow;
+
+        // Make the window participate during modal event loops (e.g. NSMenu tracking).
+        // If the host enters a modal loop, non-modal windows can stop receiving clicks.
+        let _: () = msg_send![window, setWorksWhenModal: true];
+        let _: () = msg_send![window, setAcceptsMouseMovedEvents: true];
+
+        // Defensive: ensure the window participates in normal AppKit event routing.
+        // Some plugin UIs (NSMenu / NSPopUpButton) can appear but not receive clicks
+        // if the host window isn't key/main or if the window is set to ignore events.
+        let _: () = msg_send![window, setIgnoresMouseEvents: false];
+        let _: () = msg_send![window, setHidesOnDeactivate: false];
+
+        // User-requested: keep plugin windows floating.
+        // NOTE: NSFloatingWindowLevel is 3.
+        let level: isize = 3; // NSFloatingWindowLevel
+        window.setLevel(level);
+
+        // Bring to front and make key/main.
+        window.makeKeyAndOrderFront(None);
+        let _: () = msg_send![window, makeMainWindow];
+        let _: () = msg_send![window, orderFrontRegardless];
+
+        // Best-effort: make the content view first responder.
+        let content_view: *mut AnyObject = msg_send![window, contentView];
+        if !content_view.is_null() {
+            let _: bool = msg_send![window, makeFirstResponder: content_view];
+        }
+
+        // Log current focus state for diagnosis.
+        let is_key: bool = msg_send![window, isKeyWindow];
+        let is_main: bool = msg_send![window, isMainWindow];
+        let is_visible: bool = msg_send![window, isVisible];
+        let win_level: isize = msg_send![window, level];
+        println!(
+            "[AudioUnitUI] focus_window reason={} app_active={} key_window_ptr={:p} this_window_ptr={:p} key={} main={} visible={} level={}",
+            reason,
+            app_is_active,
+            key_window,
+            this_window_ptr,
+            is_key,
+            is_main,
+            is_visible,
+            win_level
+        );
+    }
+}
+
 fn take_cached_view_controller(instance_id: &str) -> Option<*mut AnyObject> {
     CACHED_VIEW_CONTROLLERS
         .write()
@@ -511,7 +569,7 @@ pub fn open_audio_unit_ui(
     if let Some(window_number) = existing_window_number {
         // Try to bring existing window to front
         if let Some(window) = get_window_by_number(window_number, mtm) {
-            window.makeKeyAndOrderFront(None);
+            activate_app_and_focus_plugin_window(&window, mtm, "reuse");
             return Ok(());
         } else {
             // Window was closed externally, remove from tracking
@@ -613,6 +671,12 @@ pub fn open_audio_unit_ui(
     };
 
     unsafe {
+        // Ensure our app is active so plugin UI menus and controls receive clicks reliably.
+        // Some AU views (and their NSPopUpButton/NSMenu) can behave oddly if the host app
+        // isn't the active application at the time the window is shown.
+        let app = NSApplication::sharedApplication(mtm);
+        let _: () = msg_send![&app, activateIgnoringOtherApps: true];
+
         // NOTE:
         // We keep an explicit strong reference to this window in OPEN_PLUGIN_WINDOWS.
         // If we also set releasedWhenClosed = true, calling `close()` can release the
@@ -636,9 +700,16 @@ pub fn open_audio_unit_ui(
         // ウィンドウを中央に表示
         window.center();
 
-        // ウィンドウレベル（常に最前面）
+        // User-requested: keep plugin windows floating (always-on-top).
         let level: isize = 3; // NSFloatingWindowLevel
         window.setLevel(level);
+
+        // Defensive: ensure we don't ignore mouse events, and that the window doesn't hide
+        // when the app briefly deactivates during menu tracking.
+        let _: () = msg_send![&*window, setIgnoresMouseEvents: false];
+        let _: () = msg_send![&*window, setHidesOnDeactivate: false];
+        let _: () = msg_send![&*window, setWorksWhenModal: true];
+        let _: () = msg_send![&*window, setAcceptsMouseMovedEvents: true];
 
         // Always disable user resizing; window follows plugin view size.
         set_window_resizable(&window, false);
@@ -723,12 +794,15 @@ pub fn open_audio_unit_ui(
             // Best-effort initial layout after constraints.
             let _: () = msg_send![container_view, layoutSubtreeIfNeeded];
 
+            // Ensure responder chain starts at the plugin view.
+            let _: bool = msg_send![&*window, makeFirstResponder: au_view];
+
             // Lock window to plugin preferred size and keep following it.
             sync_fixed_window_to_view(&window, instance_id, au_view);
             install_view_size_observer(instance_id, window.windowNumber(), au_view);
 
             // Now show the window after setup.
-            window.makeKeyAndOrderFront(None);
+            activate_app_and_focus_plugin_window(&window, mtm, "open_with_view");
         } else {
             // カスタムUIがない場合はプレースホルダー
             let label_text = format!("No custom UI available for {}", plugin_name);
@@ -739,7 +813,7 @@ pub fn open_audio_unit_ui(
             set_window_fixed_content_size(&window, window_width, window_height);
 
             // Show window (placeholder)
-            window.makeKeyAndOrderFront(None);
+            activate_app_and_focus_plugin_window(&window, mtm, "open_placeholder");
         }
     }
 

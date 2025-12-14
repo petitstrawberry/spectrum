@@ -893,6 +893,27 @@ export default function MixerPanel({
     return n?.iconColor || n?.color || 'text-slate-500';
   };
 
+  const getStripBorder = (strip: any): { className: string; style?: React.CSSProperties } => {
+    const n = strip?.sourceNode;
+    const c = (n?.color || n?.iconColor || '') as any;
+
+    // Prism channel colors are often rgb(...) strings from useChannelColors.
+    if (typeof c === 'string' && (c.startsWith('rgb') || c.startsWith('#') || c.startsWith('hsl'))) {
+      return {
+        className: 'border',
+        style: { borderColor: c },
+      };
+    }
+
+    // Map a few known tailwind text colors used in this codebase.
+    if (c === 'text-cyan-400' || c === 'text-cyan-300') return { className: 'border border-cyan-500/30' };
+    if (c === 'text-amber-200' || c === 'text-amber-400') return { className: 'border border-amber-500/30' };
+    if (c === 'text-purple-400' || c === 'text-purple-300') return { className: 'border border-purple-500/30' };
+    if (c === 'text-pink-400' || c === 'text-pink-300') return { className: 'border border-pink-500/30' };
+
+    return { className: 'border border-slate-700' };
+  };
+
   const renderIcon = (Icon: any, iconColor: string) => {
     const isCssColor = typeof iconColor === 'string' && (
       iconColor.startsWith('rgb') ||
@@ -1098,7 +1119,11 @@ export default function MixerPanel({
               const isEditingDb = editingStripId === strip.id;
 
               return (
-                <div key={strip.id} className="w-32 bg-slate-900 border border-slate-700 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none min-h-0">
+                <div
+                  key={strip.id}
+                  className={`w-32 bg-slate-900 rounded-lg flex flex-col items-center py-2 relative group shrink-0 select-none min-h-0 ${getStripBorder(strip).className}`}
+                  style={getStripBorder(strip).style}
+                >
                   <div className="h-8 w-full flex flex-col items-center justify-center mb-1">
                     <div className="w-6 h-6 rounded-lg bg-slate-950 border border-slate-600 flex items-center justify-center shadow-lg">
                       {renderIcon(Icon, iconColor)}
