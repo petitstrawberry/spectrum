@@ -173,11 +173,15 @@ function nodeInfoToUINode(info: NodeInfoDto, position: { x: number; y: number })
       const color = isMain ? 'text-cyan-400' : getColorForSourceType(sourceType);
 
       // Build sensible subLabel: MAIN for main, otherwise Prism Ch <n> or Device <id>
+      const dtoSubLabelRaw = (info as any).sub_label ?? (info as any).subLabel;
+
       let subLabel: string;
-      if (isMain) {
+      if (typeof dtoSubLabelRaw === 'string' && dtoSubLabelRaw.trim() !== '') {
+        subLabel = dtoSubLabelRaw;
+      } else if (isMain) {
         subLabel = 'MAIN';
       } else if (sourceType === 'prism') {
-        subLabel = typeof channel === 'number' ? `Empty` : (info.label || 'Prism');
+        subLabel = typeof channel === 'number' ? 'Empty' : (info.label || 'Prism');
       } else {
         subLabel = deviceId !== undefined ? `Device ${deviceId}` : (info.label || 'Device');
       }

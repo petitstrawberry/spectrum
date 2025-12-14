@@ -479,8 +479,8 @@ export default function CanvasView({
                     </>
                   ) : node.type === 'source' ? (
                     <>
-                      <span className="text-xs font-bold text-slate-200 truncate block">{dynamicSubLabel}</span>
-                      <span className="text-[9px] text-slate-500 truncate block">{dynamicLabel}</span>
+                      <span className="text-xs font-bold text-slate-200 truncate block">{dynamicLabel}</span>
+                      <span className="text-[9px] text-slate-500 truncate block">{dynamicSubLabel}</span>
                     </>
                   ) : node.type === 'bus' ? (
                     <>

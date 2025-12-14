@@ -834,47 +834,53 @@ export default function MixerPanel({
     setEditingStripId(null);
   };
 
+  // Match CanvasView header semantics:
+  // - Device source: title = device name, subtitle = "{N}ch Input"
+  // - Prism source:  title = subLabel (app / MAIN / Empty), subtitle = label ("Ch X-Y")
   const getStripChannelLabel = (strip: any) => {
     const n = strip?.sourceNode;
-    const from = Array.isArray(strip?.fromChannels) ? strip.fromChannels : [];
-    const to = Array.isArray(strip?.toChannels) ? strip.toChannels : [];
+    if (!n) return '—';
 
-    // UI display follows mixer channel mode: ST prefers pairs, MONO prefers a single lane (with L/R bias).
+    const fromRaw = Array.isArray(strip?.fromChannels) ? strip.fromChannels : [];
+    const fromChannels = fromRaw
+      .map((v: any) => Number(v))
+      .filter((v: any) => Number.isFinite(v));
+    if (fromChannels.length === 0) return '—';
+
+    // Prism sources: show absolute channel numbers using channelOffset.
+    const isPrismSource = n.sourceType !== 'device' && typeof n.channelOffset === 'number' && Number.isFinite(n.channelOffset);
+    const offset = isPrismSource ? Number(n.channelOffset) : 0;
+
     if (mixerChannelMode === 'stereo') {
-      if (from.length >= 2) return `${Number(from[0]) + 1}-${Number(from[1]) + 1}`;
-      if (from.length === 1) {
-        const base = Math.floor(Number(from[0]) / 2) * 2;
-        return `${base + 1}-${base + 2}`;
-      }
+      const a = offset + fromChannels[0] + 1;
+      const b = offset + (fromChannels[1] ?? (fromChannels[0] + 1)) + 1;
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      return lo === hi ? `${lo}` : `${lo}-${hi}`;
     }
 
-    // MONO: show destination-biased L/R when possible.
-    if (to.length === 1) {
-      const t = Number(to[0]);
-      if (Number.isFinite(t)) {
-        const lr = (t % 2 === 0) ? 'L' : 'R';
-        return `${t + 1}${lr}`;
-      }
-    }
-
-    if (from.length === 1) {
-      const ch = Number(from[0]);
-      const lr = (ch % 2 === 0) ? 'L' : 'R';
-      return `${ch + 1}${lr}`;
-    }
-
-    // Prefer Prism channel offset when present.
-    const off = Number(n?.channelOffset);
-    if (!Number.isNaN(off) && (n?.sourceType === 'prism-channel' || n?.sourceType === 'prism')) {
-      const abs = off <= 31 ? off * 2 : off;
-      return `${abs + 1}-${abs + 2}`;
-    }
-    return '—';
+    const ch = offset + fromChannels[0] + 1;
+    const side = (ch % 2 === 1) ? 'L' : 'R';
+    return `${ch}${side}`;
   };
 
   const getStripTitle = (strip: any) => {
     const n = strip?.sourceNode;
-    return n?.subLabel || n?.label || 'INPUT';
+    if (!n) return 'INPUT';
+
+    if (typeof n.displayTitle === 'string' && n.displayTitle.trim() !== '') return n.displayTitle;
+
+    const isDeviceNode = n.sourceType === 'device' || (typeof n.libraryId === 'string' && n.libraryId.startsWith('dev_'));
+    if (isDeviceNode) {
+      if (typeof n.deviceName === 'string' && n.deviceName.trim() !== '') return n.deviceName;
+      if (typeof n.label === 'string' && n.label.trim() !== '') return n.label;
+      return 'Device';
+    }
+
+    if (typeof n.subLabel === 'string' && n.subLabel.trim() !== '') return n.subLabel;
+    if (typeof n.label === 'string' && n.label.trim() !== '') return n.label;
+    if (typeof n.name === 'string' && n.name.trim() !== '') return n.name;
+    return 'INPUT';
   };
 
   const getStripIcon = (strip: any) => {
@@ -922,7 +928,74 @@ export default function MixerPanel({
         <div className="h-8 bg-slate-900/50 border-b border-slate-800 flex items-center px-4 justify-between shrink-0">
           <div className="flex items-center gap-3">
             <Maximize2 className="w-3 h-3 text-slate-500" />
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Select Output or Bus on Canvas to Mix</span>
+            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+              {hasMixerTarget ? (
+                selectedNode?.type === 'bus' ? (
+                  <>
+                    Mixing for
+                    <span className={`text-white ml-1 ${((selectedNode as any)?.color || '')}`.trim()}>
+                      {selectedBus?.label || selectedNode?.label || 'Bus'}
+                    </span>
+                    <span
+                      className={
+                        `ml-2 px-1.5 py-0.5 rounded text-[8px] ` +
+                        (mixerChannelMode === 'stereo'
+                          ? 'bg-cyan-500/20 text-cyan-400'
+                          : 'bg-slate-600/50 text-slate-400')
+                      }
+                    >
+                      {mixerChannelMode === 'stereo' ? 'STEREO' : 'MONO'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    Mixing for
+                    <span
+                      className={
+                        `text-white ml-1 ` +
+                        ((selectedNode as any)?.available === false || (selectedNode as any)?.disabled === true
+                          ? 'text-slate-500'
+                          : ((selectedNode as any)?.color || 'text-white'))
+                      }
+                    >
+                      {selectedNode?.label || 'Output'}
+                    </span>
+
+                    {(((selectedNode as any)?.available === false) || ((selectedNode as any)?.disabled === true)) && (
+                      <span className="ml-2 px-1.5 py-0.5 rounded text-[8px] bg-red-500/20 text-red-400">
+                        DISCONNECTED
+                      </span>
+                    )}
+
+                    {!(((selectedNode as any)?.available === false) || ((selectedNode as any)?.disabled === true)) && mixerTargetPortCount > 1 && (
+                      <span className="text-slate-400 ml-1">
+                        {mixerChannelMode === 'stereo'
+                          ? (() => {
+                              const base = Math.floor(Number(mixerSelectedChannel) / 2) * 2;
+                              return `Ch ${base + 1}-${base + 2}`;
+                            })()
+                          : `Ch ${Number(mixerSelectedChannel) + 1}`}
+                      </span>
+                    )}
+
+                    {!(((selectedNode as any)?.available === false) || ((selectedNode as any)?.disabled === true)) && (
+                      <span
+                        className={
+                          `ml-2 px-1.5 py-0.5 rounded text-[8px] ` +
+                          (mixerChannelMode === 'stereo'
+                            ? 'bg-cyan-500/20 text-cyan-400'
+                            : 'bg-slate-600/50 text-slate-400')
+                        }
+                      >
+                        {mixerChannelMode === 'stereo' ? 'STEREO' : 'MONO'}
+                      </span>
+                    )}
+                  </>
+                )
+              ) : (
+                'Select Output or Bus on Canvas to Mix'
+              )}
+            </span>
           </div>
         </div>
         <div className="flex-1 flex min-h-0 overflow-x-auto overflow-y-hidden p-4 gap-2 items-stretch">

@@ -91,7 +91,7 @@ export interface PluginInstanceDto {
 }
 
 export type NodeInfoDto =
-  | { type: 'source'; handle: number; source_id: SourceIdDto; port_count: number; label: string }
+  | { type: 'source'; handle: number; source_id: SourceIdDto; port_count: number; label: string; sub_label?: string }
   | { type: 'bus'; handle: number; bus_id: string; label: string; port_count: number; plugins: PluginInstanceDto[] }
   | { type: 'sink'; handle: number; sink: OutputSinkDto; port_count: number; label: string };
 

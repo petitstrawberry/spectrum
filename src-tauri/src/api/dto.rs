@@ -59,6 +59,8 @@ pub enum NodeInfoDto {
         source_id: SourceIdDto,
         port_count: u8,
         label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sub_label: Option<String>,
     },
     #[serde(rename = "bus")]
     Bus {

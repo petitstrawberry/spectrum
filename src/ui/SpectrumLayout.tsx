@@ -60,6 +60,7 @@ interface NodeData {
   type: NodeType;
   label: string;
   subLabel?: string;
+  displayTitle?: string;
   icon: React.ComponentType<{ className?: string }>;
   iconColor?: string;
   color: string;
@@ -177,7 +178,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(300);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(300);
-  const [mixerHeight, setMixerHeight] = useState(260);
+  const [mixerHeight, setMixerHeight] = useState(350);
   const [masterWidth, setMasterWidth] = useState(300);
 
   // v1 parity: Canvas pan/zoom
@@ -585,6 +586,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         // Base fields (defaults from useGraph)
         let label = n.label || `Node ${handle}`;
         let subLabel = n.subLabel || undefined;
+        let displayTitle: string | undefined;
         let icon = n.icon || Music;
         let color = n.color || 'text-cyan-400';
         let iconColor = n.iconColor || color;
@@ -592,7 +594,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         // Normalize fields across UINode variants from useGraph
         // - sink nodes use `sinkDeviceId` + `channelOffset`
         // - some DTO-ish shapes may use snake_case
-        const channelOffset = (type === 'target')
+        let channelOffset = (type === 'target')
           ? (n.channelOffset ?? n.channel_offset ?? n.sink?.channel_offset ?? undefined)
           : (n.channelOffset ?? n.channel ?? undefined);
 
@@ -626,8 +628,16 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
             // 共通関数を使用してPrismチャンネルの表示情報を取得
             const chColor = channelColors?.[ch.channelOffset ?? 0];
             const display = getPrismChannelDisplay(ch, chColor);
-            label = display.label;
-            subLabel = display.subLabel;
+
+            // Prefer absolute channel offset from Prism status when available.
+            if (typeof ch.channelOffset === 'number') {
+              channelOffset = ch.channelOffset;
+            }
+
+            // Label/subLabel come from backend (label=app/MAIN/Empty, sub_label="Ch X-Y").
+            label = n.label || label;
+            subLabel = (n.subLabel ?? n.sub_label ?? subLabel) as any;
+            displayTitle = label;
             icon = display.icon;
             iconColor = display.iconColor;
           }
@@ -640,6 +650,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           });
           label = display.label;
           subLabel = display.subLabel;
+          displayTitle = display.label;
           icon = display.icon;
           iconColor = display.iconColor;
         } else if (type === 'target') {
@@ -647,6 +658,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           const display = getSinkDeviceDisplay(n.label || 'Output', n.portCount || 2);
           label = display.label;
           subLabel = display.subLabel;
+          displayTitle = display.label;
           icon = display.icon;
           iconColor = display.iconColor;
         } else if (type === 'bus') {
@@ -654,10 +666,14 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           const display = getBusDisplay(n.busId || 'bus_1', n.portCount || 2, n.plugins?.length || 0);
           label = n.label || display.label;
           subLabel = display.subLabel;
+          displayTitle = (n.label || display.label);
           icon = display.icon;
           iconColor = display.iconColor;
           color = display.iconColor;
         }
+
+        // Fallback if not set by a display helper.
+        if (!displayTitle) displayTitle = (subLabel && String(subLabel).trim() !== '') ? String(subLabel) : label;
 
         return {
           id,
@@ -665,6 +681,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
           type,
           label,
           subLabel,
+          displayTitle,
           icon,
           iconColor,
           color,

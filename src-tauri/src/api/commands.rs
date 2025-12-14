@@ -275,6 +275,10 @@ pub async fn get_graph() -> Result<GraphDto, String> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
+        // Prism app lookup: channel_offset (stereo pair index) -> first app name.
+        // Best-effort and local to this snapshot.
+        let mut prism_app_by_offset: Option<std::collections::HashMap<u32, String>> = None;
+
         // Optional on-demand lookup for filling missing plugin metadata (old saved state).
         // Built lazily only if we detect missing fields to avoid extra work.
         let mut plugin_lookup: Option<HashMap<String, (String, String)>> = None;
@@ -286,11 +290,48 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                     crate::audio::NodeType::Source => {
                         // Downcast to SourceNode to get source_id
                         if let Some(source_node) = node.as_any().downcast_ref::<SourceNode>() {
+                            // Normalize Prism source label semantics:
+                            // - label: app name (or MAIN/Empty)
+                            // - sub_label: channel label ("Ch 1-2")
+                            let (label, sub_label) = match source_node.source_id() {
+                                crate::audio::source::SourceId::PrismChannel { channel } => {
+                                    if prism_app_by_offset.is_none() {
+                                        let mut map: std::collections::HashMap<u32, String> =
+                                            std::collections::HashMap::new();
+                                        let list = crate::prismd::get_processes();
+                                        for p in list {
+                                            map.entry(p.channel_offset)
+                                                .or_insert_with(|| p.name);
+                                        }
+                                        prism_app_by_offset = Some(map);
+                                    }
+
+                                    let app = prism_app_by_offset
+                                        .as_ref()
+                                        .and_then(|m| m.get(&(*channel as u32)).cloned());
+
+                                    // Channel is stereo-pair index; convert to 1-based absolute channels.
+                                    let base = (*channel as u16) * 2;
+                                    let ch_l = base + 1;
+                                    let ch_r = base + 2;
+                                    let ch_label = format!("Ch {}-{}", ch_l, ch_r);
+
+                                    // Channel 0 is treated as MAIN.
+                                    if *channel == 0 {
+                                        ("MAIN".to_string(), Some(ch_label))
+                                    } else {
+                                        (app.unwrap_or_else(|| "Empty".to_string()), Some(ch_label))
+                                    }
+                                }
+                                _ => (node.label().to_string(), None),
+                            };
+
                             NodeInfoDto::Source {
                                 handle: handle.raw(),
                                 source_id: SourceIdDto::from(source_node.source_id().clone()),
                                 port_count: node.output_port_count() as u8,
-                                label: node.label().to_string(),
+                                label,
+                                sub_label,
                             }
                         } else {
                             // Fallback if downcast fails
@@ -299,6 +340,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                 source_id: SourceIdDto::PrismChannel { channel: 0 },
                                 port_count: node.output_port_count() as u8,
                                 label: node.label().to_string(),
+                                sub_label: None,
                             }
                         }
                     }
@@ -906,7 +948,13 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
 
     for node_info in &state.nodes {
         let (old_handle, new_handle) = match node_info {
-            NodeInfoDto::Source { handle, source_id, port_count, label } => {
+            NodeInfoDto::Source {
+                handle,
+                source_id,
+                port_count,
+                label,
+                sub_label: _,
+            } => {
                 let node: Box<dyn AudioNode> = match source_id {
                     SourceIdDto::PrismChannel { channel } => {
                         Box::new(SourceNode::new_prism(*channel, label.clone()))
