@@ -137,7 +137,10 @@ fn activate_app_and_focus_plugin_window(window: &NSWindow, mtm: MainThreadMarker
 
         // Bring to front and make key/main.
         window.makeKeyAndOrderFront(None);
-        let _: () = msg_send![window, makeMainWindow];
+        let can_become_main: bool = msg_send![window, canBecomeMainWindow];
+        if can_become_main {
+            let _: () = msg_send![window, makeMainWindow];
+        }
         let _: () = msg_send![window, orderFrontRegardless];
 
         // Best-effort: make the content view first responder.
@@ -661,13 +664,17 @@ pub fn open_audio_unit_ui(
         | NSWindowStyleMask::Miniaturizable;
 
     let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            content_rect,
-            style,
-            NSBackingStoreType(2), // NSBackingStoreBuffered
-            false,
-        )
+        // Use NSPanel instead of NSWindow. NSPanel is better suited for floating/utility windows
+        // and handles menu interactions/activation better when the app is active.
+        let panel_class = class!(NSPanel);
+        let panel_alloc: *mut AnyObject = msg_send![panel_class, alloc];
+        let window_ptr: *mut AnyObject = msg_send![panel_alloc,
+            initWithContentRect: content_rect
+            styleMask: style
+            backing: NSBackingStoreType(2) // NSBackingStoreBuffered
+            defer: false
+        ];
+        Retained::from_raw(window_ptr as *mut NSWindow).expect("Failed to create NSPanel")
     };
 
     unsafe {
