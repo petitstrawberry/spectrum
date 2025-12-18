@@ -20,15 +20,7 @@
             # Tauri dependencies
             pkg-config
             libiconv
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
-            WebKit
-            CoreServices
-            CoreFoundation
-            CoreAudio
-            AudioToolbox
-            Security
-            AppKit
-          ]);
+          ];
 
           shellHook = ''
             export PATH="$HOME/.cargo/bin:$PATH"
@@ -49,6 +41,14 @@
             echo "   pnpm: $(pnpm --version)"
             if command -v cargo >/dev/null 2>&1; then
               echo "   Cargo: $(cargo --version)"
+            fi
+
+            # Prefer the system Xcode when available to avoid a Nix-provided
+            # macOS SDK mismatch with the locally installed Swift compiler.
+            if [ -d /Applications/Xcode.app/Contents/Developer ]; then
+              export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+              unset SDKROOT
+              echo "   Using system Xcode: $DEVELOPER_DIR"
             fi
           '';
         };
