@@ -216,8 +216,94 @@ pub async fn open_plugin_ui(instance_id: String) -> Result<(), String> {
 - `src-tauri/src/api/commands.rs` - v2 API commands module
 - `src-tauri/src/audio_unit.rs` - Audio Unit instance management
 
+## Phase 5: Isolation Testing on debug/find-plugin-ui-issue
+
+Starting point: v1-last base + dev's audio_unit_ui.rs (working state)
+
+### Trial 1: async + NSOperationQueue dispatch pattern
+**Hypothesis**: The async command with NSOperationQueue dispatch is causing the issue.
+
+**What we did**: Changed `open_audio_unit_ui` command from sync to async with NSOperationQueue.mainQueue dispatch, matching dev's pattern:
+```rust
+#[tauri::command]
+async fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    unsafe {
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+        let block = RcBlock::new(move || {
+            let result = audio_unit_ui::open_plugin_ui_by_instance_id(&instance_id_clone);
+            let _ = tx.send(result);
+        });
+        let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+    }
+    rx.recv_timeout(Duration::from_secs(5))...
+}
+```
+
+**Result**: ✅ Still works! async + NSOperationQueue is NOT the cause.
+
+---
+
+### Trial 2: `.build()` + `.run(closure)` pattern
+**Hypothesis**: The `.build()` + `.run(closure)` app startup pattern is causing the issue.
+
+**What we did**: Changed from `.run(context)` to `.build(context)` + `app.run(closure)`:
+```rust
+let app = tauri::Builder::default()
+    ...
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application");
+
+app.run(|_app_handle, event| {
+    if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit { .. }) {
+        println!("[Spectrum] App exiting...");
+    }
+});
+```
+
+**Result**: ✅ Still works! `.build()` + `.run(closure)` is NOT the cause.
+
+---
+
+### Trial 3: spawn_blocking for audio initialization
+**Hypothesis**: The `spawn_blocking` in setup is causing the issue.
+
+**What we did**: Wrapped audio initialization in `tauri::async_runtime::spawn_blocking` like dev:
+```rust
+.setup(|_app| {
+    println!("[Spectrum] Scheduling audio engine init...");
+
+    tauri::async_runtime::spawn_blocking(|| {
+        println!("[Spectrum] Initializing audio engine (spawn_blocking)...");
+        // ... audio capture setup
+    });
+
+    Ok(())
+})
+```
+
+**Result**: ✅ Still works! spawn_blocking is NOT the cause.
+
+---
+
+### Trial 4: (Next)
+**Hypothesis**: TBD
+
+**What we did**: TBD
+
+**Result**: TBD
+
+---
+
+## Remaining Differences to Test
+
+1. ~~spawn_blocking for audio initialization~~ ✅ Not the cause
+2. **Module structure** - v1 uses audio_graph, mixer, router, audio_output, config; v2 uses api, capture, device
+3. **Frontend code** - Different React components and API calls
+4. **UiStateCache managed state** - dev has `.manage(UiStateCache::default())`
+
 ## Branch Reference
 
 - `compare/v1-last` - Working reference (v1 implementation)
 - `dev` - Current development branch (broken plugin menus)
-- `debug/find-plugin-ui-issue` - Test branch proving audio_unit_ui.rs is not the cause
+- `debug/find-plugin-ui-issue` - Test branch for isolation testing

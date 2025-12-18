@@ -768,16 +768,38 @@ fn list_audio_unit_instances() -> Vec<AudioUnitInstanceInfo> {
 
 /// Open AudioUnit plugin UI window
 #[tauri::command]
-fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
-    let manager = audio_unit::get_au_manager();
-    let instance = manager.get_instance(&instance_id)
+async fn open_audio_unit_ui(instance_id: String) -> Result<(), String> {
+    // Verify the instance exists first
+    let _au_instance = audio_unit::get_au_manager()
+        .get_instance(&instance_id)
         .ok_or_else(|| format!("AudioUnit instance not found: {}", instance_id))?;
 
-    let au_audio_unit = instance.get_au_audio_unit()
-        .ok_or_else(|| format!("AUAudioUnit not available for instance: {}", instance_id))?;
-    let name = instance.info.name.clone();
+    // UI operations must run on main thread
+    // Use dev-style async + NSOperationQueue dispatch pattern
+    let instance_id_clone = instance_id.clone();
 
-    audio_unit_ui::open_audio_unit_ui(&instance_id, au_audio_unit, &name)
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    // Dispatch to main thread
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::msg_send;
+        use objc2::class;
+        use block2::RcBlock;
+
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+
+        let block = RcBlock::new(move || {
+            let result = audio_unit_ui::open_plugin_ui_by_instance_id(&instance_id_clone);
+            let _ = tx.send(result);
+        });
+
+        let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+    }
+
+    // Wait for result with timeout
+    rx.recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "Timeout waiting for UI to open".to_string())?
 }
 
 /// Close AudioUnit plugin UI window
@@ -1224,32 +1246,35 @@ fn open_prism_app() -> Result<bool, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|_app| {
-            // Load saved I/O buffer size from config
-            let saved_buffer_size = config::get_saved_io_buffer_size();
-            audio_capture::set_io_buffer_size(saved_buffer_size);
-            println!("[Spectrum] Loaded I/O buffer size from config: {} samples", saved_buffer_size);
+            // Use spawn_blocking like dev branch - don't block setup
+            println!("[Spectrum] Scheduling audio engine init...");
 
-            // Try to start audio capture on app launch
-            match audio_capture::start_capture() {
-                Ok(true) => {
-                    println!("[Spectrum] Audio capture started from Prism device");
+            tauri::async_runtime::spawn_blocking(|| {
+                println!("[Spectrum] Initializing audio engine (spawn_blocking)...");
 
-                    // NOTE: We don't start default output here anymore.
-                    // Output devices are started when routing is configured via frontend.
-                    // Starting Prism as output when it's used as input causes issues
-                    // because there's no routing to it, leading to empty ring buffers.
-                    println!("[Spectrum] Output devices will be started when routing is configured");
+                // Load saved I/O buffer size from config
+                let saved_buffer_size = config::get_saved_io_buffer_size();
+                audio_capture::set_io_buffer_size(saved_buffer_size);
+                println!("[Spectrum] Loaded I/O buffer size from config: {} samples", saved_buffer_size);
+
+                // Try to start audio capture on app launch
+                match audio_capture::start_capture() {
+                    Ok(true) => {
+                        println!("[Spectrum] Audio capture started from Prism device");
+                        println!("[Spectrum] Output devices will be started when routing is configured");
+                    }
+                    Ok(false) => {
+                        println!("[Spectrum] No Prism device found, using simulated levels");
+                    }
+                    Err(e) => {
+                        eprintln!("[Spectrum] Failed to start audio capture: {}", e);
+                    }
                 }
-                Ok(false) => {
-                    println!("[Spectrum] No Prism device found, using simulated levels");
-                }
-                Err(e) => {
-                    eprintln!("[Spectrum] Failed to start audio capture: {}", e);
-                }
-            }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1319,6 +1344,14 @@ pub fn run() {
             restart_app,
             open_prism_app,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // Use dev-style .build() + .run(closure) pattern
+    app.run(|_app_handle, event| {
+        // Custom event handler like dev branch
+        if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit { .. }) {
+            println!("[Spectrum] App exiting...");
+        }
+    });
 }
