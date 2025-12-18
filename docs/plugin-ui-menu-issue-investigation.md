@@ -315,12 +315,12 @@ This proves the issue is in something else unique to dev, NOT the command patter
 
 ---
 
-### Trial 5: (Next)
-**Hypothesis**: TBD
+### Trial 5: Disable audio runtime on dev
+**Hypothesis**: The audio runtime (capture + output) is causing the issue.
 
-**What we did**: TBD
+**What we did**: Commented out the entire `spawn_blocking` block in setup that starts capture and output.
 
-**Result**: TBD
+**Result**: ❌ Still doesn't work! Audio runtime is NOT the cause.
 
 ---
 
