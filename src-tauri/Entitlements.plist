@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- JITコンパイルを許可 (オーディオ処理に必須) -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- 未署名のメモリ実行を許可 (多くのプラグインで必要) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- ライブラリバリデーションを無効化 (サードパーティ製プラグインをロードするために必須) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- マイク入力 (Info.plistだけでなくEntitlementsにも必要) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

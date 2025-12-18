@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-swift-runtime = "0.1.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 coreaudio-rs = "0.12"

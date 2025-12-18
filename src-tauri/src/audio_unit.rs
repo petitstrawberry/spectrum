@@ -497,7 +497,7 @@ fn get_default_run_loop_mode() -> *const c_void {
 }
 
 // Resolve dispatch symbols at runtime via dlsym to avoid linker issues
-fn resolve_dispatch_symbols() -> Option<(
+pub(crate) fn resolve_dispatch_symbols() -> Option<(
     unsafe extern "C" fn() -> *mut c_void,
     unsafe extern "C" fn(*mut c_void, *mut c_void),
 )> {
@@ -1154,13 +1154,13 @@ impl AudioUnitInstance {
             }
 
             let render_block_ptr = render_block as *const RenderBlock;
-            
+
             // Save original output pointers - AU might replace them with its own buffers
             let orig_left_ptr = left.as_mut_ptr();
             let orig_right_ptr = right.as_mut_ptr();
-            
+
             let output_buffer_list_ptr = state.output_buffer_list.as_audio_buffer_list();
-            
+
             let status = ((*render_block_ptr).invoke)(
                 render_block_ptr,
                 &mut action_flags,
@@ -1176,22 +1176,22 @@ impl AudioUnitInstance {
             if status != 0 {
                 return Err(format!("render failed: {}", status));
             }
-            
+
             // DEBUG: Check output buffer state after render
             static DEBUG_OUTPUT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let out_count = DEBUG_OUTPUT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            
+
             // Check if AudioUnit replaced output buffer pointers
             // Some plugins write to their own internal buffers instead of ours
             let output_list = &*output_buffer_list_ptr;
             let frames_usize = frames as usize;
-            
+
             // Get buffer info (debug logging disabled)
             let buf0 = &output_list.mBuffers[0];
             let buf1_ptr = (output_list.mBuffers.as_ptr()).add(1);
             let buf1 = &*buf1_ptr;
             let _ = out_count; // suppress warning
-            
+
             // Left channel
             if output_list.mNumberBuffers >= 1 {
                 let buf0 = &output_list.mBuffers[0];
@@ -1204,7 +1204,7 @@ impl AudioUnitInstance {
                     );
                 }
             }
-            
+
             // Right channel (index 1 in our StereoAudioBufferList)
             if output_list.mNumberBuffers >= 2 {
                 // Need to access second buffer - but AudioBufferList only has [1] array

@@ -3595,6 +3595,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tauri-swift-runtime",
  "tokio",
  "uuid",
 ]
@@ -3968,6 +3969,20 @@ dependencies = [
  "webview2-com",
  "windows",
  "wry",
+]
+
+[[package]]
+name = "tauri-swift-runtime"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46419cd30c865768184b315ff91074a187637b18abe8ac9fdd2f0006a2afa87c"
+dependencies = [
+ "memoffset",
+ "serde",
+ "serde_json",
+ "swift-rs",
+ "tauri",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
