@@ -3,7 +3,6 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { getOutputDevices, startAudio } from './api';
 
 // --- Types ---
 
@@ -289,44 +288,29 @@ export async function isPrismAvailable(): Promise<boolean> {
 /**
  * Start audio output to a specific device
  */
-export async function startAudioOutput(_deviceId: number): Promise<void> {
-  // v2 API: start global audio (device selection handled elsewhere)
-  return startAudio(0);
+export async function startAudioOutput(deviceId: number): Promise<void> {
+  return invoke('start_audio_output', { deviceId });
 }
 
 /**
  * Stop audio output to a specific device
  */
-export async function stopAudioOutput(_deviceId: number): Promise<void> {
-  // v2 API: stop global audio
-  return invoke('stop_audio');
+export async function stopAudioOutput(deviceId: number): Promise<void> {
+  return invoke('stop_audio_output', { deviceId });
 }
 
 /**
  * Find output device by name
  */
 export async function findOutputDevice(name: string): Promise<number | null> {
-  // v2: query output devices and match by name (contains or exact)
-  try {
-    const devices = await getOutputDevices();
-    // Try exact match first, then substring match
-    const exact = devices.find(d => d.name === name || d.id === name);
-    if (exact) return exact.device_id;
-    const fuzzy = devices.find(d => d.name.toLowerCase().includes(name.toLowerCase()));
-    if (fuzzy) return fuzzy.device_id;
-    return null;
-  } catch (e) {
-    console.warn('findOutputDevice: failed to enumerate devices', e);
-    return null;
-  }
+  return invoke<number | null>('find_output_device', { name });
 }
 
 /**
  * Start output to default audio device
  */
 export async function startDefaultOutput(): Promise<void> {
-  // v2: start system audio (capture + any output already configured)
-  return startAudio(0);
+  return invoke('start_default_output');
 }
 
 // --- Generic Input Device Capture Types ---

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 // CoreAudio bindings
@@ -1325,11 +1325,8 @@ impl AudioUnitManager {
 
         let mut instance = AudioUnitInstance::new(info, instance_id.clone())?;
 
-        // Pre-configure the instance for audio processing
-        // This ensures it's ready for the audio thread without needing locks
-        if let Err(e) = instance.configure(48000.0, 1024, 2) {
-            println!("[AudioUnit] Warning: Failed to pre-configure {}: {}", instance_id, e);
-        }
+        // Pre-configure the instance for audio processing. This is a critical step.
+        instance.configure(48000.0, 1024, 2)?;
 
         self.instances.write().insert(
             instance_id.clone(),
@@ -1508,6 +1505,50 @@ impl AudioUnitManager {
         // Return cloned map
         let map = result.lock().unwrap().clone();
         map
+    }
+
+    /// Set fullState data for a specific instance.
+    ///
+    /// The underlying Objective-C APIs must run on the main thread.
+    pub fn set_instance_full_state(&self, instance_id: &str, data: &[u8]) -> bool {
+        use std::sync::{Arc, Mutex};
+
+        if data.is_empty() {
+            return false;
+        }
+
+        // Grab an Arc clone up-front so we don't touch the manager inside the main-thread block.
+        let Some(instance) = self.get_instance(instance_id) else {
+            return false;
+        };
+
+        let result: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let result_for_block = Arc::clone(&result);
+        let result_for_fallback = Arc::clone(&result);
+        let bytes: Arc<Vec<u8>> = Arc::new(data.to_vec());
+        let bytes_for_block = Arc::clone(&bytes);
+
+        // Run Objective-C calls on main thread.
+        let inst_ptr = Arc::as_ptr(&instance) as *mut AudioUnitInstance;
+        let block = RcBlock::new(move || {
+            // SAFETY: this runs on main thread; caller should not run concurrently with audio processing setup.
+            let ok = unsafe { (*inst_ptr).set_full_state(bytes_for_block.as_slice()) };
+            *result_for_block.lock().unwrap() = ok;
+        });
+
+        if let Some((dispatch_get_main_queue_fn, dispatch_sync_fn)) = resolve_dispatch_symbols() {
+            unsafe {
+                let q = dispatch_get_main_queue_fn();
+                dispatch_sync_fn(q, &*block as *const _ as *mut c_void);
+            }
+        } else {
+            // Best-effort fallback on current thread.
+            let ok = unsafe { (*inst_ptr).set_full_state(bytes.as_slice()) };
+            *result_for_fallback.lock().unwrap() = ok;
+        }
+
+        let ok = *result.lock().unwrap();
+        ok
     }
 }
 

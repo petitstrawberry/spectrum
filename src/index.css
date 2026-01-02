@@ -6,6 +6,7 @@ html, body {
   width: 100%;
   margin: 0;
   padding: 0;
+  @apply bg-slate-950 text-slate-100;
 }
 
 #root {

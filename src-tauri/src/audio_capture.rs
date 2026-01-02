@@ -7,14 +7,23 @@
 //! - Multiple consumers (output callbacks) can read the SAME data independently
 //! - Each output device has its own read position via triple buffering
 
-use crate::mixer::{ChannelLevels, PRISM_CHANNELS};
 use crate::vdsp::VDsp;
+
+/// Number of Prism channels (64 mono = 32 stereo pairs)
+pub const PRISM_CHANNELS: usize = 64;
+
+/// Level data for a stereo pair
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelLevels {
+    pub left_peak: f32,
+    pub right_peak: f32,
+}
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_device_name, set_device_sample_rate,
 };
 use coreaudio::sys::{
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyScopeInput,
-    kAudioDevicePropertyScopeOutput, kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyStreamConfiguration,
     kAudioObjectPropertyElementMaster, AudioBuffer, AudioBufferList,
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData,
@@ -73,6 +82,13 @@ impl OutputReadPositions {
     fn new(num_channels: usize) -> Self {
         let positions = (0..num_channels)
             .map(|_| AtomicUsize::new(0))
+            .collect();
+        Self { positions }
+    }
+
+    fn new_at_position(num_channels: usize, write_positions: &[usize]) -> Self {
+        let positions = (0..num_channels)
+            .map(|i| AtomicUsize::new(write_positions.get(i).copied().unwrap_or(0)))
             .collect();
         Self { positions }
     }
@@ -345,7 +361,8 @@ pub fn find_prism_device() -> Option<u32> {
             if lower.contains("prism") {
                 let input_ch = get_device_input_channels(id);
                 if input_ch > 0 {
-                    println!("[AudioCapture] Found Prism device: {} (ID: {}, {} input channels)", name, id, input_ch);
+                    // debug println!
+                    // println!("[AudioCapture] Found Prism device: {} (ID: {}, {} input channels)", name, id, input_ch);
                     return Some(id);
                 }
             }
@@ -705,10 +722,15 @@ pub fn register_output_device(device_id: u32) {
     if let Some(ref audio_buffers) = *buffers {
         let mut positions = DEVICE_READ_POSITIONS.write();
         if !positions.contains_key(&device_id) {
-            // Create lock-free position storage
+            // Get current write positions for each channel
+            let write_positions: Vec<usize> = audio_buffers.channels.iter()
+                .map(|ch| ch.get_write_pos())
+                .collect();
+
+            // Create lock-free position storage starting at current write position
             let num_channels = audio_buffers.channels.len();
-            positions.insert(device_id, Arc::new(OutputReadPositions::new(num_channels)));
-            println!("[AudioCapture] Registered output device {} for reading", device_id);
+            positions.insert(device_id, Arc::new(OutputReadPositions::new_at_position(num_channels, &write_positions)));
+            println!("[AudioCapture] Registered output device {} for reading at write_pos[0]={}", device_id, write_positions.get(0).unwrap_or(&0));
         }
     }
 }
@@ -806,21 +828,6 @@ pub fn pop_channel_audio(
 ) -> usize {
     // Use device_id 0 as a fallback for legacy callers
     read_channel_audio(0, left_ch, right_ch, left_out, right_out)
-}
-
-/// Update mixer state with captured levels
-pub fn update_mixer_levels() {
-    use crate::mixer::get_mixer_state;
-
-    let levels = get_capture_levels();
-    let mixer_state = get_mixer_state();
-    let mut input_levels = mixer_state.input_levels.write();
-
-    for (i, level) in levels.iter().enumerate() {
-        if i < input_levels.len() {
-            input_levels[i] = *level;
-        }
-    }
 }
 
 // ============================================================================

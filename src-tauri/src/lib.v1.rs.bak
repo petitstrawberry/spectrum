@@ -20,16 +20,12 @@ pub mod device;     // Device enumeration
 mod audio_capture;  // Legacy capture (wrapped by capture module)
 mod audio_unit;     // AudioUnit plugin management
 mod audio_unit_ui;  // AudioUnit UI
+pub mod config;     // Configuration persistence
 pub mod prismd;     // Prism daemon communication
 mod vdsp;           // vDSP hardware acceleration
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use tauri::Manager;
-
-static DID_EXIT_FLUSH: AtomicBool = AtomicBool::new(false);
 
 // Re-export prismd types
 pub use prismd::{ClientInfo, ClientRoutingUpdate, RoutingUpdate};
@@ -82,15 +78,6 @@ pub struct AllLevels {
 }
 
 // =============================================================================
-// Shared App State
-// =============================================================================
-
-/// Latest UI state snapshot from the frontend, stored in memory.
-/// Used to persist once on app exit without writing on every UI change.
-#[derive(Default)]
-pub struct UiStateCache(pub Mutex<Option<api::dto::UIStateDto>>);
-
-// =============================================================================
 // v2 API Commands (New)
 // =============================================================================
 
@@ -118,7 +105,6 @@ pub use api::get_available_plugins;
 pub use api::add_plugin_to_bus;
 pub use api::remove_plugin_from_bus;
 pub use api::reorder_plugins;
-pub use api::set_plugin_enabled;
 pub use api::open_plugin_ui;
 pub use api::close_plugin_ui;
 
@@ -131,23 +117,13 @@ pub use api::get_edge_meters;
 pub use api::save_graph_state;
 pub use api::load_graph_state;
 pub use api::persist_state;
-pub use api::persist_state_background;
 pub use api::restore_state;
-pub use api::set_ui_state_cache;
 
 // System Commands
 pub use api::start_audio;
 pub use api::stop_audio;
-pub use api::stop_output_runtime;
 pub use api::get_system_status;
-pub use api::open_prism_app;
 pub use api::set_buffer_size;
-pub use api::get_app_icon_by_pid;
-// Output runtime
-pub use api::get_output_runtime;
-// Output master
-pub use api::set_output_gain;
-pub use api::set_output_channel_gain;
 
 // =============================================================================
 // Legacy Commands (For backward compatibility)
@@ -333,49 +309,8 @@ fn get_processes() -> Vec<PrismProcess> {
 /// Generate Tauri command handlers
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(UiStateCache::default())
-        .setup(|_app| {
-            // IMPORTANT: Do not block `setup` with CoreAudio init.
-            // Blocking here delays first paint and results in a white window.
-            println!("[Spectrum] Scheduling audio engine init...");
-
-            tauri::async_runtime::spawn_blocking(|| {
-                println!("[Spectrum] Initializing audio engine...");
-
-                // Start capture first so the initial output can render actual audio.
-                if let Err(e) = crate::capture::start_capture() {
-                    eprintln!("[Spectrum] Warning: Failed to start capture on startup: {}", e);
-                }
-
-                // Find preferred output device (aggregate or system default)
-                if let Some(device_id) = crate::device::find_preferred_output_device() {
-                    match crate::audio::output::start_output_v2(device_id) {
-                        Ok(_) => {
-                            let channels = crate::device::get_device_output_channels(device_id);
-                            println!("[Spectrum] Audio engine initialized successfully");
-                            println!(
-                                "[Spectrum] Using output device: {} ({} channels)",
-                                device_id, channels
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("[Spectrum] Warning: Failed to initialize audio engine: {}", e);
-                            eprintln!("[Spectrum] The app will start without audio output.");
-
-                            // Best-effort cleanup if output fails.
-                            crate::capture::stop_capture();
-                        }
-                    }
-                } else {
-                    eprintln!("[Spectrum] Warning: No suitable output device found");
-                    eprintln!("[Spectrum] The app will start without audio output.");
-                }
-            });
-
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             // v2 API - Device
             get_input_devices,
@@ -398,7 +333,6 @@ pub fn run() {
             add_plugin_to_bus,
             remove_plugin_from_bus,
             reorder_plugins,
-            set_plugin_enabled,
             open_plugin_ui,
             close_plugin_ui,
             // v2 API - Meter
@@ -409,22 +343,12 @@ pub fn run() {
             save_graph_state,
             load_graph_state,
             persist_state,
-            persist_state_background,
             restore_state,
-            set_ui_state_cache,
             // v2 API - System
             start_audio,
             stop_audio,
-            stop_output_runtime,
             get_system_status,
-            open_prism_app,
-            get_app_icon_by_pid,
             set_buffer_size,
-            // v2 API - Output runtime
-            get_output_runtime,
-            // v2 API - Output master
-            set_output_gain,
-            set_output_channel_gain,
             // Legacy commands
             get_prism_clients,
             set_routing,
@@ -445,36 +369,6 @@ pub fn run() {
             get_plugins,
             get_processes,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
-
-    app.run(|app_handle, event| {
-        // Save state only when the app is exiting (Cmd+Q, Quit menu, etc.).
-        // Do NOT save on window close.
-        let should_flush = matches!(
-            event,
-            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit { .. }
-        );
-        if !should_flush {
-            return;
-        }
-
-        // Ensure we only flush once even if both events fire.
-        if DID_EXIT_FLUSH.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let ui_state = match app_handle.state::<UiStateCache>().0.lock() {
-            Ok(guard) => guard.clone(),
-            Err(_) => None,
-        };
-
-        println!(
-            "[Spectrum] Exit flush: ui_state_cached={}",
-            if ui_state.is_some() { "yes" } else { "no" }
-        );
-
-        // Best-effort synchronous flush; runs during shutdown.
-        let _ = tauri::async_runtime::block_on(async { crate::api::persist_state(ui_state).await });
-    });
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }

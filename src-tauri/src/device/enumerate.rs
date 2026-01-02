@@ -1,0 +1,451 @@
+//! Device enumeration for input and output devices
+
+use crate::api::dto::OutputDeviceDto;
+use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name};
+use coreaudio::sys::{
+    kAudioDevicePropertyScopeOutput, kAudioDevicePropertyStreamConfiguration,
+    kAudioObjectPropertyElementMaster, AudioBuffer, AudioBufferList,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectSystemObject,
+    kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal,
+    kAudioAggregateDevicePropertyActiveSubDeviceList,
+};
+use std::ptr;
+
+/// Get number of output channels for a device
+pub fn get_device_output_channels(device_id: u32) -> u32 {
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioDevicePropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut size: u32 = 0;
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size)
+    };
+
+    if status != 0 || size == 0 {
+        return 0;
+    }
+
+    let mut buffer = vec![0u8; size as usize];
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            buffer.as_mut_ptr() as *mut _,
+        )
+    };
+
+    if status != 0 {
+        return 0;
+    }
+
+    let buffer_list = unsafe { &*(buffer.as_ptr() as *const AudioBufferList) };
+    let num_buffers = buffer_list.mNumberBuffers;
+
+    if num_buffers == 0 {
+        return 0;
+    }
+
+    let mut total_channels = 0u32;
+    let buffers_ptr: *const AudioBuffer = &buffer_list.mBuffers as *const _;
+
+    for i in 0..num_buffers {
+        let audio_buffer = unsafe { &*buffers_ptr.add(i as usize) };
+        total_channels += audio_buffer.mNumberChannels;
+    }
+
+    total_channels
+}
+
+/// Check if a device is an aggregate device
+pub fn is_aggregate_device(device_id: u32) -> bool {
+    // Check device UID for aggregate device pattern
+    if let Some(uid) = get_device_uid(device_id) {
+        uid.contains("aggregate") || uid.contains("Aggregate")
+    } else {
+        false
+    }
+}
+
+/// Get device UID
+fn get_device_uid(device_id: u32) -> Option<String> {
+    use core_foundation::string::CFString;
+    use core_foundation::base::TCFType;
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyDeviceUID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut uid: core_foundation::string::CFStringRef = ptr::null();
+    let mut size = std::mem::size_of::<core_foundation::string::CFStringRef>() as u32;
+
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut uid as *mut _ as *mut _,
+        )
+    };
+
+    if status != 0 || uid.is_null() {
+        return None;
+    }
+
+    let cf_string = unsafe { CFString::wrap_under_create_rule(uid) };
+    Some(cf_string.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportType {
+    Bluetooth,
+    USB,
+    HDMI,
+    DisplayPort,
+    FireWire,
+    Thunderbolt,
+    Virtual,
+    BuiltIn,
+    PCI,
+    PCIe,
+    AVB,
+    Unknown,
+}
+
+impl ToString for TransportType {
+    fn to_string(&self) -> String {
+        match self {
+            TransportType::Bluetooth => "bluetooth",
+            TransportType::USB => "usb",
+            TransportType::HDMI => "hdmi",
+            TransportType::DisplayPort => "displayport",
+            TransportType::BuiltIn => "built-in",
+            TransportType::FireWire => "firewire",
+            TransportType::Thunderbolt => "thunderbolt",
+            TransportType::Virtual => "virtual",
+            TransportType::PCI => "pci",
+            TransportType::PCIe => "pcie",
+            TransportType::AVB => "avb",
+            TransportType::Unknown => "unknown",
+        }
+        .to_string()
+    }
+}
+
+/// Guess icon hint from device UID and transport type
+fn get_icon_hint(uid: &str, transport_type: &TransportType) -> String {
+    // Check exact UID hits first
+    match uid {
+        "BuiltInSpeakerDevice" => return "speaker".to_string(),
+        "BuiltInHeadphoneOutputDevice" => return "headphones".to_string(),
+        _ => ()
+    }
+
+    // Check substrings in UID
+    // AppleUSBAudioEngine:Apple Inc.:Studio Display
+    if uid.starts_with("AppleUSBAudioEngine:Apple Inc.:Studio Display") {
+        return "display".to_string();
+    }
+
+    // Check transport type
+    match transport_type {
+        TransportType::Bluetooth => "bluetooth".to_string(),
+        TransportType::USB => "usb".to_string(),
+        TransportType::HDMI => "display".to_string(),
+        TransportType::DisplayPort => "display".to_string(),
+        TransportType::Virtual => "virtual".to_string(),
+        TransportType::Unknown => "default".to_string(),
+        _ => "default".to_string(),
+    }
+}
+
+/// Get transport type for a device
+fn get_transport_type(device_id: u32) -> TransportType {
+    use coreaudio::sys::kAudioDevicePropertyTransportType;
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut transport_type: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut transport_type as *mut u32 as *mut _,
+        )
+    };
+
+    if status != 0 {
+        eprint!("Failed to get transport type for device {}", device_id);
+        return TransportType::Unknown;
+    }
+
+    // Convert FourCC to string
+    let bytes = transport_type.to_be_bytes();
+    let four_cc = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+
+    // Normalize and match on substrings to tolerate short/variant FourCCs
+    let s = four_cc.trim().to_lowercase();
+
+    // Prefer explicit built-in/internal tokens to avoid confusing built-in with Bluetooth
+    let ret = if s.contains("bltn") || s.contains("built") || s.contains("internal") {
+        TransportType::BuiltIn
+    } else if s.contains("blut") || s.contains("blue") || s.contains("blu") || s.contains("bt") {
+        TransportType::Bluetooth
+    } else if s.contains("usba") || s.contains("usb") {
+        TransportType::USB
+    } else if s.contains("hdmi") {
+        TransportType::HDMI
+    } else if s.contains("dprt") || s.contains("display") {
+        TransportType::DisplayPort
+    } else if s.contains("fire") {
+        TransportType::FireWire
+    } else if s.contains("thun") || s.contains("thdb") || s.contains("thdr") {
+        TransportType::Thunderbolt
+    } else if s.contains("virt") {
+        TransportType::Virtual
+    } else if s.contains("pcie") {
+        TransportType::PCIe
+    } else if s.contains("pci") {
+        TransportType::PCI
+    } else if s.contains("avb") {
+        TransportType::AVB
+    } else {
+        TransportType::Unknown
+    };
+
+    ret
+}
+
+/// Get list of output devices (with virtual device expansion for aggregate devices)
+pub fn get_output_devices() -> Vec<OutputDeviceDto> {
+    let mut result = Vec::new();
+
+    let device_ids = match get_audio_device_ids() {
+        Ok(ids) => ids,
+        Err(_) => return result,
+    };
+
+    // Determine Prism device ID (if present) and exclude it by id to avoid
+    // accidentally filtering other devices whose name contains "prism".
+    let prism_device_id = crate::capture::find_prism_device();
+
+    for device_id in device_ids {
+        let output_channels = get_device_output_channels(device_id);
+        if output_channels == 0 {
+            continue; // Not an output device
+        }
+
+        let name = get_device_name(device_id).unwrap_or_else(|_| format!("Device {}", device_id));
+        let transport_type = get_transport_type(device_id);
+
+        // Exclude the Prism virtual device by id (if present)
+        if let Some(pid) = prism_device_id {
+            if pid == device_id {
+                continue;
+            }
+        }
+
+        if is_aggregate_device(device_id) {
+            // Expand aggregate device into its active sub-devices when possible
+            let subs = get_aggregate_sub_devices(device_id);
+            if !subs.is_empty() {
+                let mut offset = 0u32;
+                for sub in subs.iter() {
+                    if sub.channels == 0 {
+                        continue;
+                    }
+
+                    let transport_type = get_transport_type(sub.original_id);
+
+                    result.push(OutputDeviceDto {
+                        id: format!("vout_{}_{}", device_id, offset),
+                        device_id,
+                        device_uid: get_device_uid(device_id),
+                        subdevice_uid: sub.uid.clone(),
+                        parent_name: Some(name.clone()),
+                        channel_offset: offset as u8,
+                        channel_count: sub.channels.min(255) as u8,
+                        name: sub.name.clone(),
+                        device_type: "aggregate_sub".to_string(),
+                        transport_type: transport_type.to_string(),
+                        icon_hint: get_icon_hint(sub.uid.as_deref().unwrap_or(""), &transport_type),
+                        is_aggregate_sub: true,
+                    });
+
+                    offset += sub.channels;
+                }
+            }
+        } else {
+            let device_uid = get_device_uid(device_id);
+            // Regular device - single entry
+            result.push(OutputDeviceDto {
+                id: format!("vout_{}_0", device_id),
+                device_id,
+                channel_offset: 0,
+                channel_count: output_channels.min(255) as u8,
+                name: name.clone(),
+                device_uid: device_uid.clone(),
+                subdevice_uid: None,
+                parent_name: None,
+                device_type: "physical".to_string(),
+                transport_type: transport_type.to_string(),
+                icon_hint: get_icon_hint(device_uid.as_deref().unwrap_or(""), &transport_type),
+                is_aggregate_sub: false,
+            });
+        }
+    }
+
+    result
+}
+
+/// Find a preferred output device to use as the default runtime target.
+/// Preference: the first aggregate device found, otherwise the system default output device.
+pub fn find_preferred_output_device() -> Option<u32> {
+    // Prefer aggregate devices
+    if let Ok(ids) = get_audio_device_ids() {
+        for id in ids.iter() {
+            if is_aggregate_device(*id) {
+                return Some(*id);
+            }
+        }
+    }
+
+    // Fallback: query system default output device
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut device_id: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject,
+            &address,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut device_id as *mut u32 as *mut _,
+        )
+    };
+
+    if status == 0 && device_id != 0 {
+        return Some(device_id);
+    }
+
+    None
+}
+
+/// Find a specific output device by ID
+pub fn find_output_device(virtual_id: &str) -> Option<(u32, u8, u8)> {
+    // Parse virtual ID: "vout_{device_id}_{offset}"
+    let parts: Vec<&str> = virtual_id.split('_').collect();
+    if parts.len() != 3 || parts[0] != "vout" {
+        return None;
+    }
+
+    let device_id: u32 = parts[1].parse().ok()?;
+    let channel_offset: u8 = parts[2].parse().ok()?;
+
+    let output_channels = get_device_output_channels(device_id);
+    if output_channels == 0 {
+        return None;
+    }
+
+    let available = (output_channels as u8).saturating_sub(channel_offset);
+    let channel_count = available.min(2);
+
+    Some((device_id, channel_offset, channel_count))
+}
+
+/// Information about an aggregate's sub-device
+struct SubDeviceInfo {
+    uid: Option<String>,
+    name: String,
+    channels: u32,
+    original_id: u32,
+}
+
+/// Query aggregate device for its active sub-device list and resolve their UIDs/names/channels
+fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
+    use std::mem::size_of;
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioAggregateDevicePropertyActiveSubDeviceList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMaster,
+    };
+
+    let mut size: u32 = 0;
+    let status = unsafe { AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size) };
+    if status != 0 || size == 0 {
+        return Vec::new();
+    }
+
+    let count = (size as usize) / size_of::<u32>();
+    let mut ids: Vec<u32> = vec![0u32; count];
+    let mut data_size = size;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            &address,
+            0,
+            ptr::null(),
+            &mut data_size,
+            ids.as_mut_ptr() as *mut _,
+        )
+    };
+
+    if status != 0 {
+        return Vec::new();
+    }
+
+    let mut subs = Vec::new();
+    for id in ids.into_iter() {
+        let uid = get_device_uid(id);
+        let name = get_device_name(id).unwrap_or_else(|_| format!("Device {}", id));
+        let channels = get_device_output_channels(id);
+
+        subs.push(SubDeviceInfo { uid, name, channels, original_id: id });
+    }
+
+    subs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_output_devices() {
+        let devices = get_output_devices();
+        println!("Found {} output devices", devices.len());
+        for device in &devices {
+            println!(
+                "  {} (id={}, offset={}, channels={})",
+                device.name, device.device_id, device.channel_offset, device.channel_count
+            );
+        }
+        // Just check that it doesn't panic
+        assert!(devices.len() >= 0);
+    }
+}

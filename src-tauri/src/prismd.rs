@@ -117,3 +117,30 @@ pub async fn set_client_routing(client_id: u32, offset: u32) -> Result<ClientRou
 pub fn is_connected() -> bool {
     UnixStream::connect(PRISMD_SOCKET_PATH).is_ok()
 }
+
+/// Process info for UI display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+    pub channel_offset: u32,
+}
+
+/// Get list of processes from prismd (sync version for UI)
+pub fn get_processes() -> Vec<ProcessInfo> {
+    match send_request::<Vec<ClientInfo>>(&CommandRequest::Clients) {
+        Ok(clients) => {
+            clients
+                .into_iter()
+                .map(|c| ProcessInfo {
+                    pid: c.pid as u32,
+                    name: c.responsible_name
+                        .or(c.process_name)
+                        .unwrap_or_else(|| format!("PID {}", c.pid)),
+                    channel_offset: c.channel_offset,
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
