@@ -3,7 +3,7 @@
 English | **[日本語](README_ja.md)**
 
 
-**Spectrum** is a **Prism Audio Mixer & Router** for macOS. Mix, route, and process audio from multiple sources to any output device with a visual graph-based interface.
+**Spectrum** is a **Audio Mixer & Router** for macOS. Mix, route, and process audio from multiple sources to any output device with a visual graph-based interface.
 
 > When paired with **Prism** (a virtual audio splitter), Spectrum lets you capture per-application audio and route it independently — perfect for streaming, recording, or complex monitoring setups.
 
