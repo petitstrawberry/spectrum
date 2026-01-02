@@ -2,13 +2,11 @@
 
 English | **[日本語](README_ja.md)**
 
----
 
 **Spectrum** is a **Prism Audio Mixer & Router** for macOS. Mix, route, and process audio from multiple sources to any output device with a visual graph-based interface.
 
 > When paired with **Prism** (a virtual audio splitter), Spectrum lets you capture per-application audio and route it independently — perfect for streaming, recording, or complex monitoring setups.
 
----
 
 ## What Can Spectrum Do?
 
@@ -18,14 +16,12 @@ English | **[日本語](README_ja.md)**
 - **AudioUnit Effects**: Add reverb, EQ, compression, and other AU plugins to any bus
 - **Multi-Device Output**: Send audio to headphones, speakers, and recording software simultaneously
 
----
 
 ## Prerequisites
 
 - **macOS** (10.15 or later)
 - **Xcode Command Line Tools**: `xcode-select --install`
 
----
 
 ## Quick Start
 
@@ -49,7 +45,6 @@ English | **[日本語](README_ja.md)**
 
 4. **Launch Spectrum** and start routing audio!
 
----
 
 ## Known Issues
 
@@ -65,7 +60,6 @@ English | **[日本語](README_ja.md)**
 
 **Status**: Investigating event propagation for separate NSWindow instances. See `docs/plugin-ui-menu-issue-investigation.md` for technical details.
 
----
 
 ## Development
 
@@ -112,7 +106,6 @@ pnpm build
 pnpm tauri build
 ```
 
----
 
 ## Documentation
 
@@ -120,7 +113,6 @@ pnpm tauri build
 - **v2 Architecture (Essential Reading)**: `docs/architecture-v2.md`
 - **Improvement Plans (Performance/Lock-free, etc.)**: `docs/improvements.md`
 
----
 
 ## About Prism
 
@@ -128,7 +120,6 @@ pnpm tauri build
 
 For Prism build/install/usage instructions: see `prism/README.md`
 
----
 
 ## License
 
