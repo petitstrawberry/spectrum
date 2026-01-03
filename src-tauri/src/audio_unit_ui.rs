@@ -717,13 +717,13 @@ pub fn open_audio_unit_ui(
         // The issue: Tauri's .build() + .run(closure) pattern affects how NSRunLoop
         // processes events in NSEventTrackingRunLoopMode (used by NSMenu for modal tracking).
         // 
-        // Solution: Explicitly configure the plugin window to properly participate in
-        // the run loop's modal tracking, ensuring menu windows can receive events.
+        // Solution: Configure the plugin window to properly participate in the run loop's
+        // modal tracking, ensuring menu windows can receive events.
         //
         // Key settings:
         // 1. worksWhenModal: true - Allow event processing during modal tracking
-        // 2. Share event dispatch with NSApplication's run loop
-        // 3. Ensure the window can become key/main for proper focus handling
+        // 2. setFloatingPanel: true - Proper NSPanel behavior for auxiliary windows
+        // 3. setBecomesKeyOnlyIfNeeded: false - Can always become key window
         
         // Configure the panel for proper modal tracking integration
         let _: () = msg_send![&*window, setWorksWhenModal: true];
@@ -732,15 +732,10 @@ pub fn open_audio_unit_ui(
         let _: () = msg_send![&*window, setAcceptsMouseMovedEvents: true];
         
         // Enable the panel to participate in AppKit's event loop properly
-        // These settings ensure the window can become key/main, which is critical
-        // for menu event handling in JUCE plugins
+        // NSPanel already supports becoming key/main by default, we just need to
+        // configure its behavior for proper menu event handling in JUCE plugins
         let _: () = msg_send![&*window, setFloatingPanel: true];
         let _: () = msg_send![&*window, setBecomesKeyOnlyIfNeeded: false];
-        
-        // Explicitly mark the window as capable of being key/main
-        // This is crucial for NSMenu event dispatch
-        let _: () = msg_send![&*window, setCanBecomeKeyWindow: true];
-        let _: () = msg_send![&*window, setCanBecomeMainWindow: true];
 
         // Always disable user resizing; window follows plugin view size.
         set_window_resizable(&window, false);
