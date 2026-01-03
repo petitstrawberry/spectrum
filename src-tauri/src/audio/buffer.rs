@@ -1,7 +1,7 @@
 //! Audio Buffer implementation
 
-use crate::vdsp::VDsp;
 use super::MAX_FRAMES;
+use crate::vdsp::VDsp;
 
 /// モノラルオーディオバッファ
 pub struct AudioBuffer {

@@ -11,17 +11,14 @@ use crate::audio::processor::get_graph_processor;
 use crate::audio::sink::SinkNode;
 use crate::audio::source::SourceId;
 use crate::vdsp::VDsp;
-use coreaudio::audio_unit::macos_helpers::{
-    get_device_name, set_device_sample_rate,
-};
-use coreaudio::audio_unit::{AudioUnit, Element, SampleFormat, Scope, StreamFormat};
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
+use coreaudio::audio_unit::macos_helpers::{get_device_name, set_device_sample_rate};
 use coreaudio::audio_unit::render_callback::{self, data};
+use coreaudio::audio_unit::{AudioUnit, Element, SampleFormat, Scope, StreamFormat};
 use coreaudio::sys::{
     kAudioDevicePropertyScopeOutput, kAudioDevicePropertyStreamConfiguration,
-    kAudioObjectPropertyElementMaster,
-    AudioBufferList, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
-    AudioObjectPropertyAddress,
+    kAudioObjectPropertyElementMaster, AudioBufferList, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
 };
 use parking_lot::RwLock;
 use std::ptr;
@@ -42,8 +39,7 @@ struct ActiveOutput {
 }
 
 /// Global active output (single device at a time)
-static ACTIVE_OUTPUT: LazyLock<RwLock<Option<ActiveOutput>>> =
-    LazyLock::new(|| RwLock::new(None));
+static ACTIVE_OUTPUT: LazyLock<RwLock<Option<ActiveOutput>>> = LazyLock::new(|| RwLock::new(None));
 
 /// Get output channel count for a device
 fn get_device_output_channels(device_id: u32) -> u32 {
@@ -54,9 +50,8 @@ fn get_device_output_channels(device_id: u32) -> u32 {
     };
 
     let mut size: u32 = 0;
-    let status = unsafe {
-        AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size)
-    };
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size) };
 
     if status != 0 || size == 0 {
         return 0;
@@ -116,14 +111,19 @@ pub fn start_output_v2(device_id: u32) -> Result<(), String> {
         return Err(format!("Device {} has no output channels", device_id));
     }
 
-    let device_name = get_device_name(device_id)
-        .unwrap_or_else(|_| format!("Device {}", device_id));
-    println!("[AudioOutput v2] Starting output to {} (ID: {}, {} channels)",
-             device_name, device_id, output_channels);
+    let device_name =
+        get_device_name(device_id).unwrap_or_else(|_| format!("Device {}", device_id));
+    println!(
+        "[AudioOutput v2] Starting output to {} (ID: {}, {} channels)",
+        device_name, device_id, output_channels
+    );
 
     // Set sample rate
     if let Err(e) = set_device_sample_rate(device_id, SAMPLE_RATE) {
-        eprintln!("[AudioOutput v2] Warning: Could not set sample rate: {:?}", e);
+        eprintln!(
+            "[AudioOutput v2] Warning: Could not set sample rate: {:?}",
+            e
+        );
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -239,7 +239,9 @@ fn output_thread_v2(
             return Ok(());
         }
 
-        let Args { data, num_frames, .. } = args;
+        let Args {
+            data, num_frames, ..
+        } = args;
         let buffer = data.buffer;
         let frames = num_frames as usize;
 
@@ -344,10 +346,7 @@ fn output_thread_v2(
                         match key {
                             CapturePairKey::PrismAny { .. } => {
                                 crate::audio_capture::read_channel_audio_any(
-                                    left_ch,
-                                    right_ch,
-                                    left_buf,
-                                    right_buf,
+                                    left_ch, right_ch, left_buf, right_buf,
                                 );
                             }
                             CapturePairKey::InputDevice {
@@ -475,7 +474,9 @@ pub fn stop_output_v2() {
 /// Check if output is running
 pub fn is_output_running_v2() -> bool {
     let active = ACTIVE_OUTPUT.read();
-    active.as_ref().map_or(false, |o| o.running.load(Ordering::Relaxed))
+    active
+        .as_ref()
+        .map_or(false, |o| o.running.load(Ordering::Relaxed))
 }
 
 /// Get the currently configured active output device, if any.

@@ -1,16 +1,16 @@
 //! Tauri Commands - API endpoints for frontend
 
 use super::dto::*;
+use crate::audio::bus::BusNode;
 use crate::audio::output::start_output_v2;
 use crate::audio::processor::get_graph_processor;
-use crate::audio::{AudioNode, EdgeId, NodeHandle, PortId};
-use crate::audio::source::SourceNode;
-use crate::audio::bus::BusNode;
 use crate::audio::sink::SinkNode;
+use crate::audio::source::SourceNode;
+use crate::audio::{AudioNode, EdgeId, NodeHandle, PortId};
 use crate::UiStateCache;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
 use tauri::State;
 
@@ -144,10 +144,7 @@ pub async fn get_prism_status() -> Result<PrismStatusDto, String> {
 // =============================================================================
 
 #[tauri::command]
-pub async fn add_source_node(
-    source_id: SourceIdDto,
-    label: Option<String>,
-) -> Result<u32, String> {
+pub async fn add_source_node(source_id: SourceIdDto, label: Option<String>) -> Result<u32, String> {
     let processor = get_graph_processor();
 
     // De-dup: ensure only one node exists per logical source (Prism channel / device input).
@@ -155,9 +152,14 @@ pub async fn add_source_node(
     let target_stable_id = stable_id_for_source_id(&source_id);
     if let Some(existing) = processor.with_graph(|graph| {
         for handle in graph.node_handles() {
-            let Some(node) = graph.get_node(handle) else { continue };
-            let Some(source_node) = node.as_any().downcast_ref::<SourceNode>() else { continue };
-            let existing_id = stable_id_for_source_id(&SourceIdDto::from(source_node.source_id().clone()));
+            let Some(node) = graph.get_node(handle) else {
+                continue;
+            };
+            let Some(source_node) = node.as_any().downcast_ref::<SourceNode>() else {
+                continue;
+            };
+            let existing_id =
+                stable_id_for_source_id(&SourceIdDto::from(source_node.source_id().clone()));
             if existing_id == target_stable_id {
                 return Some(handle.raw());
             }
@@ -172,7 +174,10 @@ pub async fn add_source_node(
     }
 
     // Debug log: indicate frontend requested adding a source
-    println!("[api] add_source_node invoked: source_id={:?}, label={:?}", source_id, label);
+    println!(
+        "[api] add_source_node invoked: source_id={:?}, label={:?}",
+        source_id, label
+    );
     // If this is a physical input device, ensure capture is running for it.
     // Prism capture is handled separately by start_audio/start_capture.
     if let SourceIdDto::InputDevice { device_id, .. } = source_id {
@@ -234,8 +239,12 @@ pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, 
     // We treat (label + port_count) as the logical identity.
     if let Some(existing) = processor.with_graph(|graph| {
         for handle in graph.node_handles() {
-            let Some(node) = graph.get_node(handle) else { continue };
-            let Some(bus) = node.as_any().downcast_ref::<BusNode>() else { continue };
+            let Some(node) = graph.get_node(handle) else {
+                continue;
+            };
+            let Some(bus) = node.as_any().downcast_ref::<BusNode>() else {
+                continue;
+            };
             if bus.label() == label && bus.input_port_count() == port_count as usize {
                 return Some(handle.raw());
             }
@@ -249,11 +258,22 @@ pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, 
         return Ok(existing);
     }
 
-    let bus_id = format!("bus_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+    let bus_id = format!(
+        "bus_{}",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("0")
+    );
     let node: Box<dyn AudioNode> = if port_count == 2 {
         Box::new(crate::audio::bus::BusNode::new_stereo(&bus_id, &label))
     } else {
-        Box::new(crate::audio::bus::BusNode::new(&bus_id, &label, port_count as usize))
+        Box::new(crate::audio::bus::BusNode::new(
+            &bus_id,
+            &label,
+            port_count as usize,
+        ))
     };
 
     let handle = processor.add_node(node);
@@ -268,8 +288,12 @@ pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result
     let target_stable_id = stable_id_for_sink(&sink);
     if let Some(existing) = processor.with_graph(|graph| {
         for handle in graph.node_handles() {
-            let Some(node) = graph.get_node(handle) else { continue };
-            let Some(sink_node) = node.as_any().downcast_ref::<SinkNode>() else { continue };
+            let Some(node) = graph.get_node(handle) else {
+                continue;
+            };
+            let Some(sink_node) = node.as_any().downcast_ref::<SinkNode>() else {
+                continue;
+            };
             let dto = OutputSinkDto::from(sink_node.sink_id().clone());
             let existing_id = stable_id_for_sink(&dto);
             if existing_id == target_stable_id {
@@ -286,7 +310,10 @@ pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result
     }
 
     // Debug log: indicate frontend requested adding a sink
-    println!("[api] add_sink_node invoked: sink={:?}, label={:?}", sink, label);
+    println!(
+        "[api] add_sink_node invoked: sink={:?}, label={:?}",
+        sink, label
+    );
     let label = label.unwrap_or_else(|| format!("Output {}", sink.device_id));
     let sink_id = crate::audio::sink::SinkId::from(sink);
     let node: Box<dyn AudioNode> = Box::new(crate::audio::sink::SinkNode::new(sink_id, &label));
@@ -304,9 +331,15 @@ pub async fn remove_node(handle: u32) -> Result<(), String> {
     // and release plugin instances from the AudioUnit manager.
     // Best-effort: if closing times out, we still proceed with removal.
     let plugin_instance_ids: Vec<String> = processor.with_graph(|graph| {
-        graph.get_node(node_handle)
+        graph
+            .get_node(node_handle)
             .and_then(|node| node.as_any().downcast_ref::<BusNode>())
-            .map(|bus| bus.plugins().iter().map(|p| p.instance_id.clone()).collect())
+            .map(|bus| {
+                bus.plugins()
+                    .iter()
+                    .map(|p| p.instance_id.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     });
 
@@ -384,7 +417,8 @@ pub async fn add_edge(
 
     match edge_id {
         Some(id) => {
-            let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+            let (node_count, edge_count) =
+                processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
             println!(
                 "[graph] add_edge ok: edge_id={} nodes={} edges={}",
                 id.raw(),
@@ -394,15 +428,11 @@ pub async fn add_edge(
             Ok(id.raw())
         }
         None => {
-            let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+            let (node_count, edge_count) =
+                processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
             println!(
                 "[graph] add_edge FAILED: {}:{} -> {}:{} (nodes={} edges={})",
-                source,
-                source_port,
-                target,
-                target_port,
-                node_count,
-                edge_count
+                source, source_port, target, target_port, node_count, edge_count
             );
             Err("Failed to add edge (nodes may not exist or edge already exists)".to_string())
         }
@@ -417,21 +447,19 @@ pub async fn remove_edge(id: u32) -> Result<(), String> {
     println!("[graph] remove_edge invoked: edge_id={}", id);
 
     if processor.remove_edge(EdgeId::from(id)) {
-        let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+        let (node_count, edge_count) =
+            processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
         println!(
             "[graph] remove_edge ok: edge_id={} nodes={} edges={}",
-            id,
-            node_count,
-            edge_count
+            id, node_count, edge_count
         );
         Ok(())
     } else {
-        let (node_count, edge_count) = processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
+        let (node_count, edge_count) =
+            processor.with_graph(|g| (g.node_handles().count(), g.edges().len()));
         println!(
             "[graph] remove_edge NOT_FOUND: edge_id={} (nodes={} edges={})",
-            id,
-            node_count,
-            edge_count
+            id, node_count, edge_count
         );
         Err(format!("Edge {} not found", id))
     }
@@ -470,8 +498,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                             std::collections::HashMap::new();
                                         let list = crate::prismd::get_processes();
                                         for p in list {
-                                            map.entry(p.channel_offset)
-                                                .or_insert_with(|| p.name);
+                                            map.entry(p.channel_offset).or_insert_with(|| p.name);
                                         }
                                         prism_app_by_offset = Some(map);
                                     }
@@ -510,7 +537,9 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                             // Fallback if downcast fails
                             NodeInfoDto::Source {
                                 handle: handle.raw(),
-                                stable_id: stable_id_for_source_id(&SourceIdDto::PrismChannel { channel: 0 }),
+                                stable_id: stable_id_for_source_id(&SourceIdDto::PrismChannel {
+                                    channel: 0,
+                                }),
                                 source_id: SourceIdDto::PrismChannel { channel: 0 },
                                 port_count: node.output_port_count() as u8,
                                 label: node.label().to_string(),
@@ -585,7 +614,9 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                                         name = n.clone();
                                                     }
                                                     if manufacturer.trim().is_empty()
-                                                        || manufacturer.trim().eq_ignore_ascii_case("unknown")
+                                                        || manufacturer
+                                                            .trim()
+                                                            .eq_ignore_ascii_case("unknown")
                                                     {
                                                         manufacturer = m.clone();
                                                     }
@@ -708,7 +739,10 @@ pub async fn set_output_gain(output_handle: u32, gain: f32) -> Result<(), String
         let Some(node) = graph.get_node_mut(handle) else {
             return false;
         };
-        let Some(sink) = node.as_any_mut().downcast_mut::<crate::audio::sink::SinkNode>() else {
+        let Some(sink) = node
+            .as_any_mut()
+            .downcast_mut::<crate::audio::sink::SinkNode>()
+        else {
             return false;
         };
         // RT-safe atomic store inside the SinkNode.
@@ -808,9 +842,20 @@ pub async fn add_plugin_to_bus(
         .find(|p| p.id == plugin_id)
         .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
 
-    // Create the real AudioUnit instance in the manager
+    // Create the real AudioUnit instance in the manager (async for better UI responsiveness)
     let au_manager = crate::audio_unit::get_au_manager();
-    let instance_id = au_manager.create_instance(plugin)?;
+
+    // Use oneshot channel to await the async result
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let plugin_clone = plugin.clone();
+
+    au_manager.create_instance_async(&plugin_clone, move |result| {
+        let _ = tx.send(result);
+    });
+
+    let instance_id = rx
+        .await
+        .map_err(|_| "Failed to receive instance creation result".to_string())??;
 
     // Add the plugin reference to the bus node
     let plugin_name = plugin.name.clone();
@@ -828,7 +873,11 @@ pub async fn add_plugin_to_bus(
 
                 if let Some(pos) = position {
                     // Reorder if a position was specified
-                    let mut ids: Vec<String> = bus.plugins().iter().map(|p| p.instance_id.clone()).collect();
+                    let mut ids: Vec<String> = bus
+                        .plugins()
+                        .iter()
+                        .map(|p| p.instance_id.clone())
+                        .collect();
                     if let Some(current_idx) = ids.iter().position(|id| id == &instance_id_clone) {
                         let id = ids.remove(current_idx);
                         ids.insert(pos.min(ids.len()), id);
@@ -962,10 +1011,10 @@ pub async fn open_plugin_ui(instance_id: String) -> Result<(), String> {
 
     // Dispatch to main thread
     unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::msg_send;
-        use objc2::class;
         use block2::RcBlock;
+        use objc2::class;
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
 
         let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
 
@@ -1118,7 +1167,11 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
         state.version,
         state.nodes.len(),
         state.edges.len(),
-        if state.ui_state.is_some() { "yes" } else { "no" }
+        if state.ui_state.is_some() {
+            "yes"
+        } else {
+            "no"
+        }
     ));
 
     // Reset AudioUnit instances (plugin chain state belongs to the graph state).
@@ -1140,19 +1193,25 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
     processor.with_graph_mut(|graph| {
         // Clear existing nodes and edges
         let handles: Vec<_> = graph.node_handles().collect();
-        state_log_verbose(format!("load_graph_state: clearing existing nodes={}", handles.len()));
+        state_log_verbose(format!(
+            "load_graph_state: clearing existing nodes={}",
+            handles.len()
+        ));
         for handle in handles {
             graph.remove_node(handle);
         }
     });
 
     // Recreate nodes
-    let mut handle_mapping: std::collections::HashMap<u32, NodeHandle> = std::collections::HashMap::new();
-    let mut stable_to_handle: std::collections::HashMap<String, NodeHandle> = std::collections::HashMap::new();
+    let mut handle_mapping: std::collections::HashMap<u32, NodeHandle> =
+        std::collections::HashMap::new();
+    let mut stable_to_handle: std::collections::HashMap<String, NodeHandle> =
+        std::collections::HashMap::new();
 
     // Track physical input devices referenced by the restored graph.
     // We'll ensure capture is running for them after the graph is rebuilt.
-    let mut restore_input_devices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut restore_input_devices: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
 
     let mut recreated_nodes: usize = 0;
     let mut deduped_nodes: usize = 0;
@@ -1210,23 +1269,48 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
                 };
                 (*handle, processor.add_node(node))
             }
-            NodeInfoDto::Bus { handle, stable_id: _, bus_id, label, port_count, plugins } => {
+            NodeInfoDto::Bus {
+                handle,
+                stable_id: _,
+                bus_id,
+                label,
+                port_count,
+                plugins,
+            } => {
                 use base64::Engine;
 
                 let mut bus = BusNode::new(bus_id.clone(), label.clone(), *port_count as usize);
                 let au_manager = crate::audio_unit::get_au_manager();
 
-                // Recreate plugin instances in the AU manager and rebuild the chain.
+                // Recreate plugin instances in the AU manager and rebuild the chain (async).
                 for plugin in plugins {
                     let Some(info) = plugin_lookup.get(&plugin.plugin_id) else {
                         eprintln!("[state] Missing plugin {} (skipping)", plugin.plugin_id);
                         continue;
                     };
 
-                    let instance_id = match au_manager.create_instance(info) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            eprintln!("[state] Failed to create instance for {}: {}", plugin.plugin_id, e);
+                    // Use async instantiation for better UI responsiveness
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let info_clone = info.clone();
+
+                    au_manager.create_instance_async(&info_clone, move |result| {
+                        let _ = tx.send(result);
+                    });
+
+                    let instance_id = match rx.await {
+                        Ok(Ok(id)) => id,
+                        Ok(Err(e)) => {
+                            eprintln!(
+                                "[state] Failed to create instance for {}: {}",
+                                plugin.plugin_id, e
+                            );
+                            continue;
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "[state] Failed to receive instance creation result for {}",
+                                plugin.plugin_id
+                            );
                             continue;
                         }
                     };
@@ -1258,17 +1342,28 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
 
                     // Full state (plugin parameters).
                     if let Some(state_b64) = &plugin.state {
-                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(state_b64) {
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(state_b64)
+                        {
                             let _ = au_manager.set_instance_full_state(&instance_id, &bytes);
                         } else {
-                            eprintln!("[state] Failed to decode plugin state for {}", plugin.plugin_id);
+                            eprintln!(
+                                "[state] Failed to decode plugin state for {}",
+                                plugin.plugin_id
+                            );
                         }
                     }
                 }
 
                 (*handle, processor.add_node(Box::new(bus)))
             }
-            NodeInfoDto::Sink { handle, stable_id: _, sink, label, .. } => {
+            NodeInfoDto::Sink {
+                handle,
+                stable_id: _,
+                sink,
+                label,
+                ..
+            } => {
                 let sink_id = crate::audio::sink::SinkId::from(sink.clone());
                 let node = SinkNode::new(sink_id, label.clone());
                 (*handle, processor.add_node(Box::new(node)))
@@ -1307,7 +1402,10 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
         recreated_edges += 1;
     }
 
-    state_log_summary(format!("load_graph_state: recreated_edges={}", recreated_edges));
+    state_log_summary(format!(
+        "load_graph_state: recreated_edges={}",
+        recreated_edges
+    ));
 
     // Ensure capture is running for any non-Prism input devices referenced by the restored graph.
     // We intentionally do NOT fail restore if capture cannot start (device missing, permissions, etc.).
@@ -1410,14 +1508,17 @@ pub async fn persist_state(ui_state: Option<UIStateDto>) -> Result<(), String> {
         state_file.display(),
         state.nodes.len(),
         state.edges.len(),
-        if state.ui_state.is_some() { "yes" } else { "no" }
+        if state.ui_state.is_some() {
+            "yes"
+        } else {
+            "no"
+        }
     ));
 
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
-    fs::write(&state_file, json)
-        .map_err(|e| format!("Failed to write state file: {}", e))?;
+    fs::write(&state_file, json).map_err(|e| format!("Failed to write state file: {}", e))?;
 
     Ok(())
 }
@@ -1428,7 +1529,10 @@ pub async fn persist_state(ui_state: Option<UIStateDto>) -> Result<(), String> {
 pub async fn persist_state_background(ui_state: Option<UIStateDto>) -> Result<(), String> {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = persist_state(ui_state).await {
-            state_log_summary(format!("persist_state_background: persist_state failed: {}", e));
+            state_log_summary(format!(
+                "persist_state_background: persist_state failed: {}",
+                e
+            ));
         }
     });
     Ok(())
@@ -1591,9 +1695,15 @@ pub async fn restore_state() -> Result<Option<UIStateDto>, String> {
             let mut handle_to_stable: HashMap<u32, String> = HashMap::new();
             for node in &state.nodes {
                 match node {
-                    NodeInfoDto::Source { handle, stable_id, .. }
-                    | NodeInfoDto::Bus { handle, stable_id, .. }
-                    | NodeInfoDto::Sink { handle, stable_id, .. } => {
+                    NodeInfoDto::Source {
+                        handle, stable_id, ..
+                    }
+                    | NodeInfoDto::Bus {
+                        handle, stable_id, ..
+                    }
+                    | NodeInfoDto::Sink {
+                        handle, stable_id, ..
+                    } => {
                         let sid = if stable_id.trim().is_empty() {
                             compute_stable_id_for_node(node)
                         } else {
@@ -1608,8 +1718,7 @@ pub async fn restore_state() -> Result<Option<UIStateDto>, String> {
 
             for (h, pos) in ui.node_positions_by_handle.iter() {
                 if let Some(stable_id) = handle_to_stable.get(h) {
-                    ui.node_positions
-                        .insert(stable_id.clone(), pos.clone());
+                    ui.node_positions.insert(stable_id.clone(), pos.clone());
                     converted += 1;
                 }
             }

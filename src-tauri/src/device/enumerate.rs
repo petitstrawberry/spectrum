@@ -3,12 +3,11 @@
 use crate::api::dto::OutputDeviceDto;
 use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name};
 use coreaudio::sys::{
+    kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioDevicePropertyDeviceUID,
     kAudioDevicePropertyScopeOutput, kAudioDevicePropertyStreamConfiguration,
-    kAudioObjectPropertyElementMaster, AudioBuffer, AudioBufferList,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMaster,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, AudioBuffer, AudioBufferList,
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectSystemObject,
-    kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal,
-    kAudioAggregateDevicePropertyActiveSubDeviceList,
 };
 use std::ptr;
 
@@ -21,9 +20,8 @@ pub fn get_device_output_channels(device_id: u32) -> u32 {
     };
 
     let mut size: u32 = 0;
-    let status = unsafe {
-        AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size)
-    };
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size) };
 
     if status != 0 || size == 0 {
         return 0;
@@ -75,8 +73,8 @@ pub fn is_aggregate_device(device_id: u32) -> bool {
 
 /// Get device UID
 fn get_device_uid(device_id: u32) -> Option<String> {
-    use core_foundation::string::CFString;
     use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
 
     let address = AudioObjectPropertyAddress {
         mSelector: kAudioDevicePropertyDeviceUID,
@@ -148,7 +146,7 @@ fn get_icon_hint(uid: &str, transport_type: &TransportType) -> String {
     match uid {
         "BuiltInSpeakerDevice" => return "speaker".to_string(),
         "BuiltInHeadphoneOutputDevice" => return "headphones".to_string(),
-        _ => ()
+        _ => (),
     }
 
     // Check substrings in UID
@@ -396,7 +394,8 @@ fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
     };
 
     let mut size: u32 = 0;
-    let status = unsafe { AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size) };
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size) };
     if status != 0 || size == 0 {
         return Vec::new();
     }
@@ -425,7 +424,12 @@ fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
         let name = get_device_name(id).unwrap_or_else(|_| format!("Device {}", id));
         let channels = get_device_output_channels(id);
 
-        subs.push(SubDeviceInfo { uid, name, channels, original_id: id });
+        subs.push(SubDeviceInfo {
+            uid,
+            name,
+            channels,
+            original_id: id,
+        });
     }
 
     subs

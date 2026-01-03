@@ -31,22 +31,22 @@ impl RingBuffer {
     }
 
     /// Write samples to the buffer (called from input callback)
-    /// 
+    ///
     /// # Safety
     /// This should only be called from a single writer thread.
     pub fn write(&self, samples: &[f32]) {
         let mut pos = self.write_pos.load(Ordering::Acquire);
-        
+
         // Safety: single writer (input callback), multiple readers
         let data_ptr = self.data.as_ptr() as *mut f32;
-        
+
         for &sample in samples {
             unsafe {
                 *data_ptr.add(pos) = sample;
             }
             pos = (pos + 1) % self.size;
         }
-        
+
         self.write_pos.store(pos, Ordering::Release);
     }
 
@@ -54,30 +54,30 @@ impl RingBuffer {
     /// Returns the new read position
     pub fn read(&self, read_pos: usize, out: &mut [f32]) -> usize {
         let write_pos = self.write_pos.load(Ordering::Acquire);
-        
+
         // Normalize read_pos to be within buffer bounds
         let read_pos = read_pos % self.size;
-        
+
         // Calculate available samples
         let available = if write_pos >= read_pos {
             write_pos - read_pos
         } else {
             self.size - read_pos + write_pos
         };
-        
+
         let to_read = out.len().min(available);
         let mut pos = read_pos;
-        
+
         for i in 0..to_read {
             out[i] = self.data[pos];
             pos = (pos + 1) % self.size;
         }
-        
+
         // Fill remaining with silence if not enough samples
         for i in to_read..out.len() {
             out[i] = 0.0;
         }
-        
+
         pos
     }
 
@@ -101,9 +101,7 @@ impl ReadPositions {
     /// Create new read positions for the specified number of channels
     pub fn new(num_channels: usize) -> Self {
         Self {
-            positions: (0..num_channels)
-                .map(|_| AtomicUsize::new(0))
-                .collect(),
+            positions: (0..num_channels).map(|_| AtomicUsize::new(0)).collect(),
         }
     }
 
@@ -148,15 +146,15 @@ mod tests {
     #[test]
     fn test_ring_buffer_write_read() {
         let buffer = RingBuffer::new(1024);
-        
+
         // Write some samples
         let samples: Vec<f32> = (0..256).map(|i| i as f32 / 256.0).collect();
         buffer.write(&samples);
-        
+
         // Read them back
         let mut output = vec![0.0f32; 256];
         let new_pos = buffer.read(0, &mut output);
-        
+
         assert_eq!(new_pos, 256);
         assert_eq!(output[0], 0.0);
         assert!((output[255] - 255.0 / 256.0).abs() < 0.0001);
@@ -165,11 +163,11 @@ mod tests {
     #[test]
     fn test_ring_buffer_wraparound() {
         let buffer = RingBuffer::new(100);
-        
+
         // Write more than buffer size
         let samples: Vec<f32> = (0..150).map(|i| i as f32).collect();
         buffer.write(&samples);
-        
+
         // Write position should have wrapped
         assert_eq!(buffer.write_position(), 50);
     }

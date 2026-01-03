@@ -80,43 +80,19 @@ extern "C" {
     );
 
     // Mean of squares (for RMS calculation)
-    pub fn vDSP_measqv(
-        a: *const f32,
-        stride: vDSP_Stride,
-        result: *mut f32,
-        n: vDSP_Length,
-    );
+    pub fn vDSP_measqv(a: *const f32, stride: vDSP_Stride, result: *mut f32, n: vDSP_Length);
 
     // Maximum value
-    pub fn vDSP_maxv(
-        a: *const f32,
-        stride: vDSP_Stride,
-        result: *mut f32,
-        n: vDSP_Length,
-    );
+    pub fn vDSP_maxv(a: *const f32, stride: vDSP_Stride, result: *mut f32, n: vDSP_Length);
 
     // Maximum magnitude (absolute value)
-    pub fn vDSP_maxmgv(
-        a: *const f32,
-        stride: vDSP_Stride,
-        result: *mut f32,
-        n: vDSP_Length,
-    );
+    pub fn vDSP_maxmgv(a: *const f32, stride: vDSP_Stride, result: *mut f32, n: vDSP_Length);
 
     // Clear (fill with zero)
-    pub fn vDSP_vclr(
-        c: *mut f32,
-        stride: vDSP_Stride,
-        n: vDSP_Length,
-    );
+    pub fn vDSP_vclr(c: *mut f32, stride: vDSP_Stride, n: vDSP_Length);
 
     // Fill with scalar
-    pub fn vDSP_vfill(
-        scalar: *const f32,
-        c: *mut f32,
-        stride: vDSP_Stride,
-        n: vDSP_Length,
-    );
+    pub fn vDSP_vfill(scalar: *const f32, c: *mut f32, stride: vDSP_Stride, n: vDSP_Length);
 
     // Convert decibels to power
     pub fn vDSP_vdbcon(
@@ -151,12 +127,7 @@ impl VDsp {
     /// num_channels: total channels in interleaved data
     /// output: single channel samples
     #[inline]
-    pub fn deinterleave(
-        input: &[f32],
-        channel: usize,
-        num_channels: usize,
-        output: &mut [f32],
-    ) {
+    pub fn deinterleave(input: &[f32], channel: usize, num_channels: usize, output: &mut [f32]) {
         if num_channels == 0 || channel >= num_channels || input.is_empty() || output.is_empty() {
             return;
         }
@@ -189,7 +160,12 @@ impl VDsp {
         }
         let mut mean_sq: f32 = 0.0;
         unsafe {
-            vDSP_measqv(buf.as_ptr().add(offset), stride as i32, &mut mean_sq, actual_count);
+            vDSP_measqv(
+                buf.as_ptr().add(offset),
+                stride as i32,
+                &mut mean_sq,
+                actual_count,
+            );
         }
         mean_sq.sqrt()
     }
@@ -206,7 +182,12 @@ impl VDsp {
         }
         let mut peak: f32 = 0.0;
         unsafe {
-            vDSP_maxmgv(buf.as_ptr().add(offset), stride as i32, &mut peak, actual_count);
+            vDSP_maxmgv(
+                buf.as_ptr().add(offset),
+                stride as i32,
+                &mut peak,
+                actual_count,
+            );
         }
         peak
     }
@@ -226,7 +207,9 @@ impl VDsp {
         if count == 0 || offset >= output.len() {
             return;
         }
-        let actual_count = count.min((output.len() - offset) / stride + 1).min(input.len());
+        let actual_count = count
+            .min((output.len() - offset) / stride + 1)
+            .min(input.len());
         if actual_count == 0 {
             return;
         }
@@ -275,14 +258,7 @@ impl VDsp {
             return;
         }
         unsafe {
-            vDSP_vsmul(
-                buf.as_ptr(),
-                1,
-                &gain,
-                buf.as_mut_ptr(),
-                1,
-                buf.len(),
-            );
+            vDSP_vsmul(buf.as_ptr(), 1, &gain, buf.as_mut_ptr(), 1, buf.len());
         }
     }
 
@@ -305,15 +281,7 @@ impl VDsp {
             return;
         }
         unsafe {
-            vDSP_vadd(
-                a.as_ptr(),
-                1,
-                b.as_ptr(),
-                1,
-                out.as_mut_ptr(),
-                1,
-                len,
-            );
+            vDSP_vadd(a.as_ptr(), 1, b.as_ptr(), 1, out.as_mut_ptr(), 1, len);
         }
     }
 
@@ -371,15 +339,7 @@ impl VDsp {
             return;
         }
         unsafe {
-            vDSP_vclip(
-                buf.as_ptr(),
-                1,
-                &low,
-                &high,
-                buf.as_mut_ptr(),
-                1,
-                buf.len(),
-            );
+            vDSP_vclip(buf.as_ptr(), 1, &low, &high, buf.as_mut_ptr(), 1, buf.len());
         }
     }
 }

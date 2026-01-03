@@ -49,7 +49,9 @@ pub struct ClientRoutingUpdate {
 
 // --- Helper Functions ---
 
-fn send_request<T: for<'de> Deserialize<'de>>(request: &CommandRequest) -> Result<T, Box<dyn Error + Send + Sync>> {
+fn send_request<T: for<'de> Deserialize<'de>>(
+    request: &CommandRequest,
+) -> Result<T, Box<dyn Error + Send + Sync>> {
     let mut stream = UnixStream::connect(PRISMD_SOCKET_PATH)?;
 
     let payload = serde_json::to_string(request)?;
@@ -66,7 +68,10 @@ fn send_request<T: for<'de> Deserialize<'de>>(request: &CommandRequest) -> Resul
     let parsed: RpcResponse<T> = serde_json::from_str(&response)?;
 
     if parsed.status != "ok" {
-        return Err(parsed.message.unwrap_or_else(|| "Unknown error".to_string()).into());
+        return Err(parsed
+            .message
+            .unwrap_or_else(|| "Unknown error".to_string())
+            .into());
     }
 
     parsed.data.ok_or_else(|| "No data in response".into())
@@ -89,28 +94,41 @@ pub async fn get_clients() -> Result<Vec<ClientInfo>, Box<dyn Error + Send + Syn
                 }
             }
         }
-    }).await?
+    })
+    .await?
 }
 
 /// Set routing for a specific PID
-pub async fn set_routing(pid: i32, offset: u32) -> Result<RoutingUpdate, Box<dyn Error + Send + Sync>> {
+pub async fn set_routing(
+    pid: i32,
+    offset: u32,
+) -> Result<RoutingUpdate, Box<dyn Error + Send + Sync>> {
     tokio::task::spawn_blocking(move || {
         send_request::<RoutingUpdate>(&CommandRequest::Set { pid, offset })
-    }).await?
+    })
+    .await?
 }
 
 /// Set routing for all clients of an app
-pub async fn set_app_routing(app_name: String, offset: u32) -> Result<Vec<RoutingUpdate>, Box<dyn Error + Send + Sync>> {
+pub async fn set_app_routing(
+    app_name: String,
+    offset: u32,
+) -> Result<Vec<RoutingUpdate>, Box<dyn Error + Send + Sync>> {
     tokio::task::spawn_blocking(move || {
         send_request::<Vec<RoutingUpdate>>(&CommandRequest::SetApp { app_name, offset })
-    }).await?
+    })
+    .await?
 }
 
 /// Set routing for a specific client ID
-pub async fn set_client_routing(client_id: u32, offset: u32) -> Result<ClientRoutingUpdate, Box<dyn Error + Send + Sync>> {
+pub async fn set_client_routing(
+    client_id: u32,
+    offset: u32,
+) -> Result<ClientRoutingUpdate, Box<dyn Error + Send + Sync>> {
     tokio::task::spawn_blocking(move || {
         send_request::<ClientRoutingUpdate>(&CommandRequest::SetClient { client_id, offset })
-    }).await?
+    })
+    .await?
 }
 
 /// Check if prismd is running
@@ -129,18 +147,17 @@ pub struct ProcessInfo {
 /// Get list of processes from prismd (sync version for UI)
 pub fn get_processes() -> Vec<ProcessInfo> {
     match send_request::<Vec<ClientInfo>>(&CommandRequest::Clients) {
-        Ok(clients) => {
-            clients
-                .into_iter()
-                .map(|c| ProcessInfo {
-                    pid: c.pid as u32,
-                    name: c.responsible_name
-                        .or(c.process_name)
-                        .unwrap_or_else(|| format!("PID {}", c.pid)),
-                    channel_offset: c.channel_offset,
-                })
-                .collect()
-        }
+        Ok(clients) => clients
+            .into_iter()
+            .map(|c| ProcessInfo {
+                pid: c.pid as u32,
+                name: c
+                    .responsible_name
+                    .or(c.process_name)
+                    .unwrap_or_else(|| format!("PID {}", c.pid)),
+                channel_offset: c.channel_offset,
+            })
+            .collect(),
         Err(_) => Vec::new(),
     }
 }

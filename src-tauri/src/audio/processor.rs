@@ -76,7 +76,8 @@ impl GraphProcessor {
         muted: bool,
     ) -> Option<EdgeId> {
         let mut graph = self.graph.write();
-        let edge_id = graph.add_edge_with_params(source, source_port, target, target_port, gain, muted);
+        let edge_id =
+            graph.add_edge_with_params(source, source_port, target, target_port, gain, muted);
         if edge_id.is_some() {
             graph.rebuild_order_if_needed();
             self.update_snapshot(&graph);
@@ -209,10 +210,12 @@ impl GraphProcessor {
                                 SourceId::PrismChannel { channel } => SourceId::PrismChannel {
                                     channel: channel.saturating_add(port_idx as u8),
                                 },
-                                SourceId::InputDevice { device_id, channel } => SourceId::InputDevice {
-                                    device_id: *device_id,
-                                    channel: channel.saturating_add(port_idx as u8),
-                                },
+                                SourceId::InputDevice { device_id, channel } => {
+                                    SourceId::InputDevice {
+                                        device_id: *device_id,
+                                        channel: channel.saturating_add(port_idx as u8),
+                                    }
+                                }
                             };
                             read_source_fn(&source_id, samples);
                             buf.set_valid_frames(frames);
@@ -299,10 +302,12 @@ impl GraphProcessor {
                                 SourceId::PrismChannel { channel } => SourceId::PrismChannel {
                                     channel: channel.saturating_add(port_idx as u8),
                                 },
-                                SourceId::InputDevice { device_id, channel } => SourceId::InputDevice {
-                                    device_id: *device_id,
-                                    channel: channel.saturating_add(port_idx as u8),
-                                },
+                                SourceId::InputDevice { device_id, channel } => {
+                                    SourceId::InputDevice {
+                                        device_id: *device_id,
+                                        channel: channel.saturating_add(port_idx as u8),
+                                    }
+                                }
                             };
                             read_source_fn(&source_id, samples);
                             buf.set_valid_frames(frames);
@@ -380,12 +385,7 @@ impl GraphProcessor {
     }
 
     /// シンクノードの出力を取得（出力コールバック用）
-    pub fn read_sink_output(
-        &self,
-        handle: NodeHandle,
-        channel: usize,
-        output: &mut [f32],
-    ) -> bool {
+    pub fn read_sink_output(&self, handle: NodeHandle, channel: usize, output: &mut [f32]) -> bool {
         // Try to get read access - if locked, return silence
         let Some(graph) = self.graph.try_read() else {
             output.fill(0.0);

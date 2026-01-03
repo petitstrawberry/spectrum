@@ -106,17 +106,11 @@ mod bindings {
             outInstance: *mut AudioComponentInstance,
         ) -> OSStatus;
 
-        pub fn AudioComponentInstanceDispose(
-            inInstance: AudioComponentInstance,
-        ) -> OSStatus;
+        pub fn AudioComponentInstanceDispose(inInstance: AudioComponentInstance) -> OSStatus;
 
-        pub fn AudioUnitInitialize(
-            inUnit: AudioUnit,
-        ) -> OSStatus;
+        pub fn AudioUnitInitialize(inUnit: AudioUnit) -> OSStatus;
 
-        pub fn AudioUnitUninitialize(
-            inUnit: AudioUnit,
-        ) -> OSStatus;
+        pub fn AudioUnitUninitialize(inUnit: AudioUnit) -> OSStatus;
 
         pub fn AudioUnitGetPropertyInfo(
             inUnit: AudioUnit,
@@ -249,8 +243,15 @@ use bindings::*;
 /// Convert FourCC u32 to readable string (e.g., 0x61756678 -> "aufx")
 fn fourcc_to_string(code: u32) -> String {
     let bytes = code.to_be_bytes();
-    bytes.iter()
-        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' })
+    bytes
+        .iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '?'
+            }
+        })
         .collect()
 }
 
@@ -391,7 +392,10 @@ pub fn get_audio_units(category: AudioUnitCategory) -> Vec<AudioUnitInfo> {
             let (manufacturer_name, plugin_name) = if let Some(idx) = name.find(": ") {
                 (name[..idx].to_string(), name[idx + 2..].to_string())
             } else {
-                (manufacturer_to_string(out_desc.componentManufacturer), name.clone())
+                (
+                    manufacturer_to_string(out_desc.componentManufacturer),
+                    name.clone(),
+                )
             };
 
             let id = format!(
@@ -418,7 +422,8 @@ pub fn get_audio_units(category: AudioUnitCategory) -> Vec<AudioUnitInfo> {
 
     // Sort by manufacturer, then by name
     result.sort_by(|a, b| {
-        a.manufacturer.cmp(&b.manufacturer)
+        a.manufacturer
+            .cmp(&b.manufacturer)
             .then_with(|| a.name.cmp(&b.name))
     });
 
@@ -433,7 +438,8 @@ pub fn get_effect_audio_units() -> Vec<AudioUnitInfo> {
 
     // Re-sort after merging
     effects.sort_by(|a, b| {
-        a.manufacturer.cmp(&b.manufacturer)
+        a.manufacturer
+            .cmp(&b.manufacturer)
             .then_with(|| a.name.cmp(&b.name))
     });
 
@@ -486,7 +492,8 @@ unsafe impl RefEncode for AUComponentDescription {
 // CoreFoundation RunLoop functions
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, returnAfterSourceHandled: bool) -> i32;
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, returnAfterSourceHandled: bool)
+        -> i32;
 }
 
 // Grand Central Dispatch (GCD) semaphore functions
@@ -513,8 +520,8 @@ fn resolve_dispatch_symbols() -> Option<(
     unsafe extern "C" fn() -> *mut c_void,
     unsafe extern "C" fn(*mut c_void, *mut c_void),
 )> {
-    use std::ffi::CString;
     use libc::{dlsym, RTLD_DEFAULT};
+    use std::ffi::CString;
 
     unsafe {
         let name1 = CString::new("dispatch_get_main_queue").ok()?;
@@ -621,7 +628,9 @@ unsafe extern "C" fn input_render_callback(
     let io_buffer_list = &mut *io_data;
 
     let required_bytes = in_number_frames * 4; // sizeof(float)
-    let num_channels = io_buffer_list.mNumberBuffers.min(input_buffer_list.mNumberBuffers);
+    let num_channels = io_buffer_list
+        .mNumberBuffers
+        .min(input_buffer_list.mNumberBuffers);
 
     // Copy from our input_buffer_list to AudioUnit's ioData
     for ch in 0..num_channels as usize {
@@ -702,7 +711,20 @@ impl AudioUnitInstance {
         // MUST run on main thread to avoid NSMenu issues with JUCE plugins
         let au_audio_unit = Self::create_au_audio_unit_on_main_thread(info)?;
 
-        println!("[AudioUnit] Created AUAudioUnit instance {:?} for {}", au_audio_unit, info.name);
+        Self::new_with_au(info, instance_id, au_audio_unit)
+    }
+
+    /// Create a new AudioUnit instance with an already-instantiated AUAudioUnit
+    /// This is used internally by async instantiation
+    pub(crate) fn new_with_au(
+        info: &AudioUnitInfo,
+        instance_id: String,
+        au_audio_unit: *mut AnyObject,
+    ) -> Result<Self, String> {
+        println!(
+            "[AudioUnit] Created AUAudioUnit instance {:?} for {}",
+            au_audio_unit, info.name
+        );
 
         Ok(Self {
             au_audio_unit: Some(SendSyncPtr(au_audio_unit)),
@@ -720,8 +742,39 @@ impl AudioUnitInstance {
         })
     }
 
-    /// Create AUAudioUnit instance, ensuring it runs on the main thread
+    /// Create AUAudioUnit instance asynchronously on main thread (non-blocking)
+    /// This is the recommended approach for better UI responsiveness
+    fn create_au_audio_unit_async<F>(info: &AudioUnitInfo, callback: F)
+    where
+        F: FnOnce(Result<*mut AnyObject, String>) + Send + 'static,
+    {
+        let info = info.clone();
+
+        println!(
+            "[AudioUnit] Starting async instantiation for {} on main thread (non-blocking)",
+            info.name
+        );
+
+        // Execute on main queue asynchronously
+        unsafe {
+            let callback_ptr = Box::into_raw(Box::new(callback));
+
+            let block = RcBlock::new(move || {
+                let result = AudioUnitInstance::create_au_audio_unit(&info);
+
+                // Call the callback with the result
+                let callback = Box::from_raw(callback_ptr);
+                callback(result);
+            });
+
+            let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+            let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+        }
+    }
+
+    /// Create AUAudioUnit instance synchronously on main thread (blocking)
     /// This is required because AudioUnit instantiation affects NSMenu event handling
+    /// Use create_au_audio_unit_async for better performance if possible
     fn create_au_audio_unit_on_main_thread(info: &AudioUnitInfo) -> Result<*mut AnyObject, String> {
         // Check if we're already on the main thread
         unsafe {
@@ -732,8 +785,8 @@ impl AudioUnitInstance {
                 return Self::create_au_audio_unit(info);
             }
 
-            // Not on main thread - use performSelectorOnMainThread
-            println!("[AudioUnit] Not on main thread, performing on main thread...");
+            // Not on main thread - dispatch synchronously to main thread
+            println!("[AudioUnit] Synchronously dispatching to main thread (may block UI)...");
 
             // Use a semaphore to wait for completion
             let semaphore = dispatch_semaphore_create(0);
@@ -756,7 +809,7 @@ impl AudioUnitInstance {
 
             // Create a block to execute on main thread
             let block = RcBlock::new(move || {
-                let ctx = unsafe { &mut *context };
+                let ctx = &mut *context;
 
                 ctx.result = Some(AudioUnitInstance::create_au_audio_unit(&ctx.info));
                 dispatch_semaphore_signal(ctx.semaphore);
@@ -807,23 +860,25 @@ impl AudioUnitInstance {
             }
 
             // Create the completion handler block
-            let block = RcBlock::new(move |au_audio_unit: *mut AnyObject, error: *mut AnyObject| {
-                println!("[AudioUnit] Completion handler called!");
-                if !error.is_null() {
-                    println!("[AudioUnit] AUAudioUnit instantiation error");
-                }
+            let block = RcBlock::new(
+                move |au_audio_unit: *mut AnyObject, error: *mut AnyObject| {
+                    println!("[AudioUnit] Completion handler called!");
+                    if !error.is_null() {
+                        println!("[AudioUnit] AUAudioUnit instantiation error");
+                    }
 
-                if !au_audio_unit.is_null() {
-                    // Retain the AUAudioUnit to prevent deallocation
-                    let _: () = msg_send![au_audio_unit, retain];
-                    *result_clone.lock().unwrap() = Some(au_audio_unit);
-                    println!("[AudioUnit] AUAudioUnit retained");
-                }
+                    if !au_audio_unit.is_null() {
+                        // Retain the AUAudioUnit to prevent deallocation
+                        let _: () = msg_send![au_audio_unit, retain];
+                        *result_clone.lock().unwrap() = Some(au_audio_unit);
+                        println!("[AudioUnit] AUAudioUnit retained");
+                    }
 
-                // Signal that completion is done
-                dispatch_semaphore_signal(semaphore);
-                println!("[AudioUnit] Semaphore signaled");
-            });
+                    // Signal that completion is done
+                    dispatch_semaphore_signal(semaphore);
+                    println!("[AudioUnit] Semaphore signaled");
+                },
+            );
 
             // Call instantiateWithComponentDescription:options:completionHandler:
             let _: () = msg_send![
@@ -848,7 +903,10 @@ impl AudioUnitInstance {
 
             match au_audio_unit {
                 Some(au) => {
-                    println!("[AudioUnit] Successfully instantiated AUAudioUnit: {:?}", au);
+                    println!(
+                        "[AudioUnit] Successfully instantiated AUAudioUnit: {:?}",
+                        au
+                    );
                     Ok(au)
                 }
                 None => Err("Failed to instantiate AUAudioUnit".to_string()),
@@ -892,7 +950,10 @@ impl AudioUnitInstance {
             ];
 
             if plist_data.is_null() {
-                println!("[AudioUnit] Failed to serialize fullState for {}", self.info.name);
+                println!(
+                    "[AudioUnit] Failed to serialize fullState for {}",
+                    self.info.name
+                );
                 return None;
             }
 
@@ -906,7 +967,11 @@ impl AudioUnitInstance {
             }
 
             let data = std::slice::from_raw_parts(bytes, length).to_vec();
-            println!("[AudioUnit] Got fullState ({} bytes) for {}", data.len(), self.info.name);
+            println!(
+                "[AudioUnit] Got fullState ({} bytes) for {}",
+                data.len(),
+                self.info.name
+            );
             Some(data)
         }
     }
@@ -953,13 +1018,20 @@ impl AudioUnitInstance {
             ];
 
             if full_state.is_null() {
-                println!("[AudioUnit] Failed to parse plist data for {}", self.info.name);
+                println!(
+                    "[AudioUnit] Failed to parse plist data for {}",
+                    self.info.name
+                );
                 return false;
             }
 
             // Set fullState property
             let _: () = msg_send![au, setFullState: full_state];
-            println!("[AudioUnit] Set fullState ({} bytes) for {}", data.len(), self.info.name);
+            println!(
+                "[AudioUnit] Set fullState ({} bytes) for {}",
+                data.len(),
+                self.info.name
+            );
             true
         }
     }
@@ -968,7 +1040,12 @@ impl AudioUnitInstance {
     /// This uses AUAudioUnit's allocateRenderResources and internalRenderBlock
     /// Must be called before process() with the current sample rate and max frames
     /// NOTE: Must be called from main thread only, never concurrently with process()
-    pub fn configure(&mut self, sample_rate: f64, max_frames: u32, _channels: u32) -> Result<(), String> {
+    pub fn configure(
+        &mut self,
+        sample_rate: f64,
+        max_frames: u32,
+        _channels: u32,
+    ) -> Result<(), String> {
         let au = match self.au_audio_unit {
             Some(SendSyncPtr(au)) if !au.is_null() => au,
             _ => return Err("No AUAudioUnit instance".to_string()),
@@ -978,7 +1055,8 @@ impl AudioUnitInstance {
             // Deallocate existing resources if any
             if self.render_resources_allocated.load(Ordering::Acquire) {
                 let _: () = msg_send![au, deallocateRenderResources];
-                self.render_resources_allocated.store(false, Ordering::Release);
+                self.render_resources_allocated
+                    .store(false, Ordering::Release);
                 *self.render_block.get() = None;
             }
 
@@ -991,10 +1069,7 @@ impl AudioUnitInstance {
 
             // Create AVAudioFormat for stereo non-interleaved float
             let av_audio_format_class = class!(AVAudioFormat);
-            let format: *mut AnyObject = msg_send![
-                av_audio_format_class,
-                alloc
-            ];
+            let format: *mut AnyObject = msg_send![av_audio_format_class, alloc];
             // initStandardFormatWithSampleRate:channels: creates non-interleaved float format
             let format: *mut AnyObject = msg_send![
                 format,
@@ -1009,17 +1084,25 @@ impl AudioUnitInstance {
             // Set format on input bus 0 and ENABLE it
             let input_bus_count: usize = msg_send![input_busses, count];
             if input_bus_count > 0 {
-                let input_bus: *mut AnyObject = msg_send![input_busses, objectAtIndexedSubscript: 0usize];
+                let input_bus: *mut AnyObject =
+                    msg_send![input_busses, objectAtIndexedSubscript: 0usize];
                 if !input_bus.is_null() {
                     // Enable the input bus first - this is REQUIRED for effect plugins
                     let _: () = msg_send![input_bus, setEnabled: true];
 
                     let mut error: *mut AnyObject = std::ptr::null_mut();
-                    let success: bool = msg_send![input_bus, setFormat: format error: &mut error as *mut _];
+                    let success: bool =
+                        msg_send![input_bus, setFormat: format error: &mut error as *mut _];
                     if !success {
-                        println!("[AudioUnit] Warning: Failed to set input format for {}", self.info.name);
+                        println!(
+                            "[AudioUnit] Warning: Failed to set input format for {}",
+                            self.info.name
+                        );
                     } else {
-                        println!("[AudioUnit] Input bus 0 enabled and format set for {}", self.info.name);
+                        println!(
+                            "[AudioUnit] Input bus 0 enabled and format set for {}",
+                            self.info.name
+                        );
                     }
                 }
             }
@@ -1027,12 +1110,17 @@ impl AudioUnitInstance {
             // Set format on output bus 0
             let output_bus_count: usize = msg_send![output_busses, count];
             if output_bus_count > 0 {
-                let output_bus: *mut AnyObject = msg_send![output_busses, objectAtIndexedSubscript: 0usize];
+                let output_bus: *mut AnyObject =
+                    msg_send![output_busses, objectAtIndexedSubscript: 0usize];
                 if !output_bus.is_null() {
                     let mut error: *mut AnyObject = std::ptr::null_mut();
-                    let success: bool = msg_send![output_bus, setFormat: format error: &mut error as *mut _];
+                    let success: bool =
+                        msg_send![output_bus, setFormat: format error: &mut error as *mut _];
                     if !success {
-                        println!("[AudioUnit] Warning: Failed to set output format for {}", self.info.name);
+                        println!(
+                            "[AudioUnit] Warning: Failed to set output format for {}",
+                            self.info.name
+                        );
                     }
                 }
             }
@@ -1042,7 +1130,8 @@ impl AudioUnitInstance {
 
             // Allocate render resources
             let mut error: *mut AnyObject = std::ptr::null_mut();
-            let success: bool = msg_send![au, allocateRenderResourcesAndReturnError: &mut error as *mut _];
+            let success: bool =
+                msg_send![au, allocateRenderResourcesAndReturnError: &mut error as *mut _];
 
             if !success {
                 let error_desc: *mut AnyObject = if !error.is_null() {
@@ -1078,10 +1167,13 @@ impl AudioUnitInstance {
 
             // SAFETY: configure is called from main thread only, never concurrently with process
             *self.render_block.get() = Some(render_block);
-            self.render_resources_allocated.store(true, Ordering::Release);
+            self.render_resources_allocated
+                .store(true, Ordering::Release);
 
-            println!("[AudioUnit] Configured {} @ {}Hz, {} frames (AUv3 API, renderBlock={:?})",
-                self.info.name, sample_rate, max_frames, render_block);
+            println!(
+                "[AudioUnit] Configured {} @ {}Hz, {} frames (AUv3 API, renderBlock={:?})",
+                self.info.name, sample_rate, max_frames, render_block
+            );
             Ok(())
         }
     }
@@ -1091,7 +1183,12 @@ impl AudioUnitInstance {
     /// Zero-copy output: output buffers point directly to caller's buffers
     /// SAFETY: Only called from audio thread, never concurrently
     #[inline]
-    pub fn process(&self, left: &mut [f32], right: &mut [f32], _sample_time: f64) -> Result<(), String> {
+    pub fn process(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        _sample_time: f64,
+    ) -> Result<(), String> {
         if !self.enabled.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -1127,11 +1224,9 @@ impl AudioUnitInstance {
             );
 
             // Set up output buffer list pointing directly to caller's buffers (zero-copy output)
-            state.output_buffer_list.set_buffers(
-                left.as_mut_ptr(),
-                right.as_mut_ptr(),
-                frames,
-            );
+            state
+                .output_buffer_list
+                .set_buffers(left.as_mut_ptr(), right.as_mut_ptr(), frames);
 
             // Minimal timestamp - only sample time is needed
             let timestamp = AudioTimeStamp {
@@ -1153,9 +1248,12 @@ impl AudioUnitInstance {
             }
 
             type PullInputBlockFn = unsafe extern "C" fn(
-                block: *const PullInputBlockWithCapture, action_flags: *mut u32,
-                timestamp: *const AudioTimeStamp, frame_count: u32,
-                input_bus: i64, input_data: *mut AudioBufferList,
+                block: *const PullInputBlockWithCapture,
+                action_flags: *mut u32,
+                timestamp: *const AudioTimeStamp,
+                frame_count: u32,
+                input_bus: i64,
+                input_data: *mut AudioBufferList,
             ) -> i32;
 
             // Block WITH captured variable (input buffer pointer)
@@ -1172,13 +1270,18 @@ impl AudioUnitInstance {
 
             // Pull callback that reads captured pointer from block
             unsafe extern "C" fn pull_input_callback(
-                block: *const PullInputBlockWithCapture, action_flags: *mut u32,
-                _timestamp: *const AudioTimeStamp, frame_count: u32,
-                _input_bus: i64, input_data: *mut AudioBufferList,
+                block: *const PullInputBlockWithCapture,
+                action_flags: *mut u32,
+                _timestamp: *const AudioTimeStamp,
+                frame_count: u32,
+                _input_bus: i64,
+                input_data: *mut AudioBufferList,
             ) -> i32 {
                 // Read input buffer pointer from captured variable in block
                 let src = (*block).input_buffer;
-                if input_data.is_null() || src.is_null() { return 0; }
+                if input_data.is_null() || src.is_null() {
+                    return 0;
+                }
 
                 // DEBUG logging disabled for performance
                 // static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = ...;
@@ -1199,19 +1302,28 @@ impl AudioUnitInstance {
                     let s = &*src_buffers.add(i);
                     let d = &mut *dst_buffers.add(i);
                     if !s.mData.is_null() && !d.mData.is_null() && d.mDataByteSize >= bytes as u32 {
-                        std::ptr::copy_nonoverlapping(s.mData as *const u8, d.mData as *mut u8, bytes);
+                        std::ptr::copy_nonoverlapping(
+                            s.mData as *const u8,
+                            d.mData as *mut u8,
+                            bytes,
+                        );
                     }
                 }
 
-                if !action_flags.is_null() { *action_flags = 0; }
+                if !action_flags.is_null() {
+                    *action_flags = 0;
+                }
                 0
             }
 
             static BLOCK_DESC: BlockDescriptor = BlockDescriptor {
-                reserved: 0, size: std::mem::size_of::<PullInputBlockWithCapture>() as u64,
+                reserved: 0,
+                size: std::mem::size_of::<PullInputBlockWithCapture>() as u64,
             };
 
-            extern "C" { static _NSConcreteStackBlock: *const c_void; }
+            extern "C" {
+                static _NSConcreteStackBlock: *const c_void;
+            }
 
             // Create block with captured input buffer pointer
             // Stack block is valid for duration of this function call
@@ -1227,11 +1339,16 @@ impl AudioUnitInstance {
             // RenderBlock structure
             #[repr(C)]
             struct RenderBlock {
-                isa: *const c_void, flags: i32, reserved: i32,
+                isa: *const c_void,
+                flags: i32,
+                reserved: i32,
                 invoke: unsafe extern "C" fn(
-                    block: *const RenderBlock, action_flags: *mut u32,
-                    timestamp: *const AudioTimeStamp, frame_count: u32,
-                    output_bus: i64, output_data: *mut AudioBufferList,
+                    block: *const RenderBlock,
+                    action_flags: *mut u32,
+                    timestamp: *const AudioTimeStamp,
+                    frame_count: u32,
+                    output_bus: i64,
+                    output_data: *mut AudioBufferList,
                     pull_input_block: *const PullInputBlockWithCapture,
                 ) -> i32,
             }
@@ -1261,7 +1378,8 @@ impl AudioUnitInstance {
             }
 
             // DEBUG: Check output buffer state after render
-            static DEBUG_OUTPUT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            static DEBUG_OUTPUT_COUNTER: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
             let out_count = DEBUG_OUTPUT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             // Check if AudioUnit replaced output buffer pointers
@@ -1325,7 +1443,8 @@ impl AudioUnitInstance {
             return Ok(());
         }
 
-        let frames = input_left.len()
+        let frames = input_left
+            .len()
             .min(input_right.len())
             .min(output_left.len())
             .min(output_right.len()) as u32;
@@ -1386,7 +1505,8 @@ impl Drop for AudioUnitInstance {
 pub struct AudioUnitManager {
     /// Instances by ID - outer lock only for add/remove (never on audio thread)
     /// Inner Arc<AudioUnitInstance> has no locks, process() takes &self
-    instances: RwLock<HashMap<String, Arc<AudioUnitInstance>>>,
+    /// Wrapped in Arc to allow cloning in async operations
+    instances: Arc<RwLock<HashMap<String, Arc<AudioUnitInstance>>>>,
     /// Counter for unique instance IDs
     counter: std::sync::atomic::AtomicU64,
 }
@@ -1394,7 +1514,7 @@ pub struct AudioUnitManager {
 impl AudioUnitManager {
     pub fn new() -> Self {
         Self {
-            instances: RwLock::new(HashMap::new()),
+            instances: Arc::new(RwLock::new(HashMap::new())),
             counter: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -1403,7 +1523,9 @@ impl AudioUnitManager {
     /// NOTE: Called from main thread only, never from audio thread
     /// Automatically configures the instance for 48kHz stereo processing
     pub fn create_instance(&self, info: &AudioUnitInfo) -> Result<String, String> {
-        let id = self.counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let instance_id = format!("au_{}", id);
 
         let mut instance = AudioUnitInstance::new(info, instance_id.clone())?;
@@ -1411,16 +1533,82 @@ impl AudioUnitManager {
         // Pre-configure the instance for audio processing. This is a critical step.
         instance.configure(48000.0, 1024, 2)?;
 
-        self.instances.write().insert(
-            instance_id.clone(),
-            Arc::new(instance),
-        );
+        self.instances
+            .write()
+            .insert(instance_id.clone(), Arc::new(instance));
 
         // Debug log: instance created and current count
         let count = self.instances.read().len();
-        println!("[AudioUnit] create_instance -> {} (total={})", instance_id, count);
+        println!(
+            "[AudioUnit] create_instance -> {} (total={})",
+            instance_id, count
+        );
 
         Ok(instance_id)
+    }
+
+    /// Create a new AudioUnit instance asynchronously (non-blocking, better UI responsiveness)
+    /// NOTE: Called from main thread only, never from audio thread
+    /// Automatically configures the instance for 48kHz stereo processing
+    /// The callback will be called with the result once instantiation completes
+    pub fn create_instance_async<F>(&self, info: &AudioUnitInfo, callback: F)
+    where
+        F: FnOnce(Result<String, String>) + Send + 'static,
+    {
+        let id = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let instance_id = format!("au_{}", id);
+
+        let instances = self.instances.clone();
+        let info_clone = info.clone();
+        let info_clone2 = info.clone(); // Clone again for the closure
+        let instance_id_clone = instance_id.clone();
+
+        // Start async instantiation
+        AudioUnitInstance::create_au_audio_unit_async(&info_clone, move |result| {
+            match result {
+                Ok(au_audio_unit) => {
+                    // Create instance with the AU
+                    match AudioUnitInstance::new_with_au(
+                        &info_clone2,
+                        instance_id_clone.clone(),
+                        au_audio_unit,
+                    ) {
+                        Ok(mut instance) => {
+                            // Pre-configure the instance
+                            match instance.configure(48000.0, 1024, 2) {
+                                Ok(()) => {
+                                    instances
+                                        .write()
+                                        .insert(instance_id_clone.clone(), Arc::new(instance));
+
+                                    let count = instances.read().len();
+                                    println!(
+                                        "[AudioUnit] create_instance_async -> {} (total={})",
+                                        instance_id_clone, count
+                                    );
+
+                                    callback(Ok(instance_id_clone));
+                                }
+                                Err(e) => {
+                                    println!("[AudioUnit] Failed to configure instance: {}", e);
+                                    callback(Err(e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("[AudioUnit] Failed to create instance: {}", e);
+                            callback(Err(e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("[AudioUnit] Failed to instantiate AU: {}", e);
+                    callback(Err(e));
+                }
+            }
+        });
     }
 
     /// Get an instance by ID (for UI and configuration - not audio thread)
@@ -1436,7 +1624,10 @@ impl AudioUnitManager {
         let removed = self.instances.write().remove(id).is_some();
         if removed {
             let count = self.instances.read().len();
-            println!("[AudioUnit] remove_instance -> {} (remaining={})", id, count);
+            println!(
+                "[AudioUnit] remove_instance -> {} (remaining={})",
+                id, count
+            );
         } else {
             println!("[AudioUnit] remove_instance -> {} (not found)", id);
         }
@@ -1473,9 +1664,15 @@ impl AudioUnitManager {
 
     /// List all instances
     pub fn list_instances(&self) -> Vec<(String, AudioUnitInfo, bool)> {
-        self.instances.read().iter()
+        self.instances
+            .read()
+            .iter()
             .map(|(id, inst)| {
-                (id.clone(), inst.info.clone(), inst.enabled.load(Ordering::Relaxed))
+                (
+                    id.clone(),
+                    inst.info.clone(),
+                    inst.enabled.load(Ordering::Relaxed),
+                )
             })
             .collect()
     }
@@ -1546,11 +1743,14 @@ impl AudioUnitManager {
 
     /// Collect current fullState data for all instances
     /// Returns a map from instance_id -> Option<Vec<u8>> (None if no state)
-    pub fn collect_all_instance_states(&self) -> std::collections::HashMap<String, Option<Vec<u8>>> {
+    pub fn collect_all_instance_states(
+        &self,
+    ) -> std::collections::HashMap<String, Option<Vec<u8>>> {
         use std::sync::{Arc, Mutex};
 
         // Result container shared between threads
-        let result: Arc<Mutex<std::collections::HashMap<String, Option<Vec<u8>>>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let result: Arc<Mutex<std::collections::HashMap<String, Option<Vec<u8>>>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
         let result_for_block = Arc::clone(&result);
         let result_for_fallback = Arc::clone(&result);
 
@@ -1581,7 +1781,10 @@ impl AudioUnitManager {
             let instances = mgr.instances.read();
             for (id, inst) in instances.iter() {
                 let state = inst.get_full_state();
-                result_for_fallback.lock().unwrap().insert(id.clone(), state);
+                result_for_fallback
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), state);
             }
         }
 

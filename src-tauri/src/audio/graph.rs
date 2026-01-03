@@ -276,9 +276,10 @@ impl AudioGraph {
             }
             if let Some(deg) = in_degree.get_mut(&edge.target) {
                 // Only count if not already counted (avoid double counting for multi-port edges)
-                let already_counted = self.edges.iter().any(|e| {
-                    e.source == edge.source && e.target == edge.target && e.id != edge.id
-                });
+                let already_counted = self
+                    .edges
+                    .iter()
+                    .any(|e| e.source == edge.source && e.target == edge.target && e.id != edge.id);
                 if !already_counted {
                     *deg += 1;
                 }

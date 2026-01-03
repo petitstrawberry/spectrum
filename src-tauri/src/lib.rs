@@ -8,20 +8,20 @@
 // v2 Modules (New Architecture)
 // =============================================================================
 
-pub mod audio;      // AudioGraph, AudioNode, Edge, Meters
-pub mod api;        // Tauri commands and DTOs
-pub mod capture;    // Input audio capture
-pub mod device;     // Device enumeration
+pub mod api; // Tauri commands and DTOs
+pub mod audio; // AudioGraph, AudioNode, Edge, Meters
+pub mod capture; // Input audio capture
+pub mod device; // Device enumeration
 
 // =============================================================================
 // Legacy Modules (To be deprecated/refactored)
 // =============================================================================
 
-mod audio_capture;  // Legacy capture (wrapped by capture module)
-mod audio_unit;     // AudioUnit plugin management
-mod audio_unit_ui;  // AudioUnit UI
-pub mod prismd;     // Prism daemon communication
-mod vdsp;           // vDSP hardware acceleration
+mod audio_capture; // Legacy capture (wrapped by capture module)
+mod audio_unit; // AudioUnit plugin management
+mod audio_unit_ui; // AudioUnit UI
+pub mod prismd; // Prism daemon communication
+mod vdsp; // vDSP hardware acceleration
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,54 +100,54 @@ pub use api::get_output_devices;
 pub use api::get_prism_status;
 
 // Graph Commands
-pub use api::add_source_node;
 pub use api::add_bus_node;
-pub use api::add_sink_node;
-pub use api::remove_node;
 pub use api::add_edge;
-pub use api::remove_edge;
+pub use api::add_sink_node;
+pub use api::add_source_node;
 pub use api::get_graph;
+pub use api::remove_edge;
+pub use api::remove_node;
 
 // Edge Commands (Hot Path)
 pub use api::set_edge_gain;
-pub use api::set_edge_muted;
 pub use api::set_edge_gains_batch;
+pub use api::set_edge_muted;
 
 // Plugin Commands
-pub use api::get_available_plugins;
 pub use api::add_plugin_to_bus;
+pub use api::close_plugin_ui;
+pub use api::get_available_plugins;
+pub use api::open_plugin_ui;
 pub use api::remove_plugin_from_bus;
 pub use api::reorder_plugins;
 pub use api::set_plugin_enabled;
-pub use api::open_plugin_ui;
-pub use api::close_plugin_ui;
 
 // Meter Commands
+pub use api::get_edge_meters;
 pub use api::get_meters;
 pub use api::get_node_meters;
-pub use api::get_edge_meters;
 
 // State Commands
-pub use api::save_graph_state;
 pub use api::load_graph_state;
 pub use api::persist_state;
 pub use api::persist_state_background;
 pub use api::restore_state;
+pub use api::save_graph_state;
 pub use api::set_ui_state_cache;
 
 // System Commands
-pub use api::start_audio;
-pub use api::stop_audio;
-pub use api::stop_output_runtime;
+pub use api::get_app_icon_by_pid;
 pub use api::get_system_status;
 pub use api::open_prism_app;
 pub use api::set_buffer_size;
-pub use api::get_app_icon_by_pid;
+pub use api::start_audio;
+pub use api::stop_audio;
+pub use api::stop_output_runtime;
 // Output runtime
 pub use api::get_output_runtime;
 // Output master
-pub use api::set_output_gain;
 pub use api::set_output_channel_gain;
+pub use api::set_output_gain;
 
 // =============================================================================
 // Legacy Commands (For backward compatibility)
@@ -346,7 +346,10 @@ pub fn run() {
 
                 // Start capture first so the initial output can render actual audio.
                 if let Err(e) = crate::capture::start_capture() {
-                    eprintln!("[Spectrum] Warning: Failed to start capture on startup: {}", e);
+                    eprintln!(
+                        "[Spectrum] Warning: Failed to start capture on startup: {}",
+                        e
+                    );
                 }
 
                 // Find preferred output device (aggregate or system default)
@@ -361,7 +364,10 @@ pub fn run() {
                             );
                         }
                         Err(e) => {
-                            eprintln!("[Spectrum] Warning: Failed to initialize audio engine: {}", e);
+                            eprintln!(
+                                "[Spectrum] Warning: Failed to initialize audio engine: {}",
+                                e
+                            );
                             eprintln!("[Spectrum] The app will start without audio output.");
 
                             // Best-effort cleanup if output fails.

@@ -51,7 +51,12 @@ impl SourceNode {
     }
 
     /// Create a new source node for an external input device with specified channel count
-    pub fn new_device_with_channels(device_id: u32, channel: u8, label: impl Into<String>, channel_count: usize) -> Self {
+    pub fn new_device_with_channels(
+        device_id: u32,
+        channel: u8,
+        label: impl Into<String>,
+        channel_count: usize,
+    ) -> Self {
         Self {
             source_id: SourceId::InputDevice { device_id, channel },
             label: label.into(),

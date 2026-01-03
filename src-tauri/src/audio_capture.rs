@@ -23,9 +23,8 @@ use coreaudio::audio_unit::macos_helpers::{
 };
 use coreaudio::sys::{
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyScopeInput,
-    kAudioDevicePropertyStreamConfiguration,
-    kAudioObjectPropertyElementMaster, AudioBuffer, AudioBufferList,
-    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+    kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyElementMaster, AudioBuffer,
+    AudioBufferList, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData,
 };
 use parking_lot::RwLock;
@@ -56,11 +55,12 @@ const DEFAULT_IO_BUFFER_SIZE: usize = 256;
 static IO_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_SIZE);
 
 /// Shared level data - updated from audio thread (legacy Prism support)
-static LEVEL_DATA: RwLock<[ChannelLevels; STEREO_PAIRS]> =
-    RwLock::new([ChannelLevels {
+static LEVEL_DATA: RwLock<[ChannelLevels; STEREO_PAIRS]> = RwLock::new(
+    [ChannelLevels {
         left_peak: 0.0,
         right_peak: 0.0,
-    }; STEREO_PAIRS]);
+    }; STEREO_PAIRS],
+);
 
 /// Whether Prism audio capture is running (legacy)
 static CAPTURE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -80,9 +80,7 @@ struct OutputReadPositions {
 
 impl OutputReadPositions {
     fn new(num_channels: usize) -> Self {
-        let positions = (0..num_channels)
-            .map(|_| AtomicUsize::new(0))
-            .collect();
+        let positions = (0..num_channels).map(|_| AtomicUsize::new(0)).collect();
         Self { positions }
     }
 
@@ -134,7 +132,10 @@ impl InputDeviceState {
             is_prism,
             running: Arc::new(AtomicBool::new(false)),
             buffers: Arc::new(RwLock::new(DeviceBuffers::new(channel_count))),
-            levels: Arc::new(RwLock::new(vec![ChannelLevels::default(); level_slots.max(1)])),
+            levels: Arc::new(RwLock::new(vec![
+                ChannelLevels::default();
+                level_slots.max(1)
+            ])),
             read_positions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -270,7 +271,10 @@ impl AudioBuffers {
         let channels = (0..num_channels)
             .map(|_| ChannelBuffer::new(buffer_size))
             .collect();
-        Self { channels, buffer_size }
+        Self {
+            channels,
+            buffer_size,
+        }
     }
 }
 
@@ -289,8 +293,12 @@ fn init_audio_buffers() {
     let mut buffers = AUDIO_BUFFERS.write();
     if buffers.is_none() {
         *buffers = Some(AudioBuffers::new(PRISM_CHANNELS, RING_BUFFER_SIZE));
-        println!("[AudioCapture] Ring buffers initialized: {} channels x {} samples ({:.1}ms at 48kHz)",
-                 PRISM_CHANNELS, RING_BUFFER_SIZE, RING_BUFFER_SIZE as f64 / 48.0);
+        println!(
+            "[AudioCapture] Ring buffers initialized: {} channels x {} samples ({:.1}ms at 48kHz)",
+            PRISM_CHANNELS,
+            RING_BUFFER_SIZE,
+            RING_BUFFER_SIZE as f64 / 48.0
+        );
     }
 }
 
@@ -317,8 +325,12 @@ fn set_device_buffer_size(device_id: u32, buffer_size: u32) -> Result<(), String
         return Err(format!("Failed to set buffer size: OSStatus {}", status));
     }
 
-    println!("[AudioCapture] Device {} I/O buffer size set to {} samples ({:.1}ms)",
-             device_id, buffer_size, buffer_size as f64 / 48.0);
+    println!(
+        "[AudioCapture] Device {} I/O buffer size set to {} samples ({:.1}ms)",
+        device_id,
+        buffer_size,
+        buffer_size as f64 / 48.0
+    );
     Ok(())
 }
 
@@ -380,9 +392,8 @@ pub fn get_device_input_channels(device_id: u32) -> u32 {
     };
 
     let mut size: u32 = 0;
-    let status = unsafe {
-        AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size)
-    };
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(device_id, &address, 0, ptr::null(), &mut size) };
 
     if status != 0 || size == 0 {
         return 0;
@@ -424,11 +435,14 @@ pub fn get_device_input_channels(device_id: u32) -> u32 {
 
 /// Audio capture thread function
 fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
-    use coreaudio::audio_unit::{AudioUnit, Element, SampleFormat, Scope, StreamFormat};
     use coreaudio::audio_unit::audio_format::LinearPcmFlags;
     use coreaudio::audio_unit::render_callback::{self, data};
+    use coreaudio::audio_unit::{AudioUnit, Element, SampleFormat, Scope, StreamFormat};
 
-    println!("[AudioCapture] Starting capture thread for device {}", device_id);
+    println!(
+        "[AudioCapture] Starting capture thread for device {}",
+        device_id
+    );
 
     // Set sample rate
     if let Err(e) = set_device_sample_rate(device_id, SAMPLE_RATE) {
@@ -438,13 +452,19 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
     // Set I/O buffer size (affects latency)
     let io_buffer_size = IO_BUFFER_SIZE.load(Ordering::SeqCst) as u32;
     if let Err(e) = set_device_buffer_size(device_id, io_buffer_size) {
-        println!("[AudioCapture] Warning: Could not set I/O buffer size: {}", e);
+        println!(
+            "[AudioCapture] Warning: Could not set I/O buffer size: {}",
+            e
+        );
     }
 
     // Report actual buffer size
     if let Some(actual_size) = get_device_buffer_size(device_id) {
-        println!("[AudioCapture] Actual device buffer size: {} samples ({:.1}ms)",
-                 actual_size, actual_size as f64 / 48.0);
+        println!(
+            "[AudioCapture] Actual device buffer size: {} samples ({:.1}ms)",
+            actual_size,
+            actual_size as f64 / 48.0
+        );
     }
 
     // Create HAL audio unit for input
@@ -533,7 +553,9 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
             return Ok(());
         }
 
-        let Args { data, num_frames, .. } = args;
+        let Args {
+            data, num_frames, ..
+        } = args;
         let buffer = data.buffer;
 
         let frames = num_frames as usize;
@@ -620,8 +642,11 @@ fn capture_thread(device_id: u32, running: Arc<AtomicBool>) {
 pub fn set_io_buffer_size(size: usize) {
     let size = size.max(32).min(2048);
     IO_BUFFER_SIZE.store(size, Ordering::SeqCst);
-    println!("[AudioCapture] I/O buffer size set to {} samples ({:.1}ms at 48kHz)",
-             size, size as f64 / 48.0);
+    println!(
+        "[AudioCapture] I/O buffer size set to {} samples ({:.1}ms at 48kHz)",
+        size,
+        size as f64 / 48.0
+    );
 }
 
 /// Get current I/O buffer size setting
@@ -723,14 +748,26 @@ pub fn register_output_device(device_id: u32) {
         let mut positions = DEVICE_READ_POSITIONS.write();
         if !positions.contains_key(&device_id) {
             // Get current write positions for each channel
-            let write_positions: Vec<usize> = audio_buffers.channels.iter()
+            let write_positions: Vec<usize> = audio_buffers
+                .channels
+                .iter()
                 .map(|ch| ch.get_write_pos())
                 .collect();
 
             // Create lock-free position storage starting at current write position
             let num_channels = audio_buffers.channels.len();
-            positions.insert(device_id, Arc::new(OutputReadPositions::new_at_position(num_channels, &write_positions)));
-            println!("[AudioCapture] Registered output device {} for reading at write_pos[0]={}", device_id, write_positions.get(0).unwrap_or(&0));
+            positions.insert(
+                device_id,
+                Arc::new(OutputReadPositions::new_at_position(
+                    num_channels,
+                    &write_positions,
+                )),
+            );
+            println!(
+                "[AudioCapture] Registered output device {} for reading at write_pos[0]={}",
+                device_id,
+                write_positions.get(0).unwrap_or(&0)
+            );
         }
     }
 }
@@ -1006,10 +1043,14 @@ fn generic_capture_thread(state: Arc<InputDeviceState>) {
                 // Use vDSP strided operations directly on interleaved buffer
                 let left_peak = if left_ch < num_channels {
                     VDsp::peak_strided(buffer, left_ch, num_channels, frames)
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let right_peak = if right_ch < num_channels {
                     VDsp::peak_strided(buffer, right_ch, num_channels, frames)
-                } else { left_peak };
+                } else {
+                    left_peak
+                };
 
                 let old = device_levels[slot];
 
@@ -1177,7 +1218,14 @@ pub fn get_active_captures() -> Vec<(u32, String, usize, bool)> {
     devices
         .values()
         .filter(|s| s.running.load(Ordering::SeqCst))
-        .map(|s| (s.device_id, s.device_name.clone(), s.channel_count, s.is_prism))
+        .map(|s| {
+            (
+                s.device_id,
+                s.device_name.clone(),
+                s.channel_count,
+                s.is_prism,
+            )
+        })
         .collect()
 }
 

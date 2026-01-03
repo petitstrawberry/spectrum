@@ -10,20 +10,21 @@
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{class, msg_send, MainThreadOnly, Encode, Encoding, RefEncode};
-use objc2_app_kit::{NSWindow, NSWindowStyleMask, NSApplication, NSBackingStoreType};
-use objc2_foundation::{NSRect, NSPoint, NSSize, NSString, MainThreadMarker};
+use objc2::{class, msg_send, Encode, Encoding, MainThreadOnly, RefEncode};
+use objc2_app_kit::{NSApplication, NSBackingStoreType, NSWindow, NSWindowStyleMask};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::cell::RefCell;
-use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 // CoreFoundation RunLoop functions
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRunLoopGetCurrent() -> *mut c_void;
-    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, returnAfterSourceHandled: bool) -> i32;
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, returnAfterSourceHandled: bool)
+        -> i32;
 }
 
 // kCFRunLoopDefaultMode constant
@@ -208,7 +209,10 @@ fn release_view_controller(vc: *mut AnyObject) {
 }
 
 fn remove_view_size_observer(instance_id: &str) {
-    let tokens = PLUGIN_VIEW_SIZE_OBSERVERS.write().unwrap().remove(instance_id);
+    let tokens = PLUGIN_VIEW_SIZE_OBSERVERS
+        .write()
+        .unwrap()
+        .remove(instance_id);
     let Some(tokens) = tokens else {
         return;
     };
@@ -255,7 +259,9 @@ fn sync_window_content_size_to_view(window: &NSWindow, view: *mut AnyObject) {
         if !content_view.is_null() {
             let cv_frame: NSRect = msg_send![content_view, frame];
             // Avoid re-entrant resize loops for tiny deltas.
-            if (cv_frame.size.width - width).abs() < 0.5 && (cv_frame.size.height - height).abs() < 0.5 {
+            if (cv_frame.size.width - width).abs() < 0.5
+                && (cv_frame.size.height - height).abs() < 0.5
+            {
                 return;
             }
         }
@@ -291,7 +297,12 @@ fn sync_fixed_window_to_view(window: &NSWindow, instance_id: &str, view: *mut An
         let mut width = 0.0;
         let mut height = 0.0;
 
-        if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+        if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS
+            .read()
+            .unwrap()
+            .get(instance_id)
+            .copied()
+        {
             if !vc.is_null() {
                 let preferred: NSSize = msg_send![vc, preferredContentSize];
                 if preferred.width > 10.0 && preferred.height > 10.0 {
@@ -348,7 +359,9 @@ fn sync_fixed_window_to_view(window: &NSWindow, instance_id: &str, view: *mut An
         let content_view: *mut AnyObject = msg_send![window, contentView];
         if !content_view.is_null() {
             let cv_frame: NSRect = msg_send![content_view, frame];
-            if (cv_frame.size.width - width).abs() < 0.5 && (cv_frame.size.height - height).abs() < 0.5 {
+            if (cv_frame.size.width - width).abs() < 0.5
+                && (cv_frame.size.height - height).abs() < 0.5
+            {
                 // Still enforce non-resizable + fixed constraints.
                 set_window_resizable(window, false);
                 set_window_fixed_content_size(window, cv_frame.size.width, cv_frame.size.height);
@@ -486,7 +499,11 @@ fn install_view_size_observer(instance_id: &str, window_number: isize, view: *mu
     }
 }
 
-fn calibrate_view_resizability(window: &NSWindow, container_view: *mut AnyObject, view: *mut AnyObject) -> bool {
+fn calibrate_view_resizability(
+    window: &NSWindow,
+    container_view: *mut AnyObject,
+    view: *mut AnyObject,
+) -> bool {
     if view.is_null() {
         return false;
     }
@@ -537,7 +554,10 @@ fn defer_release_view_controller(instance_id: &str, vc: *mut AnyObject) {
     unsafe {
         let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
         let block = RcBlock::new(move || {
-            println!("[AudioUnit] Releasing cached view controller for {}", instance_id);
+            println!(
+                "[AudioUnit] Releasing cached view controller for {}",
+                instance_id
+            );
             release_view_controller(vc);
         });
         let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
@@ -606,7 +626,12 @@ pub fn open_audio_unit_ui(
             let mut width = 0.0;
             let mut height = 0.0;
 
-            if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+            if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS
+                .read()
+                .unwrap()
+                .get(instance_id)
+                .copied()
+            {
                 if !vc.is_null() {
                     let preferred: NSSize = msg_send![vc, preferredContentSize];
                     if preferred.width > 10.0 && preferred.height > 10.0 {
@@ -659,9 +684,8 @@ pub fn open_audio_unit_ui(
         NSSize::new(window_width, window_height),
     );
 
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable;
+    let style =
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
 
     let window = unsafe {
         // Use NSPanel instead of NSWindow. NSPanel is better suited for floating/utility windows
@@ -775,7 +799,8 @@ pub fn open_audio_unit_ui(
             let c1: *mut AnyObject = msg_send![leading_anchor, constraintEqualToAnchor: c_leading];
             let _: () = msg_send![c1, setActive: true];
 
-            let c2: *mut AnyObject = msg_send![trailing_anchor, constraintEqualToAnchor: c_trailing];
+            let c2: *mut AnyObject =
+                msg_send![trailing_anchor, constraintEqualToAnchor: c_trailing];
             let _: () = msg_send![c2, setActive: true];
 
             let c3: *mut AnyObject = msg_send![top_anchor, constraintEqualToAnchor: c_top];
@@ -789,8 +814,10 @@ pub fn open_audio_unit_ui(
             let orient_h: isize = 0; // Horizontal
             let orient_v: isize = 1; // Vertical
 
-            let _: () = msg_send![au_view, setContentHuggingPriority: priority, forOrientation: orient_h];
-            let _: () = msg_send![au_view, setContentHuggingPriority: priority, forOrientation: orient_v];
+            let _: () =
+                msg_send![au_view, setContentHuggingPriority: priority, forOrientation: orient_h];
+            let _: () =
+                msg_send![au_view, setContentHuggingPriority: priority, forOrientation: orient_v];
 
             let _: () = msg_send![au_view, setContentCompressionResistancePriority: priority, forOrientation: orient_h];
             let _: () = msg_send![au_view, setContentCompressionResistancePriority: priority, forOrientation: orient_v];
@@ -826,15 +853,20 @@ pub fn open_audio_unit_ui(
 
     // Store window number (not the window itself, as it's not Sync)
     let window_number = window.windowNumber();
-    PLUGIN_WINDOW_NUMBERS.write().unwrap().insert(instance_id.to_string(), window_number);
+    PLUGIN_WINDOW_NUMBERS
+        .write()
+        .unwrap()
+        .insert(instance_id.to_string(), window_number);
 
     // Keep a strong reference to the window while it's open (main-thread only).
     // Dropping the only strong reference here can lead to later crashes during AppKit teardown.
     OPEN_PLUGIN_WINDOWS.with(|windows| {
         let window_ptr = (&*window as *const NSWindow) as *mut NSWindow;
-        let retained = unsafe { Retained::retain(window_ptr) }
-            .expect("NSWindow retain should succeed");
-        windows.borrow_mut().insert(instance_id.to_string(), retained);
+        let retained =
+            unsafe { Retained::retain(window_ptr) }.expect("NSWindow retain should succeed");
+        windows
+            .borrow_mut()
+            .insert(instance_id.to_string(), retained);
     });
 
     Ok(())
@@ -888,16 +920,27 @@ fn get_window_by_number(window_number: isize, mtm: MainThreadMarker) -> Option<R
 
 /// Get the AudioUnit's custom view using existing AUAudioUnit instance
 /// Uses AUv3 requestViewController - reuses the same AUAudioUnit instance
-fn get_audio_unit_view(instance_id: &str, au_audio_unit: *mut AnyObject) -> Result<Option<*mut AnyObject>, String> {
+fn get_audio_unit_view(
+    instance_id: &str,
+    au_audio_unit: *mut AnyObject,
+) -> Result<Option<*mut AnyObject>, String> {
     if au_audio_unit.is_null() {
         eprintln!("AUAudioUnit handle is null");
         return Err("AUAudioUnit handle is null".to_string());
     }
 
-    println!("Getting AudioUnit view for AUAudioUnit: {:?}, instance: {}", au_audio_unit, instance_id);
+    println!(
+        "Getting AudioUnit view for AUAudioUnit: {:?}, instance: {}",
+        au_audio_unit, instance_id
+    );
 
     // Check if we already have a cached view controller for this instance
-    if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS.read().unwrap().get(instance_id).copied() {
+    if let Some(SendSyncPtr(vc)) = CACHED_VIEW_CONTROLLERS
+        .read()
+        .unwrap()
+        .get(instance_id)
+        .copied()
+    {
         if !vc.is_null() {
             println!("Using cached view controller for {}", instance_id);
             unsafe {
@@ -920,7 +963,10 @@ fn get_audio_unit_view(instance_id: &str, au_audio_unit: *mut AnyObject) -> Resu
         if let Some((view, view_controller)) = request_view_controller(au_audio_unit) {
             println!("Successfully obtained AUv3 view on attempt {}", attempt);
             // Cache the view controller to keep it alive
-            CACHED_VIEW_CONTROLLERS.write().unwrap().insert(instance_id.to_string(), SendSyncPtr(view_controller));
+            CACHED_VIEW_CONTROLLERS
+                .write()
+                .unwrap()
+                .insert(instance_id.to_string(), SendSyncPtr(view_controller));
             return Ok(Some(view));
         }
         // Brief pause before retry
@@ -935,9 +981,14 @@ fn get_audio_unit_view(instance_id: &str, au_audio_unit: *mut AnyObject) -> Resu
 
 /// Request view controller from existing AUAudioUnit instance
 /// Returns (view, view_controller) tuple for caching
-fn request_view_controller(au_audio_unit: *mut AnyObject) -> Option<(*mut AnyObject, *mut AnyObject)> {
+fn request_view_controller(
+    au_audio_unit: *mut AnyObject,
+) -> Option<(*mut AnyObject, *mut AnyObject)> {
     unsafe {
-        println!("Requesting view controller from AUAudioUnit: {:?}", au_audio_unit);
+        println!(
+            "Requesting view controller from AUAudioUnit: {:?}",
+            au_audio_unit
+        );
 
         let view_result: Arc<Mutex<Option<*mut AnyObject>>> = Arc::new(Mutex::new(None));
         let view_result_clone = Arc::clone(&view_result);
@@ -954,7 +1005,8 @@ fn request_view_controller(au_audio_unit: *mut AnyObject) -> Option<(*mut AnyObj
             view_done_clone.store(true, Ordering::SeqCst);
         });
 
-        let _: () = msg_send![au_audio_unit, requestViewControllerWithCompletionHandler: &*view_block];
+        let _: () =
+            msg_send![au_audio_unit, requestViewControllerWithCompletionHandler: &*view_block];
 
         // Run the RunLoop to allow completion handler to be called
         let start_time = std::time::Instant::now();
@@ -1037,7 +1089,10 @@ fn try_get_auv2_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
             &mut writable,
         );
 
-        println!("AUv2 CocoaUI property info: status={}, size={}", status, size);
+        println!(
+            "AUv2 CocoaUI property info: status={}, size={}",
+            status, size
+        );
 
         if status != 0 {
             return None;
@@ -1062,7 +1117,8 @@ fn try_get_auv2_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
         }
 
         let bundle_class = class!(NSBundle);
-        let bundle: *mut AnyObject = msg_send![bundle_class, bundleWithURL: view_info.bundle_location];
+        let bundle: *mut AnyObject =
+            msg_send![bundle_class, bundleWithURL: view_info.bundle_location];
 
         if bundle.is_null() {
             CFRelease(view_info.bundle_location);
@@ -1100,7 +1156,8 @@ fn try_get_auv2_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
         }
 
         let preferred_size = NSSize::new(600.0, 400.0);
-        let view: *mut AnyObject = msg_send![factory, uiViewForAudioUnit: audio_unit withSize: preferred_size];
+        let view: *mut AnyObject =
+            msg_send![factory, uiViewForAudioUnit: audio_unit withSize: preferred_size];
 
         CFRelease(view_info.bundle_location);
         CFRelease(class_name);
@@ -1121,9 +1178,11 @@ fn try_get_generic_view(audio_unit: *mut c_void) -> Option<*mut AnyObject> {
         // [[AUGenericView alloc] initWithAudioUnit:audioUnit]
 
         // Load CoreAudioKit framework
-        let cak_framework_path = NSString::from_str("/System/Library/Frameworks/CoreAudioKit.framework");
+        let cak_framework_path =
+            NSString::from_str("/System/Library/Frameworks/CoreAudioKit.framework");
         let bundle_class = class!(NSBundle);
-        let cak_bundle: *mut AnyObject = msg_send![bundle_class, bundleWithPath: &*cak_framework_path];
+        let cak_bundle: *mut AnyObject =
+            msg_send![bundle_class, bundleWithPath: &*cak_framework_path];
         if !cak_bundle.is_null() {
             let loaded: bool = msg_send![cak_bundle, load];
             println!("CoreAudioKit framework load: {}", loaded);

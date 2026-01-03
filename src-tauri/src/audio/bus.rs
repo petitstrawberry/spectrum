@@ -25,7 +25,10 @@ impl std::fmt::Debug for PluginInstance {
             .field("name", &self.name)
             .field("manufacturer", &self.manufacturer)
             .field("enabled", &self.enabled)
-            .field("au_instance", &self.au_instance.as_ref().map(|_| "AudioUnitInstance"))
+            .field(
+                "au_instance",
+                &self.au_instance.as_ref().map(|_| "AudioUnitInstance"),
+            )
             .finish()
     }
 }
@@ -46,12 +49,7 @@ impl Clone for PluginInstance {
 
 impl PluginInstance {
     /// Create a new plugin instance
-    pub fn new(
-        instance_id: String,
-        plugin_id: String,
-        name: String,
-        manufacturer: String,
-    ) -> Self {
+    pub fn new(instance_id: String, plugin_id: String, name: String, manufacturer: String) -> Self {
         // Try to get the AudioUnit instance from the manager
         let au_instance = get_au_manager().get_instance(&instance_id);
         Self {
