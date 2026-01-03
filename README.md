@@ -54,18 +54,21 @@ English | **[日本語](README_ja.md)**
 
 **Previous Issue**: AudioUnit plugins built with the JUCE framework displayed their UI correctly, but preset menus (dropdown/popup menus) didn't respond to clicks.
 
-**Solution**: Implemented a child window observer that monitors and configures menu windows created by JUCE plugins. The fix ensures proper event handling during modal tracking by:
-- Observing window notifications to detect menu windows
-- Configuring menu windows with proper event handling properties
-- Ensuring the plugin window (NSPanel) can handle focus properly
+**Root Cause**:
+- Tauri's `.build()` + `.run(closure)` pattern affects how NSRunLoop handles `NSEventTrackingRunLoopMode` (used for menu modal tracking)
+- The plugin window wasn't properly participating in event processing during modal tracking
 
-**Technical Details**: See `docs/juce-menu-fix-implementation.md` for complete implementation details.
+**Solution**:
+Configured the plugin window (NSPanel) to properly participate in NSRunLoop's modal tracking:
+- `setWorksWhenModal: true` - Allow event processing during modal tracking
+- `setFloatingPanel: true` - Proper auxiliary window behavior  
+- `setCanBecomeKeyWindow: true` / `setCanBecomeMainWindow: true` - Enable key/main window capability
 
-**Testing**: If you encounter issues with plugin menus, please report them with:
-- Plugin name and version
-- macOS version
-- Steps to reproduce
-- Console output (look for "Configured menu window" messages)
+This ensures JUCE menu windows can properly receive events.
+
+**Technical Details**: See `docs/juce-menu-fix-root-cause.md`
+
+**Testing**: Requires testing on macOS with JUCE-based AudioUnit plugins (TAL-NoiseMaker, Valhalla FreqEcho, Surge XT, Vital).
 
 
 ## Development

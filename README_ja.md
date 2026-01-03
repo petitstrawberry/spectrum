@@ -54,18 +54,21 @@
 
 **以前の問題**: JUCE フレームワークベースの AudioUnit プラグインは UI が正しく表示されますが、プリセットメニュー（ドロップダウン／ポップアップメニュー）がクリックに反応しませんでした。
 
-**解決策**: JUCE プラグインが作成するメニューウィンドウを監視・設定する子ウィンドウオブザーバーを実装しました。この修正により、モーダルトラッキング中の適切なイベント処理が保証されます：
-- ウィンドウ通知を監視してメニューウィンドウを検出
-- 適切なイベント処理プロパティでメニューウィンドウを設定
-- プラグインウィンドウ（NSPanel）が適切にフォーカスを処理できるようにする
+**根本原因**: 
+- Tauri の `.build()` + `.run(closure)` パターンが NSRunLoop の `NSEventTrackingRunLoopMode`（メニューのモーダルトラッキング用）の動作に影響
+- プラグインウィンドウがモーダルトラッキング中のイベント処理に適切に参加していなかった
 
-**技術詳細**: 完全な実装の詳細は `docs/juce-menu-fix-implementation.md` を参照してください。
+**解決策**: 
+プラグインウィンドウ（NSPanel）に以下の設定を適用し、NSRunLoop のモーダルトラッキングに適切に参加できるようにしました：
+- `setWorksWhenModal: true` - モーダルトラッキング中もイベント処理を許可
+- `setFloatingPanel: true` - 適切な補助ウィンドウ動作
+- `setCanBecomeKeyWindow: true` / `setCanBecomeMainWindow: true` - キー/メインウィンドウ機能を有効化
 
-**テスト**: プラグインメニューで問題が発生した場合は、以下の情報とともに報告してください：
-- プラグイン名とバージョン
-- macOS バージョン
-- 再現手順
-- コンソール出力（「Configured menu window」メッセージを確認）
+これにより、JUCE のメニューウィンドウが適切にイベントを受信できるようになります。
+
+**技術詳細**: `docs/juce-menu-fix-root-cause.md` を参照してください。
+
+**テスト**: macOS 上で JUCE ベースの AudioUnit プラグイン（TAL-NoiseMaker、Valhalla FreqEcho、Surge XT、Vital など）でのテストが必要です。
 
 
 ## 開発

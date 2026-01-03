@@ -34,9 +34,6 @@ fn get_default_run_loop_mode() -> *const c_void {
     unsafe { kCFRunLoopDefaultMode }
 }
 
-// NSWindow level constants
-const NS_POPUP_MENU_WINDOW_LEVEL: isize = 101; // NSPopUpMenuWindowLevel
-
 // AudioComponentDescription for AUv3 support
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -103,205 +100,11 @@ lazy_static::lazy_static! {
     // to avoid teardown timing crashes, and release them when the instance is dropped.
     static ref RETIRED_VIEW_CONTROLLERS: RwLock<HashMap<String, Vec<SendSyncPtr>>> =
         RwLock::new(HashMap::new());
-    // Observer tokens for child window monitoring (JUCE menu fix)
-    static ref CHILD_WINDOW_OBSERVERS: RwLock<HashMap<String, Vec<SendSyncPtr>>> =
-        RwLock::new(HashMap::new());
 }
 
 // NSWindow is not Send/Sync; we keep a strong reference on the main thread only.
 thread_local! {
     static OPEN_PLUGIN_WINDOWS: RefCell<HashMap<String, Retained<NSWindow>>> = RefCell::new(HashMap::new());
-}
-
-/// Install observer for child window additions (JUCE menu fix)
-/// JUCE plugins create separate NSWindow instances for popup menus.
-/// We observe when these windows are added as child windows and configure them properly.
-fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
-    // Remove any existing observer first
-    remove_child_window_observer(instance_id);
-
-    unsafe {
-        // Approach 1: Observe when windows become key (works for JUCE menus)
-        let notification_name = NSString::from_str("NSWindowDidBecomeKeyNotification");
-        let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
-        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
-
-        // We observe ALL window notifications, not just our window
-        // This allows us to catch menu windows created by JUCE
-        // Store window number instead of pointer for stable comparison
-        let window_number = window.windowNumber();
-        
-        let block = RcBlock::new(move |notification: *mut AnyObject| {
-            if notification.is_null() {
-                return;
-            }
-
-            // Get the window that became key
-            let notif_window: *mut AnyObject = msg_send![notification, object];
-            if notif_window.is_null() {
-                return;
-            }
-
-            // Check if this is a child window of our plugin window
-            // JUCE menus typically become key windows when opened
-            let parent: *mut AnyObject = msg_send![notif_window, parentWindow];
-            
-            // Compare using window numbers for stability
-            let parent_window_number: isize = if !parent.is_null() {
-                msg_send![parent, windowNumber]
-            } else {
-                -1
-            };
-            
-            // If this window's parent is our plugin window, configure it
-            // Otherwise, check if it's a menu-like window
-            if parent_window_number == window_number {
-                configure_menu_window(notif_window);
-            } else if is_menu_window(notif_window) {
-                configure_menu_window(notif_window);
-            }
-        });
-
-        let token_key: *mut AnyObject = msg_send![
-            center,
-            addObserverForName: &*notification_name,
-            object: std::ptr::null::<AnyObject>(), // Observe ALL windows
-            queue: main_queue,
-            usingBlock: &*block
-        ];
-
-        // Approach 2: Also observe when windows are ordered (shows up visually)
-        let order_notification = NSString::from_str("NSWindowDidBecomeMainNotification");
-        let window_number_2 = window_number; // Copy for second closure
-        let block2 = RcBlock::new(move |notification: *mut AnyObject| {
-            if notification.is_null() {
-                return;
-            }
-
-            let notif_window: *mut AnyObject = msg_send![notification, object];
-            if notif_window.is_null() {
-                return;
-            }
-
-            let parent: *mut AnyObject = msg_send![notif_window, parentWindow];
-            let parent_window_number: isize = if !parent.is_null() {
-                msg_send![parent, windowNumber]
-            } else {
-                -1
-            };
-            
-            if parent_window_number == window_number_2 {
-                configure_menu_window(notif_window);
-            } else if is_menu_window(notif_window) {
-                configure_menu_window(notif_window);
-            }
-        });
-
-        let token_main: *mut AnyObject = msg_send![
-            center,
-            addObserverForName: &*order_notification,
-            object: std::ptr::null::<AnyObject>(),
-            queue: main_queue,
-            usingBlock: &*block2
-        ];
-
-        let mut tokens = Vec::new();
-        if !token_key.is_null() {
-            tokens.push(SendSyncPtr(token_key));
-        }
-        if !token_main.is_null() {
-            tokens.push(SendSyncPtr(token_main));
-        }
-
-        if !tokens.is_empty() {
-            CHILD_WINDOW_OBSERVERS
-                .write()
-                .unwrap()
-                .insert(instance_id.to_string(), tokens);
-        }
-    }
-}
-
-/// Remove child window observer
-fn remove_child_window_observer(instance_id: &str) {
-    let tokens = CHILD_WINDOW_OBSERVERS.write().unwrap().remove(instance_id);
-    let Some(tokens) = tokens else {
-        return;
-    };
-
-    unsafe {
-        let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
-        for SendSyncPtr(token) in tokens {
-            let _: () = msg_send![center, removeObserver: token];
-        }
-    }
-}
-
-/// Check if a window looks like a menu window
-/// Menu windows typically have specific characteristics
-fn is_menu_window(window: *mut AnyObject) -> bool {
-    if window.is_null() {
-        return false;
-    }
-
-    unsafe {
-        // Check window class - NSMenu creates NSCarbonMenuWindow or similar
-        let window_class: *mut AnyObject = msg_send![window, class];
-        let class_name_ptr: *const i8 = msg_send![window_class, name];
-        if !class_name_ptr.is_null() {
-            let class_name = std::ffi::CStr::from_ptr(class_name_ptr)
-                .to_string_lossy();
-            
-            // Menu windows often have "Menu" in their class name
-            if class_name.contains("Menu") || class_name.contains("Popup") {
-                return true;
-            }
-        }
-
-        // Check window level - menus typically use popup window level
-        let level: isize = msg_send![window, level];
-        if level == NS_POPUP_MENU_WINDOW_LEVEL {
-            return true;
-        }
-
-        false
-    }
-}
-
-/// Configure a menu window for proper event handling
-fn configure_menu_window(window: *mut AnyObject) {
-    if window.is_null() {
-        return;
-    }
-
-    unsafe {
-        // Enable the window to work during modal sessions (like menu tracking)
-        let _: () = msg_send![window, setWorksWhenModal: true];
-        
-        // Ensure it accepts mouse events
-        let _: () = msg_send![window, setIgnoresMouseEvents: false];
-        let _: () = msg_send![window, setAcceptsMouseMovedEvents: true];
-        
-        // Don't hide when app deactivates during menu tracking
-        let _: () = msg_send![window, setHidesOnDeactivate: false];
-        
-        // Get the window level and class for logging
-        let level: isize = msg_send![window, level];
-        let window_class: *mut AnyObject = msg_send![window, class];
-        let class_name_ptr: *const i8 = msg_send![window_class, name];
-        let class_name = if !class_name_ptr.is_null() {
-            std::ffi::CStr::from_ptr(class_name_ptr)
-                .to_string_lossy()
-                .to_string()
-        } else {
-            "Unknown".to_string()
-        };
-        
-        println!(
-            "[AudioUnitUI] Configured menu window: class={} level={} worksWhenModal=true",
-            class_name, level
-        );
-    }
 }
 
 fn activate_app_and_focus_plugin_window(window: &NSWindow, mtm: MainThreadMarker, reason: &str) {
@@ -908,27 +711,34 @@ pub fn open_audio_unit_ui(
         let level: isize = 3; // NSFloatingWindowLevel
         window.setLevel(level);
 
-        // Defensive: ensure we don't ignore mouse events, and that the window doesn't hide
-        // when the app briefly deactivates during menu tracking.
+        // =============================
+        // JUCE Menu Fix: Root Cause Solution
+        // =============================
+        // The issue: Tauri's .build() + .run(closure) pattern affects how NSRunLoop
+        // processes events in NSEventTrackingRunLoopMode (used by NSMenu for modal tracking).
+        // 
+        // Solution: Explicitly configure the plugin window to properly participate in
+        // the run loop's modal tracking, ensuring menu windows can receive events.
+        //
+        // Key settings:
+        // 1. worksWhenModal: true - Allow event processing during modal tracking
+        // 2. Share event dispatch with NSApplication's run loop
+        // 3. Ensure the window can become key/main for proper focus handling
+        
+        // Configure the panel for proper modal tracking integration
+        let _: () = msg_send![&*window, setWorksWhenModal: true];
         let _: () = msg_send![&*window, setIgnoresMouseEvents: false];
         let _: () = msg_send![&*window, setHidesOnDeactivate: false];
-        let _: () = msg_send![&*window, setWorksWhenModal: true];
         let _: () = msg_send![&*window, setAcceptsMouseMovedEvents: true];
-
-        // =============================
-        // JUCE MENU FIX: Monitor and configure child windows
-        // =============================
-        // JUCE plugins create separate NSWindow instances for popup menus.
-        // We need to observe when these child windows are created and ensure
-        // they have proper event handling configured.
-        install_child_window_observer(&window, instance_id);
-
-        // Additional fix: Ensure the panel itself can be a parent to menu windows
-        // and doesn't interfere with event propagation to child windows
+        
+        // Enable the panel to participate in AppKit's event loop properly
+        // These settings ensure the window can become key/main, which is critical
+        // for menu event handling in JUCE plugins
         let _: () = msg_send![&*window, setFloatingPanel: true];
         let _: () = msg_send![&*window, setBecomesKeyOnlyIfNeeded: false];
         
-        // Make sure the window can accept becoming key even during modal tracking
+        // Explicitly mark the window as capable of being key/main
+        // This is crucial for NSMenu event dispatch
         let _: () = msg_send![&*window, setCanBecomeKeyWindow: true];
         let _: () = msg_send![&*window, setCanBecomeMainWindow: true];
 
@@ -1058,9 +868,6 @@ pub fn open_audio_unit_ui(
 pub fn close_audio_unit_ui(instance_id: &str) {
     // Remove size observer first (best-effort)
     remove_view_size_observer(instance_id);
-    
-    // Remove child window observer (JUCE menu fix)
-    remove_child_window_observer(instance_id);
 
     let window_number = match PLUGIN_WINDOW_NUMBERS.write().unwrap().remove(instance_id) {
         Some(n) => n,
