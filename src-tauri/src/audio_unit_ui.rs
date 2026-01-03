@@ -34,6 +34,9 @@ fn get_default_run_loop_mode() -> *const c_void {
     unsafe { kCFRunLoopDefaultMode }
 }
 
+// NSWindow level constants
+const NS_POPUP_MENU_WINDOW_LEVEL: isize = 101; // NSPopUpMenuWindowLevel
+
 // AudioComponentDescription for AUv3 support
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -125,7 +128,8 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
 
         // We observe ALL window notifications, not just our window
         // This allows us to catch menu windows created by JUCE
-        let window_ptr = window as *const NSWindow as isize;
+        // Store window number instead of pointer for stable comparison
+        let window_number = window.windowNumber();
         
         let block = RcBlock::new(move |notification: *mut AnyObject| {
             if notification.is_null() {
@@ -142,9 +146,18 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
             // JUCE menus typically become key windows when opened
             let parent: *mut AnyObject = msg_send![notif_window, parentWindow];
             
-            // If this window's parent is our plugin window, or if it's a menu-like window
-            // that appeared after our window, configure it for proper event handling
-            if parent == window_ptr as *mut AnyObject || is_menu_window(notif_window) {
+            // Compare using window numbers for stability
+            let parent_window_number: isize = if !parent.is_null() {
+                msg_send![parent, windowNumber]
+            } else {
+                -1
+            };
+            
+            // If this window's parent is our plugin window, configure it
+            // Otherwise, check if it's a menu-like window
+            if parent_window_number == window_number {
+                configure_menu_window(notif_window);
+            } else if is_menu_window(notif_window) {
                 configure_menu_window(notif_window);
             }
         });
@@ -159,6 +172,7 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
 
         // Approach 2: Also observe when windows are ordered (shows up visually)
         let order_notification = NSString::from_str("NSWindowDidBecomeMainNotification");
+        let window_number_2 = window_number; // Copy for second closure
         let block2 = RcBlock::new(move |notification: *mut AnyObject| {
             if notification.is_null() {
                 return;
@@ -170,7 +184,15 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
             }
 
             let parent: *mut AnyObject = msg_send![notif_window, parentWindow];
-            if parent == window_ptr as *mut AnyObject || is_menu_window(notif_window) {
+            let parent_window_number: isize = if !parent.is_null() {
+                msg_send![parent, windowNumber]
+            } else {
+                -1
+            };
+            
+            if parent_window_number == window_number_2 {
+                configure_menu_window(notif_window);
+            } else if is_menu_window(notif_window) {
                 configure_menu_window(notif_window);
             }
         });
@@ -238,8 +260,7 @@ fn is_menu_window(window: *mut AnyObject) -> bool {
 
         // Check window level - menus typically use popup window level
         let level: isize = msg_send![window, level];
-        let popup_level: isize = 101; // NSPopUpMenuWindowLevel
-        if level == popup_level {
+        if level == NS_POPUP_MENU_WINDOW_LEVEL {
             return true;
         }
 
