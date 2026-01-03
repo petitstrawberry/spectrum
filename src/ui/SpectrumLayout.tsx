@@ -38,7 +38,7 @@ import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, ge
 import { renderToStaticMarkup } from 'react-dom/server';
 import { addSourceNode, addSinkNode, removeNode, setOutputGain, setOutputChannelGain } from '../lib/api';
 import { openPrismApp } from '../lib/prismd';
-import { VOUT_ID_PATTERN } from '../lib/voutId';
+import { VOUT_ID_PATTERN } from '../lib/deviceId';
 
 // --- Types ---
 

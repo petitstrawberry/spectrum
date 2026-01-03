@@ -1,12 +1,16 @@
-# Virtual Device Tracking with UIDs
+# Device Tracking with UIDs
 
 ## Problem Statement
 
-When an aggregate audio device's configuration changes (sub-devices added or removed), virtual devices that no longer exist are not properly disabled or enabled. This is because the previous implementation used a channel offset-based ID (`vout_{device_id}_{offset}`) which doesn't uniquely identify the physical sub-device across configuration changes.
+When an aggregate audio device's configuration changes (sub-devices added or removed), devices that no longer exist are not properly disabled or enabled. This affects both input and output devices because the previous implementation used simple ID formats that don't uniquely identify physical devices across configuration changes.
 
-### Example Scenario
+### Output Devices
 
-Consider an aggregate device with 3 sub-devices:
+The previous implementation used a channel offset-based ID (`vout_{device_id}_{offset}`) which doesn't uniquely identify the physical sub-device across configuration changes.
+
+#### Example Scenario
+
+Consider an aggregate output device with 3 sub-devices:
 ```
 Initial Configuration:
 - Device A: channels 0-1   -> vout_100_0
@@ -23,19 +27,29 @@ New Configuration:
 
 The IDs change because they're based on channel offsets, not the actual device identity. This breaks node references and causes devices to not be properly disabled/enabled.
 
+### Input Devices
+
+Input devices had the same issue with a simple device ID-based format (`in_{device_id}`). If the device configuration changes or devices are reconnected, the device_id can change, breaking node references.
+
 ## Solution
 
-Use the device UID (Unique Identifier provided by CoreAudio) to create stable virtual device IDs that persist across configuration changes.
+Use the device UID (Unique Identifier provided by CoreAudio) to create stable device IDs that persist across configuration changes.
 
-### New ID Format
+### New ID Formats
 
+**Output Devices:**
 - **Old format**: `vout_{device_id}_{offset}`
 - **New format**: `vout_{device_id}_{offset}_{uid_hash}`
 
-Where `uid_hash` is an 8-character hexadecimal hash of the sub-device's UID.
+**Input Devices:**
+- **Old format**: `in_{device_id}`
+- **New format**: `in_{device_id}_{uid_hash}`
+
+Where `uid_hash` is an 8-character hexadecimal hash of the device's UID.
 
 ### Example with UIDs
 
+**Output Devices:**
 ```
 Initial Configuration:
 - Device A (UID: AppleUSB:123): channels 0-1   -> vout_100_0_a1b2c3d4
@@ -80,16 +94,25 @@ Now Device B maintains a consistent identity (uid_hash: e5f6a7b8) even though it
    - Low collision rate for similar strings
    - Widely used in hash tables and checksums
 
-2. **Virtual Device ID Generation**
+2. **Device ID Generation**
+   
+   **Output Devices:**
    - For aggregate sub-devices with UID: `vout_{device_id}_{offset}_{uid_hash}`
    - For aggregate sub-devices without UID: `vout_{device_id}_{offset}` (fallback)
    - For regular devices: `vout_{device_id}_0`
+   
+   **Input Devices:**
+   - For devices with UID: `in_{device_id}_{uid_hash}`
+   - For devices without UID: `in_{device_id}` (fallback)
 
 3. **Parsing Support**
-   - `find_output_device()` accepts both 3-part and 4-part IDs
+   - `find_output_device()` accepts both 3-part and 4-part output IDs
+   - Input device parsing supports both 1-part and 2-part input IDs
    - Backward compatible with old saved configurations
 
 ### Frontend (TypeScript)
+
+**Output Device Patterns:**
 
 Updated regex patterns from:
 ```typescript
@@ -101,13 +124,28 @@ To:
 /^vout_(\d+)_(\d+)(?:_([a-f0-9]+))?$/
 ```
 
+**Input Device Patterns:**
+
+Updated regex patterns from:
+```typescript
+/^in_(\d+)$/
+```
+
+To:
+```typescript
+/^in_(\d+)(?:_([a-f0-9]+))?$/
+```
+
 The `(?:_([a-f0-9]+))?` part makes the UID hash optional:
 - `(?:...)` - non-capturing group
 - `_([a-f0-9]+)` - underscore followed by hex characters
 - `?` - makes the entire group optional
 
 Files updated:
-- `src/hooks/useDevices.ts` (1 pattern)
+- `src/lib/deviceId.ts` - Created shared constants for both input and output device ID patterns
+- `src/hooks/useDevices.ts` - Updated to use shared constant
+- `src/ui/SpectrumLayout.tsx` - Updated all output device patterns to use shared constant
+- `src/ui/CanvasView.tsx` - Updated to use shared constant
 - `src/ui/SpectrumLayout.tsx` (8 patterns)
 - `src/ui/CanvasView.tsx` (1 pattern)
 

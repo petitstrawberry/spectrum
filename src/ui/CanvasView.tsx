@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2, Link as LinkIcon } from 'lucide-react';
 import { getNodePorts } from '../hooks/useNodeDisplay';
-import { VOUT_ID_PATTERN } from '../lib/voutId';
+import { VOUT_ID_PATTERN } from '../lib/deviceId';
 
 type PatchConnection = {
   id: string;

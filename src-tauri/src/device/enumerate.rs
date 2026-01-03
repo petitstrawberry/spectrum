@@ -72,7 +72,7 @@ pub fn is_aggregate_device(device_id: u32) -> bool {
 }
 
 /// Get device UID
-fn get_device_uid(device_id: u32) -> Option<String> {
+pub fn get_device_uid(device_id: u32) -> Option<String> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
 
@@ -400,7 +400,7 @@ struct SubDeviceInfo {
 /// Generate a short stable hash from a device UID for use in virtual device IDs.
 /// This ensures virtual devices can be tracked across aggregate device configuration changes.
 /// Uses FNV-1a hash algorithm for better collision resistance.
-fn uid_hash(uid: &str) -> String {
+pub fn uid_hash(uid: &str) -> String {
     // FNV-1a 64-bit hash: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
     // Standard FNV-1a 64-bit constants
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;  // FNV offset basis for 64-bit

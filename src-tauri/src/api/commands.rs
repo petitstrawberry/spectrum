@@ -101,13 +101,27 @@ pub async fn get_input_devices() -> Result<Vec<InputDeviceDto>, String> {
     let devices = crate::capture::get_input_devices();
     Ok(devices
         .into_iter()
-        .map(|(id, name, channels, is_prism)| InputDeviceDto {
-            id: format!("in_{}", id),
-            device_id: id,
-            name,
-            channel_count: channels as u8,
-            is_prism,
-            transport_type: "Unknown".to_string(),
+        .map(|(id, name, channels, is_prism, uid)| {
+            // Generate ID with UID hash to track devices across configuration changes
+            let device_id_str = if let Some(ref device_uid) = uid {
+                // New format: in_{device_id}_{uid_hash}
+                // This ensures the same physical device keeps the same ID even if
+                // the device configuration changes
+                format!("in_{}_{}", id, crate::device::uid_hash(device_uid))
+            } else {
+                // Fallback to old format if UID is not available
+                format!("in_{}", id)
+            };
+            
+            InputDeviceDto {
+                id: device_id_str,
+                device_id: id,
+                device_uid: uid,
+                name,
+                channel_count: channels as u8,
+                is_prism,
+                transport_type: "Unknown".to_string(),
+            }
         })
         .collect())
 }

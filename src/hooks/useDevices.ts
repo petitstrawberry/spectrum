@@ -9,7 +9,7 @@ import {
   getPrismStatus,
   getOutputRuntime,
 } from '../lib/api';
-import { VOUT_ID_PATTERN } from '../lib/voutId';
+import { VOUT_ID_PATTERN } from '../lib/deviceId';
 // NOTE: Avoid top-level import of Tauri invoke.
 // Opening the Vite dev server in a normal browser can crash module init otherwise.
 type Invoke = <T>(cmd: string, args?: Record<string, any>) => Promise<T>;

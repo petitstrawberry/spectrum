@@ -127,6 +127,8 @@ pub struct GraphDto {
 pub struct InputDeviceDto {
     pub id: String,
     pub device_id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_uid: Option<String>,
     pub name: String,
     pub channel_count: u8,
     pub is_prism: bool,
