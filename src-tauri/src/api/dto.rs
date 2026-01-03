@@ -34,6 +34,8 @@ pub struct OutputSinkDto {
     pub device_id: u32,
     pub channel_offset: u8,
     pub channel_count: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_uid: Option<String>,
 }
 
 // =============================================================================
@@ -66,6 +68,8 @@ pub enum NodeInfoDto {
         label: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         sub_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        available: Option<bool>,
     },
     #[serde(rename = "bus")]
     Bus {
@@ -85,6 +89,8 @@ pub enum NodeInfoDto {
         sink: OutputSinkDto,
         port_count: u8,
         label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        available: Option<bool>,
     },
 }
 
@@ -312,6 +318,7 @@ impl From<crate::audio::sink::SinkId> for OutputSinkDto {
             device_id: sink.device_id,
             channel_offset: sink.channel_offset,
             channel_count: sink.channel_count,
+            device_uid: sink.device_uid,
         }
     }
 }
@@ -322,6 +329,7 @@ impl From<OutputSinkDto> for crate::audio::sink::SinkId {
             device_id: dto.device_id,
             channel_offset: dto.channel_offset,
             channel_count: dto.channel_count,
+            device_uid: dto.device_uid,
         }
     }
 }

@@ -112,7 +112,7 @@ pub async fn get_input_devices() -> Result<Vec<InputDeviceDto>, String> {
                 // Fallback to old format if UID is not available
                 format!("in_{}", id)
             };
-            
+
             InputDeviceDto {
                 id: device_id_str,
                 device_id: id,
@@ -361,7 +361,34 @@ pub async fn add_sink_node(sink: OutputSinkDto, label: Option<String>) -> Result
         sink, label
     );
     let label = label.unwrap_or_else(|| format!("Output {}", sink.device_id));
-    let sink_id = crate::audio::sink::SinkId::from(sink);
+
+    // Get or populate device UID for the sink
+    let device_uid = sink.device_uid.clone().or_else(|| {
+        // Try to get UID from the device
+        if sink.channel_offset > 0 && crate::device::is_aggregate_device(sink.device_id) {
+            // For aggregate sub-devices, try to find the sub-device UID
+            // This requires checking the aggregate's sub-device list
+            let subs = crate::device::get_aggregate_sub_devices(sink.device_id);
+            let mut offset = 0u32;
+            for sub in subs.iter() {
+                if offset == sink.channel_offset as u32 {
+                    return sub.uid.clone();
+                }
+                offset += sub.channels;
+            }
+            None
+        } else {
+            // For regular devices, just get the device UID
+            crate::device::get_device_uid(sink.device_id)
+        }
+    });
+
+    let sink_id = crate::audio::sink::SinkId::with_uid(
+        sink.device_id,
+        sink.channel_offset,
+        sink.channel_count,
+        device_uid,
+    );
     let node: Box<dyn AudioNode> = Box::new(crate::audio::sink::SinkNode::new(sink_id, &label));
 
     let handle = processor.add_node(node);
@@ -569,6 +596,33 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                 _ => (node.label().to_string(), None),
                             };
 
+                            // Check if the input device is available (UID-based)
+                            let available = match source_node.source_id() {
+                                crate::audio::source::SourceId::InputDevice {
+                                    device_id, ..
+                                } => {
+                                    // Get the device UID and check if it's in the available devices
+                                    if let Some(device_uid) =
+                                        crate::device::get_device_uid(*device_id)
+                                    {
+                                        Some(crate::device::is_input_device_available_by_uid(
+                                            &device_uid,
+                                        ))
+                                    } else {
+                                        // If no UID, fall back to device_id check
+                                        Some(
+                                            crate::audio_capture::get_device_input_channels(
+                                                *device_id,
+                                            ) > 0,
+                                        )
+                                    }
+                                }
+                                crate::audio::source::SourceId::PrismChannel { .. } => {
+                                    // Prism channels are always available if Prism is running
+                                    None
+                                }
+                            };
+
                             NodeInfoDto::Source {
                                 handle: handle.raw(),
                                 stable_id: stable_id_for_source_id(&SourceIdDto::from(
@@ -578,6 +632,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                 port_count: node.output_port_count() as u8,
                                 label,
                                 sub_label,
+                                available,
                             }
                         } else {
                             // Fallback if downcast fails
@@ -590,6 +645,7 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                 port_count: node.output_port_count() as u8,
                                 label: node.label().to_string(),
                                 sub_label: None,
+                                available: None,
                             }
                         }
                     }
@@ -696,18 +752,28 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                         // Downcast to SinkNode to get sink_id
                         if let Some(sink_node) = node.as_any().downcast_ref::<SinkNode>() {
                             let sink_dto = OutputSinkDto::from(sink_node.sink_id().clone());
-                            NodeInfoDto::Sink {
-                                handle: handle.raw(),
-                                stable_id: stable_id_for_sink(&sink_dto),
-                                sink: sink_dto,
-                                port_count: node.input_port_count() as u8,
-                                label: node.label().to_string(),
-                            }
-                        } else {
-                            let sink_dto = OutputSinkDto {
-                                device_id: 0,
-                                channel_offset: 0,
-                                channel_count: node.input_port_count() as u8,
+                            // Check if the output device is available (UID-based)
+                            let available = if let Some(ref device_uid) = sink_dto.device_uid {
+                                // Use UID-based check for accurate device tracking
+                                Some(crate::device::is_output_device_available_by_uid(device_uid))
+                            } else if let Some(device_uid) =
+                                crate::device::get_device_uid(sink_dto.device_id)
+                            {
+                                // Fallback: try to get UID from device_id
+                                Some(crate::device::is_output_device_available_by_uid(
+                                    &device_uid,
+                                ))
+                            } else {
+                                // Last resort: fall back to channel check
+                                let output_channels =
+                                    crate::device::get_device_output_channels(sink_dto.device_id);
+                                if output_channels == 0 {
+                                    Some(false)
+                                } else {
+                                    let available_channels = output_channels
+                                        .saturating_sub(sink_dto.channel_offset as u32);
+                                    Some(available_channels >= sink_dto.channel_count as u32)
+                                }
                             };
                             NodeInfoDto::Sink {
                                 handle: handle.raw(),
@@ -715,6 +781,22 @@ pub async fn get_graph() -> Result<GraphDto, String> {
                                 sink: sink_dto,
                                 port_count: node.input_port_count() as u8,
                                 label: node.label().to_string(),
+                                available,
+                            }
+                        } else {
+                            let sink_dto = OutputSinkDto {
+                                device_id: 0,
+                                channel_offset: 0,
+                                channel_count: node.input_port_count() as u8,
+                                device_uid: None,
+                            };
+                            NodeInfoDto::Sink {
+                                handle: handle.raw(),
+                                stable_id: stable_id_for_sink(&sink_dto),
+                                sink: sink_dto,
+                                port_count: node.input_port_count() as u8,
+                                label: node.label().to_string(),
+                                available: None,
                             }
                         }
                     }
@@ -1297,6 +1379,7 @@ pub async fn load_graph_state(state: GraphStateDto) -> Result<(), String> {
                 port_count,
                 label,
                 sub_label: _,
+                available: _,
             } => {
                 let node: Box<dyn AudioNode> = match source_id {
                     SourceIdDto::PrismChannel { channel } => {

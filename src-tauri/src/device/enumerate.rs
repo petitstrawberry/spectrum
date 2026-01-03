@@ -389,12 +389,65 @@ pub fn find_output_device(virtual_id: &str) -> Option<(u32, u8, u8)> {
     Some((device_id, channel_offset, channel_count))
 }
 
+/// Get a set of all available input device UIDs
+pub fn get_available_input_device_uids() -> std::collections::HashSet<String> {
+    let devices = crate::audio_capture::get_input_devices();
+    devices
+        .into_iter()
+        .filter_map(|(_, _, _, _, uid)| uid)
+        .collect()
+}
+
+/// Get a set of all available output device UIDs (including sub-device UIDs)
+pub fn get_available_output_device_uids() -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+
+    let mut uids = HashSet::new();
+
+    let device_ids = match get_audio_device_ids() {
+        Ok(ids) => ids,
+        Err(_) => return uids,
+    };
+
+    for device_id in device_ids {
+        // Add device UID if it has output channels
+        if get_device_output_channels(device_id) > 0 {
+            if let Some(uid) = get_device_uid(device_id) {
+                uids.insert(uid);
+            }
+
+            // For aggregate devices, also add sub-device UIDs
+            if is_aggregate_device(device_id) {
+                let subs = get_aggregate_sub_devices(device_id);
+                for sub in subs {
+                    if let Some(uid) = sub.uid {
+                        uids.insert(uid);
+                    }
+                }
+            }
+        }
+    }
+
+    uids
+}
+
+/// Check if an input device exists and is available by UID
+pub fn is_input_device_available_by_uid(device_uid: &str) -> bool {
+    get_available_input_device_uids().contains(device_uid)
+}
+
+/// Check if an output device exists and is available by UID
+pub fn is_output_device_available_by_uid(device_uid: &str) -> bool {
+    get_available_output_device_uids().contains(device_uid)
+}
+
 /// Information about an aggregate's sub-device
-struct SubDeviceInfo {
-    uid: Option<String>,
-    name: String,
-    channels: u32,
-    original_id: u32,
+#[derive(Debug, Clone)]
+pub struct SubDeviceInfo {
+    pub uid: Option<String>,
+    pub name: String,
+    pub channels: u32,
+    pub original_id: u32,
 }
 
 /// Generate a short stable hash from a device UID for use in virtual device IDs.
@@ -403,9 +456,9 @@ struct SubDeviceInfo {
 pub fn uid_hash(uid: &str) -> String {
     // FNV-1a 64-bit hash: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
     // Standard FNV-1a 64-bit constants
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;  // FNV offset basis for 64-bit
-    const FNV_PRIME: u64 = 0x00000100000001b3;  // FNV prime for 64-bit (correct 64-bit value)
-    
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325; // FNV offset basis for 64-bit
+    const FNV_PRIME: u64 = 0x00000100000001b3; // FNV prime for 64-bit (correct 64-bit value)
+
     let mut hash: u64 = FNV_OFFSET_BASIS;
     for byte in uid.as_bytes() {
         hash ^= *byte as u64;
@@ -416,7 +469,7 @@ pub fn uid_hash(uid: &str) -> String {
 }
 
 /// Query aggregate device for its active sub-device list and resolve their UIDs/names/channels
-fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
+pub fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
     use std::mem::size_of;
 
     let address = AudioObjectPropertyAddress {
@@ -479,14 +532,20 @@ mod tests {
         let hash2 = uid_hash(uid1);
         assert_eq!(hash1, hash2, "Same UID should produce same hash");
         assert_eq!(hash1.len(), 8, "Hash should be 8 characters");
-        
+
         // Test that different UIDs produce different hashes
         let uid2 = "AppleUSBAudioEngine:Vendor:Product:67890";
         let hash3 = uid_hash(uid2);
-        assert_ne!(hash1, hash3, "Different UIDs should produce different hashes");
-        
+        assert_ne!(
+            hash1, hash3,
+            "Different UIDs should produce different hashes"
+        );
+
         // Test that hash is alphanumeric hex
-        assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert!(
+            hash1.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
     }
 
     #[test]
