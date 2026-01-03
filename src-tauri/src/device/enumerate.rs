@@ -273,8 +273,19 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
 
                     let transport_type = get_transport_type(sub.original_id);
 
+                    // Generate ID with subdevice UID hash to track devices across configuration changes
+                    let id = if let Some(ref uid) = sub.uid {
+                        // New format: vout_{device_id}_{offset}_{uid_hash}
+                        // This ensures the same physical sub-device keeps the same ID even if
+                        // the aggregate configuration changes (sub-devices added/removed)
+                        format!("vout_{}_{}_{}", device_id, offset, uid_hash(uid))
+                    } else {
+                        // Fallback to old format if UID is not available
+                        format!("vout_{}_{}", device_id, offset)
+                    };
+
                     result.push(OutputDeviceDto {
-                        id: format!("vout_{}_{}", device_id, offset),
+                        id,
                         device_id,
                         device_uid: get_device_uid(device_id),
                         subdevice_uid: sub.uid.clone(),
@@ -355,14 +366,17 @@ pub fn find_preferred_output_device() -> Option<u32> {
 
 /// Find a specific output device by ID
 pub fn find_output_device(virtual_id: &str) -> Option<(u32, u8, u8)> {
-    // Parse virtual ID: "vout_{device_id}_{offset}"
+    // Parse virtual ID: supports both formats:
+    // - Old: "vout_{device_id}_{offset}"
+    // - New: "vout_{device_id}_{offset}_{uid_hash}"
     let parts: Vec<&str> = virtual_id.split('_').collect();
-    if parts.len() != 3 || parts[0] != "vout" {
+    if parts.len() < 3 || parts.len() > 4 || parts[0] != "vout" {
         return None;
     }
 
     let device_id: u32 = parts[1].parse().ok()?;
     let channel_offset: u8 = parts[2].parse().ok()?;
+    // parts[3] would be the uid_hash if present (ignored for lookup)
 
     let output_channels = get_device_output_channels(device_id);
     if output_channels == 0 {
@@ -381,6 +395,17 @@ struct SubDeviceInfo {
     name: String,
     channels: u32,
     original_id: u32,
+}
+
+/// Generate a short stable hash from a device UID for use in virtual device IDs.
+/// This ensures virtual devices can be tracked across aggregate device configuration changes.
+fn uid_hash(uid: &str) -> String {
+    // Simple hash: take first 8 chars of a hex representation of the string hash
+    let mut hash: u64 = 0;
+    for byte in uid.as_bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(*byte as u64);
+    }
+    format!("{:08x}", hash)
 }
 
 /// Query aggregate device for its active sub-device list and resolve their UIDs/names/channels

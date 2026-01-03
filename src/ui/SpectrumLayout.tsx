@@ -596,7 +596,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         if (activeNums.length === 0) return true;
         const did = Number(n.deviceId);
         if (!Number.isNaN(did) && activeNums.includes(did)) return true;
-        const m = typeof n.libraryId === 'string' ? n.libraryId.match(/^vout_(\d+)_(\d+)$/) : null;
+        const m = typeof n.libraryId === 'string' ? n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/) : null;
         if (m) {
           const parentId = Number(m[1]);
           if (!Number.isNaN(parentId) && activeNums.includes(parentId)) return true;
@@ -830,7 +830,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       if (!node || node.type !== 'target') return false;
       if (node.available === false) return true;
       if (activeNums.length === 0) return false;
-      const m = typeof node.libraryId === 'string' ? node.libraryId.match(/^vout_(\d+)_(\d+)$/) : null;
+      const m = typeof node.libraryId === 'string' ? node.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/) : null;
       if (m) {
         const parentId = Number(m[1]);
         if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) return true;
@@ -1129,7 +1129,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         let parentDeviceId: number | null = null;
         if (typeof n.deviceId === 'number' && !Number.isNaN(n.deviceId)) parentDeviceId = n.deviceId;
         if (parentDeviceId == null && typeof n.libraryId === 'string') {
-          const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+          const m = n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
           if (m) parentDeviceId = Number(m[1]);
         }
 
@@ -1185,7 +1185,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     let isSystemDisabled = false;
     if (n?.available === false) isSystemDisabled = true;
     if (!isSystemDisabled && activeNums.length > 0 && typeof n?.libraryId === 'string') {
-      const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+      const m = n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
       if (m) {
         const parentId = Number(m[1]);
         if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) isSystemDisabled = true;
@@ -1217,7 +1217,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     if (typeof n?.deviceId === 'number' && !Number.isNaN(n.deviceId)) {
       deviceId = n.deviceId;
     } else if (typeof n?.libraryId === 'string') {
-      const m = n.libraryId.match(/^vout_(\d+)_(\d+)$/);
+      const m = n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
       if (m) deviceId = Number(m[1]);
     }
 
@@ -1285,7 +1285,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
 
     if (id.startsWith('vout_')) {
-      const m = id.match(/^vout_(\d+)_(\d+)$/);
+      const m = id.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
       if (!m) return false;
       const parentDeviceId = Number(m[1]);
       const offset = Number(m[2]);
@@ -1329,8 +1329,8 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       ghostSub = dev ? `${dev.channelCount ?? dev.channels ?? ''}ch` : '';
       GhostIcon = Mic;
     } else if (id.startsWith('vout_')) {
-      // virtual output entry like "vout_<device>_<offset>"
-      const m = id.match(/^vout_(\d+)_(\d+)$/);
+      // virtual output entry like "vout_<device>_<offset>_<uid_hash>" or "vout_<device>_<offset>"
+      const m = id.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
       if (m) {
         const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === id);
         const name = vEntry ? vEntry.name : `Out ${m[2]}`;
@@ -1502,9 +1502,9 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
                 }
               }
             }
-            // handle virtual output sinks (id like 'vout_<device>_<offset>')
+            // handle virtual output sinks (id like 'vout_<device>_<offset>_<uid_hash>' or 'vout_<device>_<offset>')
             if (!sourceId && typeof id === 'string' && id.startsWith('vout_')) {
-              const m = id.match(/^vout_(\d+)_(\d+)$/);
+              const m = id.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
               if (m && canvasRef.current) {
                 const parentDeviceId = Number(m[1]);
                 const offset = Number(m[2]);

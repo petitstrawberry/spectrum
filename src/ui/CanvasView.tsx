@@ -387,11 +387,11 @@ export default function CanvasView({
           const NodeIcon = node.icon || (() => null);
           const isDeviceNode = node.sourceType === 'device' || (node.libraryId && node.libraryId.startsWith('dev_'));
           const isUnavailable = node.available === false;
-          // If this node corresponds to a virtual output (libraryId like 'vout_<device>_<offset>'),
+          // If this node corresponds to a virtual output (libraryId like 'vout_<device>_<offset>_<uid_hash>' or 'vout_<device>_<offset>'),
           // and the system has an active output that doesn't match the parent device, mark disabled.
           let isSystemDisabled = false;
           if (node.libraryId && typeof node.libraryId === 'string' && node.libraryId.startsWith('vout_')) {
-            const m = node.libraryId.match(/^vout_(\d+)_(\d+)$/);
+            const m = node.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
             if (m) {
               const parentId = Number(m[1]);
               // systemActiveOutputs may be numbers or strings; normalize to numbers
