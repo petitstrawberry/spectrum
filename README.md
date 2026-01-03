@@ -48,17 +48,24 @@ English | **[日本語](README_ja.md)**
 
 ## Known Issues
 
-### AudioUnit Plugin UI — JUCE Preset Menus Not Working
+### AudioUnit Plugin UI — JUCE Preset Menus Fixed
 
-**Issue**: AudioUnit plugins built with the JUCE framework display their UI correctly, but preset menus (dropdown/popup menus) don't respond to clicks.
+**Status**: ✅ Fixed in this branch
 
-**Cause**: JUCE plugins open menus in separate native windows. Currently, Spectrum's AudioUnit UI hosting doesn't propagate events to these detached windows properly.
+**Previous Issue**: AudioUnit plugins built with the JUCE framework displayed their UI correctly, but preset menus (dropdown/popup menus) didn't respond to clicks.
 
-**Workaround**: 
-- Use plugin parameter controls directly instead of presets
-- Or use the plugin's standalone app for preset management, then reload the plugin in Spectrum
+**Solution**: Implemented a child window observer that monitors and configures menu windows created by JUCE plugins. The fix ensures proper event handling during modal tracking by:
+- Observing window notifications to detect menu windows
+- Configuring menu windows with proper event handling properties
+- Ensuring the plugin window (NSPanel) can handle focus properly
 
-**Status**: Investigating event propagation for separate NSWindow instances. See `docs/plugin-ui-menu-issue-investigation.md` for technical details.
+**Technical Details**: See `docs/juce-menu-fix-implementation.md` for complete implementation details.
+
+**Testing**: If you encounter issues with plugin menus, please report them with:
+- Plugin name and version
+- macOS version
+- Steps to reproduce
+- Console output (look for "Configured menu window" messages)
 
 
 ## Development
