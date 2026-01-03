@@ -57,15 +57,28 @@ Now Device B maintains a consistent identity (uid_hash: e5f6a7b8) even though it
 ### Backend (Rust)
 
 1. **UID Hashing Function** (`src-tauri/src/device/enumerate.rs`)
+   
+   Uses FNV-1a hash algorithm for better collision resistance:
    ```rust
    fn uid_hash(uid: &str) -> String {
-       let mut hash: u64 = 0;
+       // FNV-1a 64-bit hash algorithm
+       const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+       const FNV_PRIME: u64 = 0x100000001b3;
+       
+       let mut hash: u64 = FNV_OFFSET_BASIS;
        for byte in uid.as_bytes() {
-           hash = hash.wrapping_mul(31).wrapping_add(*byte as u64);
+           hash ^= *byte as u64;
+           hash = hash.wrapping_mul(FNV_PRIME);
        }
        format!("{:08x}", hash)
    }
    ```
+   
+   FNV-1a (Fowler-Noll-Vo) is a non-cryptographic hash function known for:
+   - Fast computation
+   - Good distribution properties
+   - Low collision rate for similar strings
+   - Widely used in hash tables and checksums
 
 2. **Virtual Device ID Generation**
    - For aggregate sub-devices with UID: `vout_{device_id}_{offset}_{uid_hash}`

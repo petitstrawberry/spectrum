@@ -401,9 +401,10 @@ struct SubDeviceInfo {
 /// This ensures virtual devices can be tracked across aggregate device configuration changes.
 /// Uses FNV-1a hash algorithm for better collision resistance.
 fn uid_hash(uid: &str) -> String {
-    // FNV-1a hash: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
+    // FNV-1a 64-bit hash: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+    // Standard FNV-1a 64-bit constants
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;  // FNV offset basis for 64-bit
+    const FNV_PRIME: u64 = 0x100000001b3;  // FNV prime for 64-bit
     
     let mut hash: u64 = FNV_OFFSET_BASIS;
     for byte in uid.as_bytes() {
