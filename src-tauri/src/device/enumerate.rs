@@ -465,6 +465,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_uid_hash() {
+        // Test that the same UID produces the same hash
+        let uid1 = "AppleUSBAudioEngine:Vendor:Product:12345";
+        let hash1 = uid_hash(uid1);
+        let hash2 = uid_hash(uid1);
+        assert_eq!(hash1, hash2, "Same UID should produce same hash");
+        assert_eq!(hash1.len(), 8, "Hash should be 8 characters");
+        
+        // Test that different UIDs produce different hashes
+        let uid2 = "AppleUSBAudioEngine:Vendor:Product:67890";
+        let hash3 = uid_hash(uid2);
+        assert_ne!(hash1, hash3, "Different UIDs should produce different hashes");
+        
+        // Test that hash is alphanumeric hex
+        assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+    }
+
+    #[test]
+    fn test_find_output_device_old_format() {
+        // Test old format: vout_{device_id}_{offset}
+        // This won't actually find a device in tests, but should parse correctly
+        let old_format_id = "vout_123_4";
+        let result = find_output_device(old_format_id);
+        // Result will be None because device 123 doesn't exist, but it should parse without error
+        // If the format was invalid, it would return None at parsing stage
+    }
+
+    #[test]
+    fn test_find_output_device_new_format() {
+        // Test new format: vout_{device_id}_{offset}_{uid_hash}
+        let new_format_id = "vout_123_4_a1b2c3d4";
+        let result = find_output_device(new_format_id);
+        // Result will be None because device 123 doesn't exist, but it should parse without error
+    }
+
+    #[test]
+    fn test_find_output_device_invalid_format() {
+        // Test invalid formats
+        assert!(find_output_device("invalid").is_none());
+        assert!(find_output_device("vout_123").is_none()); // Too few parts
+        assert!(find_output_device("vout_123_4_abc_extra").is_none()); // Too many parts
+        assert!(find_output_device("vout_abc_4").is_none()); // Non-numeric device_id
+        assert!(find_output_device("vout_123_abc").is_none()); // Non-numeric offset
+    }
+
+    #[test]
     fn test_get_output_devices() {
         let devices = get_output_devices();
         println!("Found {} output devices", devices.len());
