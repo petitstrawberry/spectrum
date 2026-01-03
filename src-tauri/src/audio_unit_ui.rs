@@ -118,6 +118,7 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
     remove_child_window_observer(instance_id);
 
     unsafe {
+        // Approach 1: Observe when windows become key (works for JUCE menus)
         let notification_name = NSString::from_str("NSWindowDidBecomeKeyNotification");
         let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
         let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
@@ -148,7 +149,7 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
             }
         });
 
-        let token: *mut AnyObject = msg_send![
+        let token_key: *mut AnyObject = msg_send![
             center,
             addObserverForName: &*notification_name,
             object: std::ptr::null::<AnyObject>(), // Observe ALL windows
@@ -156,11 +157,45 @@ fn install_child_window_observer(window: &NSWindow, instance_id: &str) {
             usingBlock: &*block
         ];
 
-        if !token.is_null() {
+        // Approach 2: Also observe when windows are ordered (shows up visually)
+        let order_notification = NSString::from_str("NSWindowDidBecomeMainNotification");
+        let block2 = RcBlock::new(move |notification: *mut AnyObject| {
+            if notification.is_null() {
+                return;
+            }
+
+            let notif_window: *mut AnyObject = msg_send![notification, object];
+            if notif_window.is_null() {
+                return;
+            }
+
+            let parent: *mut AnyObject = msg_send![notif_window, parentWindow];
+            if parent == window_ptr as *mut AnyObject || is_menu_window(notif_window) {
+                configure_menu_window(notif_window);
+            }
+        });
+
+        let token_main: *mut AnyObject = msg_send![
+            center,
+            addObserverForName: &*order_notification,
+            object: std::ptr::null::<AnyObject>(),
+            queue: main_queue,
+            usingBlock: &*block2
+        ];
+
+        let mut tokens = Vec::new();
+        if !token_key.is_null() {
+            tokens.push(SendSyncPtr(token_key));
+        }
+        if !token_main.is_null() {
+            tokens.push(SendSyncPtr(token_main));
+        }
+
+        if !tokens.is_empty() {
             CHILD_WINDOW_OBSERVERS
                 .write()
                 .unwrap()
-                .insert(instance_id.to_string(), vec![SendSyncPtr(token)]);
+                .insert(instance_id.to_string(), tokens);
         }
     }
 }
@@ -866,6 +901,15 @@ pub fn open_audio_unit_ui(
         // We need to observe when these child windows are created and ensure
         // they have proper event handling configured.
         install_child_window_observer(&window, instance_id);
+
+        // Additional fix: Ensure the panel itself can be a parent to menu windows
+        // and doesn't interfere with event propagation to child windows
+        let _: () = msg_send![&*window, setFloatingPanel: true];
+        let _: () = msg_send![&*window, setBecomesKeyOnlyIfNeeded: false];
+        
+        // Make sure the window can accept becoming key even during modal tracking
+        let _: () = msg_send![&*window, setCanBecomeKeyWindow: true];
+        let _: () = msg_send![&*window, setCanBecomeMainWindow: true];
 
         // Always disable user resizing; window follows plugin view size.
         set_window_resizable(&window, false);
