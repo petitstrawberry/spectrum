@@ -489,6 +489,18 @@ extern "C" {
     fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, returnAfterSourceHandled: bool) -> i32;
 }
 
+// Grand Central Dispatch (GCD) semaphore functions
+extern "C" {
+    fn dispatch_semaphore_create(value: isize) -> *mut c_void;
+    fn dispatch_semaphore_wait(semaphore: *mut c_void, timeout: u64) -> isize;
+    fn dispatch_semaphore_signal(semaphore: *mut c_void) -> isize;
+    fn dispatch_release(object: *mut c_void);
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+}
+
+const DISPATCH_TIME_FOREVER: u64 = !0;
+const DISPATCH_TIME_NOW: u64 = 0;
+
 fn get_default_run_loop_mode() -> *const c_void {
     extern "C" {
         static kCFRunLoopDefaultMode: *const c_void;
@@ -687,7 +699,8 @@ impl AudioUnitInstance {
     /// Uses AUAudioUnit for both processing and UI (required for AUv3 plugins)
     pub fn new(info: &AudioUnitInfo, instance_id: String) -> Result<Self, String> {
         // Create AUAudioUnit (works for both AUv2 and AUv3 plugins)
-        let au_audio_unit = Self::create_au_audio_unit(info)?;
+        // MUST run on main thread to avoid NSMenu issues with JUCE plugins
+        let au_audio_unit = Self::create_au_audio_unit_on_main_thread(info)?;
 
         println!("[AudioUnit] Created AUAudioUnit instance {:?} for {}", au_audio_unit, info.name);
 
@@ -707,6 +720,69 @@ impl AudioUnitInstance {
         })
     }
 
+    /// Create AUAudioUnit instance, ensuring it runs on the main thread
+    /// This is required because AudioUnit instantiation affects NSMenu event handling
+    fn create_au_audio_unit_on_main_thread(info: &AudioUnitInfo) -> Result<*mut AnyObject, String> {
+        // Check if we're already on the main thread
+        unsafe {
+            let is_main_thread: bool = msg_send![class!(NSThread), isMainThread];
+
+            if is_main_thread {
+                // Already on main thread, call directly
+                return Self::create_au_audio_unit(info);
+            }
+
+            // Not on main thread - use performSelectorOnMainThread
+            println!("[AudioUnit] Not on main thread, performing on main thread...");
+
+            // Use a semaphore to wait for completion
+            let semaphore = dispatch_semaphore_create(0);
+            if semaphore.is_null() {
+                return Err("Failed to create semaphore".to_string());
+            }
+
+            // Result holder
+            struct Context {
+                info: AudioUnitInfo,
+                result: Option<Result<*mut AnyObject, String>>,
+                semaphore: *mut c_void,
+            }
+
+            let context = Box::into_raw(Box::new(Context {
+                info: info.clone(),
+                result: None,
+                semaphore,
+            }));
+
+            // Create a block to execute on main thread
+            let block = RcBlock::new(move || {
+                let ctx = unsafe { &mut *context };
+
+                ctx.result = Some(AudioUnitInstance::create_au_audio_unit(&ctx.info));
+                dispatch_semaphore_signal(ctx.semaphore);
+            });
+
+            // Schedule on main queue using NSOperationQueue
+            let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+            let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+
+            // Wait for completion
+            let timeout_ns = 10_000_000_000u64; // 10 seconds
+            let timeout_time = dispatch_time(DISPATCH_TIME_NOW, timeout_ns as i64);
+            let wait_result = dispatch_semaphore_wait(semaphore, timeout_time);
+            dispatch_release(semaphore);
+
+            if wait_result != 0 {
+                let _ = Box::from_raw(context); // Clean up
+                return Err("Timed out waiting for main thread execution".to_string());
+            }
+
+            // Extract result and clean up
+            let context = Box::from_raw(context);
+            context.result.unwrap()
+        }
+    }
+
     /// Create AUAudioUnit instance using Objective-C API
     fn create_au_audio_unit(info: &AudioUnitInfo) -> Result<*mut AnyObject, String> {
         let desc = AUComponentDescription {
@@ -720,14 +796,19 @@ impl AudioUnitInstance {
         unsafe {
             let au_audio_unit_class = class!(AUAudioUnit);
 
-            // Result holder with atomic flag for completion
+            // Result holder for completion
             let result: Arc<Mutex<Option<*mut AnyObject>>> = Arc::new(Mutex::new(None));
             let result_clone = Arc::clone(&result);
-            let done = Arc::new(AtomicBool::new(false));
-            let done_clone = Arc::clone(&done);
+
+            // Use dispatch_semaphore for thread-safe waiting
+            let semaphore = dispatch_semaphore_create(0);
+            if semaphore.is_null() {
+                return Err("Failed to create dispatch semaphore".to_string());
+            }
 
             // Create the completion handler block
             let block = RcBlock::new(move |au_audio_unit: *mut AnyObject, error: *mut AnyObject| {
+                println!("[AudioUnit] Completion handler called!");
                 if !error.is_null() {
                     println!("[AudioUnit] AUAudioUnit instantiation error");
                 }
@@ -736,9 +817,12 @@ impl AudioUnitInstance {
                     // Retain the AUAudioUnit to prevent deallocation
                     let _: () = msg_send![au_audio_unit, retain];
                     *result_clone.lock().unwrap() = Some(au_audio_unit);
+                    println!("[AudioUnit] AUAudioUnit retained");
                 }
 
-                done_clone.store(true, Ordering::SeqCst);
+                // Signal that completion is done
+                dispatch_semaphore_signal(semaphore);
+                println!("[AudioUnit] Semaphore signaled");
             });
 
             // Call instantiateWithComponentDescription:options:completionHandler:
@@ -749,16 +833,15 @@ impl AudioUnitInstance {
                 completionHandler: &*block
             ];
 
-            // Run the RunLoop to allow completion handler to be called
-            let start_time = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(10);
-            let mode = get_default_run_loop_mode();
+            // Wait for completion with timeout (10 seconds)
+            let timeout_ns = 10_000_000_000u64; // 10 seconds in nanoseconds
+            let timeout_time = dispatch_time(DISPATCH_TIME_NOW, timeout_ns as i64);
 
-            while !done.load(Ordering::SeqCst) {
-                if start_time.elapsed() > timeout {
-                    return Err("Timed out waiting for AUAudioUnit instantiation".to_string());
-                }
-                CFRunLoopRunInMode(mode, 0.01, false);
+            let wait_result = dispatch_semaphore_wait(semaphore, timeout_time);
+            dispatch_release(semaphore);
+
+            if wait_result != 0 {
+                return Err("Timed out waiting for AUAudioUnit instantiation".to_string());
             }
 
             let au_audio_unit = result.lock().unwrap().take();
@@ -1154,13 +1237,13 @@ impl AudioUnitInstance {
             }
 
             let render_block_ptr = render_block as *const RenderBlock;
-            
+
             // Save original output pointers - AU might replace them with its own buffers
             let orig_left_ptr = left.as_mut_ptr();
             let orig_right_ptr = right.as_mut_ptr();
-            
+
             let output_buffer_list_ptr = state.output_buffer_list.as_audio_buffer_list();
-            
+
             let status = ((*render_block_ptr).invoke)(
                 render_block_ptr,
                 &mut action_flags,
@@ -1176,22 +1259,22 @@ impl AudioUnitInstance {
             if status != 0 {
                 return Err(format!("render failed: {}", status));
             }
-            
+
             // DEBUG: Check output buffer state after render
             static DEBUG_OUTPUT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let out_count = DEBUG_OUTPUT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            
+
             // Check if AudioUnit replaced output buffer pointers
             // Some plugins write to their own internal buffers instead of ours
             let output_list = &*output_buffer_list_ptr;
             let frames_usize = frames as usize;
-            
+
             // Get buffer info (debug logging disabled)
             let buf0 = &output_list.mBuffers[0];
             let buf1_ptr = (output_list.mBuffers.as_ptr()).add(1);
             let buf1 = &*buf1_ptr;
             let _ = out_count; // suppress warning
-            
+
             // Left channel
             if output_list.mNumberBuffers >= 1 {
                 let buf0 = &output_list.mBuffers[0];
@@ -1204,7 +1287,7 @@ impl AudioUnitInstance {
                     );
                 }
             }
-            
+
             // Right channel (index 1 in our StereoAudioBufferList)
             if output_list.mNumberBuffers >= 2 {
                 // Need to access second buffer - but AudioBufferList only has [1] array
