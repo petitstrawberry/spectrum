@@ -1654,7 +1654,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
-            <Workflow className="w-6 h-6 text-cyan-400" />
+            <img src="/icon.png" alt="Spectrum" className="w-8 h-8" />
             <div>
               <div className="font-black text-lg tracking-tighter bg-gradient-to-r from-cyan-400 to-fuchsia-500 bg-clip-text text-transparent leading-none">Spectrum</div>
               <div className="flex items-center gap-2">
