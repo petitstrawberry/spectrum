@@ -1482,13 +1482,47 @@ impl Drop for AudioUnitInstance {
             }
 
             // Deallocate render resources and release AUAudioUnit
+            // MUST be done on main thread to avoid crashes in plugin destructors
             if let Some(SendSyncPtr(au)) = self.au_audio_unit.take() {
                 if !au.is_null() {
-                    if self.render_resources_allocated.load(Ordering::Acquire) {
-                        let _: () = msg_send![au, deallocateRenderResources];
+                    let is_main_thread: bool = msg_send![class!(NSThread), isMainThread];
+                    let render_resources_allocated =
+                        self.render_resources_allocated.load(Ordering::Acquire);
+
+                    if is_main_thread {
+                        // Already on main thread, release directly
+                        if render_resources_allocated {
+                            let _: () = msg_send![au, deallocateRenderResources];
+                        }
+                        println!("[AudioUnit] Releasing AUAudioUnit: {:?}", au);
+                        let _: () = msg_send![au, release];
+                    } else {
+                        // Not on main thread - dispatch synchronously to main thread
+                        println!(
+                            "[AudioUnit] Deferring AUAudioUnit release to main thread: {:?}",
+                            au
+                        );
+
+                        use block2::RcBlock;
+                        use objc2::class;
+                        use objc2::runtime::AnyObject;
+
+                        let block = RcBlock::new(move || {
+                            if render_resources_allocated {
+                                let _: () = msg_send![au, deallocateRenderResources];
+                            }
+                            println!("[AudioUnit] Releasing AUAudioUnit on main thread: {:?}", au);
+                            let _: () = msg_send![au, release];
+                        });
+
+                        let main_queue: *mut AnyObject =
+                            msg_send![class!(NSOperationQueue), mainQueue];
+                        let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
+
+                        // Wait a bit to ensure cleanup completes before app exits
+                        // This is a best-effort approach for shutdown scenarios
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
-                    println!("[AudioUnit] Releasing AUAudioUnit: {:?}", au);
-                    let _: () = msg_send![au, release];
                 }
             }
         }
@@ -1636,7 +1670,15 @@ impl AudioUnitManager {
 
     /// Remove and release all instances
     /// NOTE: Called from main thread only. Ensures UI controllers are cleaned up.
+    /// IMPORTANT: Must be called on main thread to avoid crashes in plugin destructors
     pub fn remove_all_instances(&self) {
+        unsafe {
+            let is_main_thread: bool = msg_send![class!(NSThread), isMainThread];
+            if !is_main_thread {
+                eprintln!("[AudioUnit] WARNING: remove_all_instances called from non-main thread!");
+            }
+        }
+
         // Collect IDs to avoid holding write lock while calling cleanup
         let ids: Vec<String> = {
             let inst = self.instances.read();
@@ -1646,7 +1688,7 @@ impl AudioUnitManager {
         for id in ids {
             // Clean up any cached UI controller
             crate::audio_unit_ui::cleanup_cached_view_controller(&id);
-            // Remove instance (drop will release AU resources)
+            // Remove instance (drop will release AU resources on main thread)
             self.instances.write().remove(&id);
             println!("[AudioUnit] Removed instance {} during shutdown", id);
         }
