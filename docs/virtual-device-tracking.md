@@ -63,7 +63,7 @@ Now Device B maintains a consistent identity (uid_hash: e5f6a7b8) even though it
    fn uid_hash(uid: &str) -> String {
        // FNV-1a 64-bit hash algorithm
        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-       const FNV_PRIME: u64 = 0x100000001b3;
+       const FNV_PRIME: u64 = 0x00000100000001b3;
        
        let mut hash: u64 = FNV_OFFSET_BASIS;
        for byte in uid.as_bytes() {
