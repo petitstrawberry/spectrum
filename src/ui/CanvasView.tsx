@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2, Link as LinkIcon } from 'lucide-react';
 import { getNodePorts } from '../hooks/useNodeDisplay';
+import { VOUT_ID_PATTERN } from '../lib/voutId';
 
 type PatchConnection = {
   id: string;
@@ -391,7 +392,7 @@ export default function CanvasView({
           // and the system has an active output that doesn't match the parent device, mark disabled.
           let isSystemDisabled = false;
           if (node.libraryId && typeof node.libraryId === 'string' && node.libraryId.startsWith('vout_')) {
-            const m = node.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+            const m = node.libraryId.match(VOUT_ID_PATTERN);
             if (m) {
               const parentId = Number(m[1]);
               // systemActiveOutputs may be numbers or strings; normalize to numbers

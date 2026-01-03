@@ -399,12 +399,18 @@ struct SubDeviceInfo {
 
 /// Generate a short stable hash from a device UID for use in virtual device IDs.
 /// This ensures virtual devices can be tracked across aggregate device configuration changes.
+/// Uses FNV-1a hash algorithm for better collision resistance.
 fn uid_hash(uid: &str) -> String {
-    // Simple hash: take first 8 chars of a hex representation of the string hash
-    let mut hash: u64 = 0;
+    // FNV-1a hash: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    
+    let mut hash: u64 = FNV_OFFSET_BASIS;
     for byte in uid.as_bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(*byte as u64);
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
     }
+    // Return 8-character hex string
     format!("{:08x}", hash)
 }
 

@@ -38,6 +38,7 @@ import { getPrismChannelDisplay, getInputDeviceDisplay, getSinkDeviceDisplay, ge
 import { renderToStaticMarkup } from 'react-dom/server';
 import { addSourceNode, addSinkNode, removeNode, setOutputGain, setOutputChannelGain } from '../lib/api';
 import { openPrismApp } from '../lib/prismd';
+import { VOUT_ID_PATTERN } from '../lib/voutId';
 
 // --- Types ---
 
@@ -596,7 +597,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         if (activeNums.length === 0) return true;
         const did = Number(n.deviceId);
         if (!Number.isNaN(did) && activeNums.includes(did)) return true;
-        const m = typeof n.libraryId === 'string' ? n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/) : null;
+        const m = typeof n.libraryId === 'string' ? n.libraryId.match(VOUT_ID_PATTERN) : null;
         if (m) {
           const parentId = Number(m[1]);
           if (!Number.isNaN(parentId) && activeNums.includes(parentId)) return true;
@@ -830,7 +831,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       if (!node || node.type !== 'target') return false;
       if (node.available === false) return true;
       if (activeNums.length === 0) return false;
-      const m = typeof node.libraryId === 'string' ? node.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/) : null;
+      const m = typeof node.libraryId === 'string' ? node.libraryId.match(VOUT_ID_PATTERN) : null;
       if (m) {
         const parentId = Number(m[1]);
         if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) return true;
@@ -1129,7 +1130,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
         let parentDeviceId: number | null = null;
         if (typeof n.deviceId === 'number' && !Number.isNaN(n.deviceId)) parentDeviceId = n.deviceId;
         if (parentDeviceId == null && typeof n.libraryId === 'string') {
-          const m = n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+          const m = n.libraryId.match(VOUT_ID_PATTERN);
           if (m) parentDeviceId = Number(m[1]);
         }
 
@@ -1185,7 +1186,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     let isSystemDisabled = false;
     if (n?.available === false) isSystemDisabled = true;
     if (!isSystemDisabled && activeNums.length > 0 && typeof n?.libraryId === 'string') {
-      const m = n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+      const m = n.libraryId.match(VOUT_ID_PATTERN);
       if (m) {
         const parentId = Number(m[1]);
         if (!Number.isNaN(parentId) && !activeNums.includes(parentId)) isSystemDisabled = true;
@@ -1217,7 +1218,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     if (typeof n?.deviceId === 'number' && !Number.isNaN(n.deviceId)) {
       deviceId = n.deviceId;
     } else if (typeof n?.libraryId === 'string') {
-      const m = n.libraryId.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+      const m = n.libraryId.match(VOUT_ID_PATTERN);
       if (m) deviceId = Number(m[1]);
     }
 
@@ -1285,7 +1286,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
     }
 
     if (id.startsWith('vout_')) {
-      const m = id.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+      const m = id.match(VOUT_ID_PATTERN);
       if (!m) return false;
       const parentDeviceId = Number(m[1]);
       const offset = Number(m[2]);
@@ -1330,7 +1331,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
       GhostIcon = Mic;
     } else if (id.startsWith('vout_')) {
       // virtual output entry like "vout_<device>_<offset>_<uid_hash>" or "vout_<device>_<offset>"
-      const m = id.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+      const m = id.match(VOUT_ID_PATTERN);
       if (m) {
         const vEntry = (devices?.virtualOutputDevices || []).find((v: any) => v.id === id);
         const name = vEntry ? vEntry.name : `Out ${m[2]}`;
@@ -1504,7 +1505,7 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
             }
             // handle virtual output sinks (id like 'vout_<device>_<offset>_<uid_hash>' or 'vout_<device>_<offset>')
             if (!sourceId && typeof id === 'string' && id.startsWith('vout_')) {
-              const m = id.match(/^vout_(\d+)_(\d+)(?:_[a-f0-9]+)?$/);
+              const m = id.match(VOUT_ID_PATTERN);
               if (m && canvasRef.current) {
                 const parentDeviceId = Number(m[1]);
                 const offset = Number(m[2]);
