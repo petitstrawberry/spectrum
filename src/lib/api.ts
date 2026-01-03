@@ -230,7 +230,7 @@ export async function addSourceNode(
 }
 
 export async function addBusNode(
-  label: string,
+  label?: string,
   portCount?: number
 ): Promise<number> {
   return invoke<number>('add_bus_node', { label, portCount });

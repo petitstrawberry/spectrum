@@ -231,9 +231,41 @@ pub async fn add_source_node(source_id: SourceIdDto, label: Option<String>) -> R
 }
 
 #[tauri::command]
-pub async fn add_bus_node(label: String, port_count: Option<u8>) -> Result<u32, String> {
+pub async fn add_bus_node(label: Option<String>, port_count: Option<u8>) -> Result<u32, String> {
     let processor = get_graph_processor();
     let port_count = port_count.unwrap_or(2);
+
+    // Auto-generate label if not provided by finding the smallest available bus number
+    let label = if let Some(l) = label {
+        l
+    } else {
+        processor.with_graph(|graph| {
+            // Collect all used bus numbers
+            let mut used_numbers = std::collections::HashSet::new();
+            for handle in graph.node_handles() {
+                let Some(node) = graph.get_node(handle) else {
+                    continue;
+                };
+                let Some(bus) = node.as_any().downcast_ref::<BusNode>() else {
+                    continue;
+                };
+                // Parse "Bus N" pattern
+                if let Some(caps) = bus.label().strip_prefix("Bus ") {
+                    if let Ok(num) = caps.parse::<u32>() {
+                        used_numbers.insert(num);
+                    }
+                }
+            }
+
+            // Find the smallest available number
+            let mut bus_number = 1u32;
+            while used_numbers.contains(&bus_number) {
+                bus_number += 1;
+            }
+
+            format!("Bus {}", bus_number)
+        })
+    };
 
     // De-dup: avoid accidentally creating multiple identical buses (common during UI/dev refreshes).
     // We treat (label + port_count) as the logical identity.

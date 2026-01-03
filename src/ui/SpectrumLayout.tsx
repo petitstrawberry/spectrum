@@ -1587,23 +1587,20 @@ export default function SpectrumLayout(props: SpectrumLayoutProps) {
   // Use the real openPrismApp from ../lib/prismd (imported above)
   // openPrismApp is imported; call it directly where needed
   const reserveBusIdStub = async () => 'bus_1';
-  // Add Bus handler
+  // Add Bus handler (backend auto-generates label)
   const handleAddBus = useCallback(async () => {
     const g = (props as any).graph;
     if (!g || typeof g.addBus !== 'function') {
       console.error('[SpectrumLayout] graph.addBus not available');
       return;
     }
-    // Count existing buses to name the new one
-    const busCount = (nodesFromGraph || []).filter((n: any) => n.type === 'bus').length;
-    const label = `Bus ${busCount + 1}`;
     try {
-      const handle = await g.addBus(label, 2); // stereo bus
-      console.debug('[SpectrumLayout] addBus ok', { handle, label });
+      const handle = await g.addBus(); // stereo bus, auto-generated label
+      console.debug('[SpectrumLayout] addBus ok', { handle });
     } catch (e) {
       console.error('[SpectrumLayout] addBus failed', e);
     }
-  }, [props, nodesFromGraph]);
+  }, [props]);
   const getActiveInputCaptures = async () => [];
   // Mirror driver status from devices hook
   useEffect(() => {

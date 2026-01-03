@@ -307,11 +307,10 @@ export default function App() {
     }
   }, [graph, devices.inputDevices]);
 
-  // Add bus handler
+  // Add bus handler (backend auto-generates label)
   const handleAddBus = useCallback(async () => {
-    const busCount = nodesArray.filter(n => n.type === 'bus').length;
-    await graph.addBus(`Bus ${busCount + 1}`, 2);
-  }, [graph, nodesArray]);
+    await graph.addBus();
+  }, [graph]);
 
   // Add sink handler
   const handleAddSink = useCallback(async (deviceId: number, channelOffset: number, channelCount: number) => {

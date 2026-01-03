@@ -307,7 +307,7 @@ export interface UseGraphReturn {
 
   // Node Operations
   addSource: (sourceId: SourceIdDto, label?: string, position?: { x: number; y: number }) => Promise<number>;
-  addBus: (label: string, portCount?: number, position?: { x: number; y: number }) => Promise<number>;
+  addBus: (label?: string, portCount?: number, position?: { x: number; y: number }) => Promise<number>;
   addSink: (sink: OutputSinkDto, label?: string, position?: { x: number; y: number }) => Promise<number>;
   deleteNode: (handle: number) => Promise<void>;
   updateNodePosition: (handle: number, x: number, y: number) => void;
@@ -625,7 +625,7 @@ export function useGraph(options: UseGraphOptions = {}): UseGraphReturn {
   }, [getNextPosition, refresh, markDirty]);
 
   const addBusNode_ = useCallback(async (
-    label: string,
+    label?: string,
     portCount?: number,
     position?: { x: number; y: number }
   ): Promise<number> => {
