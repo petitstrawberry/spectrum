@@ -496,7 +496,7 @@ extern "C" {
         -> i32;
 }
 
-// Grand Central Dispatch (GCD) semaphore functions
+// Grand Central Dispatch (GCD) functions for semaphore
 extern "C" {
     fn dispatch_semaphore_create(value: isize) -> *mut c_void;
     fn dispatch_semaphore_wait(semaphore: *mut c_void, timeout: u64) -> isize;
@@ -1497,11 +1497,15 @@ impl Drop for AudioUnitInstance {
                         println!("[AudioUnit] Releasing AUAudioUnit: {:?}", au);
                         let _: () = msg_send![au, release];
                     } else {
-                        // Not on main thread - dispatch synchronously to main thread
+                        // Not on main thread - dispatch synchronously to main thread using semaphore
                         println!(
-                            "[AudioUnit] Deferring AUAudioUnit release to main thread: {:?}",
+                            "[AudioUnit] Synchronously releasing AUAudioUnit on main thread: {:?}",
                             au
                         );
+
+                        // Create semaphore for synchronous wait
+                        let semaphore = dispatch_semaphore_create(0);
+                        let semaphore_signal = semaphore;
 
                         use block2::RcBlock;
                         use objc2::class;
@@ -1513,15 +1517,22 @@ impl Drop for AudioUnitInstance {
                             }
                             println!("[AudioUnit] Releasing AUAudioUnit on main thread: {:?}", au);
                             let _: () = msg_send![au, release];
+
+                            // Signal completion
+                            dispatch_semaphore_signal(semaphore_signal);
                         });
 
                         let main_queue: *mut AnyObject =
                             msg_send![class!(NSOperationQueue), mainQueue];
                         let _: () = msg_send![main_queue, addOperationWithBlock: &*block];
 
-                        // Wait a bit to ensure cleanup completes before app exits
-                        // This is a best-effort approach for shutdown scenarios
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        // Wait for completion (10 second timeout)
+                        let timeout = dispatch_time(DISPATCH_TIME_NOW, 10_000_000_000); // 10 seconds
+                        let result = dispatch_semaphore_wait(semaphore, timeout);
+                        if result != 0 {
+                            eprintln!("[AudioUnit] WARNING: Timed out waiting for AudioUnit cleanup on main thread");
+                        }
+                        dispatch_release(semaphore);
                     }
                 }
             }
