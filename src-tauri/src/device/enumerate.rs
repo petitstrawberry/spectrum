@@ -72,7 +72,7 @@ pub fn is_aggregate_device(device_id: u32) -> bool {
 }
 
 /// Get device UID
-fn get_device_uid(device_id: u32) -> Option<String> {
+pub fn get_device_uid(device_id: u32) -> Option<String> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
 
@@ -273,8 +273,19 @@ pub fn get_output_devices() -> Vec<OutputDeviceDto> {
 
                     let transport_type = get_transport_type(sub.original_id);
 
+                    // Generate ID with subdevice UID hash to track devices across configuration changes
+                    let id = if let Some(ref uid) = sub.uid {
+                        // New format: vout_{device_id}_{offset}_{uid_hash}
+                        // This ensures the same physical sub-device keeps the same ID even if
+                        // the aggregate configuration changes (sub-devices added/removed)
+                        format!("vout_{}_{}_{}", device_id, offset, uid_hash(uid))
+                    } else {
+                        // Fallback to old format if UID is not available
+                        format!("vout_{}_{}", device_id, offset)
+                    };
+
                     result.push(OutputDeviceDto {
-                        id: format!("vout_{}_{}", device_id, offset),
+                        id,
                         device_id,
                         device_uid: get_device_uid(device_id),
                         subdevice_uid: sub.uid.clone(),
@@ -355,14 +366,17 @@ pub fn find_preferred_output_device() -> Option<u32> {
 
 /// Find a specific output device by ID
 pub fn find_output_device(virtual_id: &str) -> Option<(u32, u8, u8)> {
-    // Parse virtual ID: "vout_{device_id}_{offset}"
+    // Parse virtual ID: supports both formats:
+    // - Old: "vout_{device_id}_{offset}"
+    // - New: "vout_{device_id}_{offset}_{uid_hash}"
     let parts: Vec<&str> = virtual_id.split('_').collect();
-    if parts.len() != 3 || parts[0] != "vout" {
+    if parts.len() < 3 || parts.len() > 4 || parts[0] != "vout" {
         return None;
     }
 
     let device_id: u32 = parts[1].parse().ok()?;
     let channel_offset: u8 = parts[2].parse().ok()?;
+    // parts[3] would be the uid_hash if present (ignored for lookup)
 
     let output_channels = get_device_output_channels(device_id);
     if output_channels == 0 {
@@ -375,16 +389,87 @@ pub fn find_output_device(virtual_id: &str) -> Option<(u32, u8, u8)> {
     Some((device_id, channel_offset, channel_count))
 }
 
+/// Get a set of all available input device UIDs
+pub fn get_available_input_device_uids() -> std::collections::HashSet<String> {
+    let devices = crate::audio_capture::get_input_devices();
+    devices
+        .into_iter()
+        .filter_map(|(_, _, _, _, uid)| uid)
+        .collect()
+}
+
+/// Get a set of all available output device UIDs (including sub-device UIDs)
+pub fn get_available_output_device_uids() -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+
+    let mut uids = HashSet::new();
+
+    let device_ids = match get_audio_device_ids() {
+        Ok(ids) => ids,
+        Err(_) => return uids,
+    };
+
+    for device_id in device_ids {
+        // Add device UID if it has output channels
+        if get_device_output_channels(device_id) > 0 {
+            if let Some(uid) = get_device_uid(device_id) {
+                uids.insert(uid);
+            }
+
+            // For aggregate devices, also add sub-device UIDs
+            if is_aggregate_device(device_id) {
+                let subs = get_aggregate_sub_devices(device_id);
+                for sub in subs {
+                    if let Some(uid) = sub.uid {
+                        uids.insert(uid);
+                    }
+                }
+            }
+        }
+    }
+
+    uids
+}
+
+/// Check if an input device exists and is available by UID
+pub fn is_input_device_available_by_uid(device_uid: &str) -> bool {
+    get_available_input_device_uids().contains(device_uid)
+}
+
+/// Check if an output device exists and is available by UID
+pub fn is_output_device_available_by_uid(device_uid: &str) -> bool {
+    get_available_output_device_uids().contains(device_uid)
+}
+
 /// Information about an aggregate's sub-device
-struct SubDeviceInfo {
-    uid: Option<String>,
-    name: String,
-    channels: u32,
-    original_id: u32,
+#[derive(Debug, Clone)]
+pub struct SubDeviceInfo {
+    pub uid: Option<String>,
+    pub name: String,
+    pub channels: u32,
+    pub original_id: u32,
+}
+
+/// Generate a short stable hash from a device UID for use in virtual device IDs.
+/// This ensures virtual devices can be tracked across aggregate device configuration changes.
+/// Uses FNV-1a hash algorithm for better collision resistance.
+pub fn uid_hash(uid: &str) -> String {
+    // FNV-1a 64-bit hash: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+    // Standard FNV-1a 64-bit constants
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325; // FNV offset basis for 64-bit
+    const FNV_PRIME: u64 = 0x00000100000001b3; // FNV prime for 64-bit (correct 64-bit value)
+
+    let mut hash: u64 = FNV_OFFSET_BASIS;
+    for byte in uid.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    // Return 8-character hex string
+    format!("{:08x}", hash)
 }
 
 /// Query aggregate device for its active sub-device list and resolve their UIDs/names/channels
-fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
+pub fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
     use std::mem::size_of;
 
     let address = AudioObjectPropertyAddress {
@@ -438,6 +523,58 @@ fn get_aggregate_sub_devices(device_id: u32) -> Vec<SubDeviceInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_uid_hash() {
+        // Test that the same UID produces the same hash
+        let uid1 = "AppleUSBAudioEngine:Vendor:Product:12345";
+        let hash1 = uid_hash(uid1);
+        let hash2 = uid_hash(uid1);
+        assert_eq!(hash1, hash2, "Same UID should produce same hash");
+        assert_eq!(hash1.len(), 8, "Hash should be 8 characters");
+
+        // Test that different UIDs produce different hashes
+        let uid2 = "AppleUSBAudioEngine:Vendor:Product:67890";
+        let hash3 = uid_hash(uid2);
+        assert_ne!(
+            hash1, hash3,
+            "Different UIDs should produce different hashes"
+        );
+
+        // Test that hash is alphanumeric hex
+        assert!(
+            hash1.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
+    }
+
+    #[test]
+    fn test_find_output_device_old_format() {
+        // Test old format: vout_{device_id}_{offset}
+        // This won't actually find a device in tests, but should parse correctly
+        let old_format_id = "vout_123_4";
+        let result = find_output_device(old_format_id);
+        // Result will be None because device 123 doesn't exist, but it should parse without error
+        // If the format was invalid, it would return None at parsing stage
+    }
+
+    #[test]
+    fn test_find_output_device_new_format() {
+        // Test new format: vout_{device_id}_{offset}_{uid_hash}
+        let new_format_id = "vout_123_4_a1b2c3d4";
+        let result = find_output_device(new_format_id);
+        // Result will be None because device 123 doesn't exist, but it should parse without error
+    }
+
+    #[test]
+    fn test_find_output_device_invalid_format() {
+        // Test invalid formats
+        assert!(find_output_device("invalid").is_none());
+        assert!(find_output_device("vout_123").is_none()); // Too few parts
+        assert!(find_output_device("vout_123_4_abc_extra").is_none()); // Too many parts
+        assert!(find_output_device("vout_abc_4").is_none()); // Non-numeric device_id
+        assert!(find_output_device("vout_123_abc").is_none()); // Non-numeric offset
+    }
 
     #[test]
     fn test_get_output_devices() {

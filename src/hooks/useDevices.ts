@@ -9,6 +9,7 @@ import {
   getPrismStatus,
   getOutputRuntime,
 } from '../lib/api';
+import { VOUT_ID_PATTERN } from '../lib/deviceId';
 // NOTE: Avoid top-level import of Tauri invoke.
 // Opening the Vite dev server in a normal browser can crash module init otherwise.
 type Invoke = <T>(cmd: string, args?: Record<string, any>) => Promise<T>;
@@ -158,10 +159,12 @@ export function useDevices(options: UseDevicesOptions = {}): UseDevicesReturn {
       for (const d of outputs) {
         const rawId = (d as any).id ?? '';
         if (typeof rawId === 'string' && rawId.startsWith('vout_')) {
-          const m = rawId.match(/^vout_(\d+)_(\d+)$/);
+          // Support both old format (vout_{device}_{offset}) and new format (vout_{device}_{offset}_{uid_hash})
+          const m = rawId.match(VOUT_ID_PATTERN);
           if (!m) continue;
           const parentId = Number(m[1]);
           const offset = Number(m[2]);
+          // m[3] would be the uid_hash if present (we don't need it here)
           const name = (d as any).name ?? (d as any).label ?? rawId;
           const channels = (d as any).channel_count ?? (d as any).channelCount ?? (d as any).output_channels ?? 2;
           const icon = (d as any).icon_hint ?? undefined;

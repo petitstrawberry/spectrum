@@ -20,6 +20,10 @@ pub struct SinkId {
     pub channel_offset: u8,
     /// このシンクが担当するチャンネル数
     pub channel_count: u8,
+    /// デバイスの UID（オプショナル）
+    /// 集約デバイスのサブデバイスの場合、サブデバイスの UID を保持
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_uid: Option<String>,
 }
 
 impl SinkId {
@@ -29,6 +33,7 @@ impl SinkId {
             device_id,
             channel_offset: 0,
             channel_count,
+            device_uid: crate::device::get_device_uid(device_id),
         }
     }
 
@@ -38,6 +43,22 @@ impl SinkId {
             device_id,
             channel_offset,
             channel_count,
+            device_uid: crate::device::get_device_uid(device_id),
+        }
+    }
+
+    /// Create a sink with explicit UID (for sub-devices)
+    pub fn with_uid(
+        device_id: u32,
+        channel_offset: u8,
+        channel_count: u8,
+        device_uid: Option<String>,
+    ) -> Self {
+        Self {
+            device_id,
+            channel_offset,
+            channel_count,
+            device_uid,
         }
     }
 }

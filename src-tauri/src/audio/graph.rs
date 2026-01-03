@@ -298,7 +298,7 @@ impl AudioGraph {
         }
 
         // Start with nodes that have no incoming edges
-        let mut queue: VecDeque<NodeHandle> = in_degree
+        let queue: VecDeque<NodeHandle> = in_degree
             .iter()
             .filter(|(_, &deg)| deg == 0)
             .map(|(&handle, _)| handle)

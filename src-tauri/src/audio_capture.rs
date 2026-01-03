@@ -872,7 +872,7 @@ pub fn pop_channel_audio(
 // ============================================================================
 
 /// Get list of all input devices
-pub fn get_input_devices() -> Vec<(u32, String, u32, bool)> {
+pub fn get_input_devices() -> Vec<(u32, String, u32, bool, Option<String>)> {
     let mut devices = Vec::new();
     if let Ok(device_ids) = get_audio_device_ids() {
         for id in device_ids {
@@ -880,7 +880,8 @@ pub fn get_input_devices() -> Vec<(u32, String, u32, bool)> {
             if input_ch > 0 {
                 let name = get_device_name(id).unwrap_or_else(|_| format!("Device {}", id));
                 let is_prism = name.to_lowercase().contains("prism");
-                devices.push((id, name, input_ch, is_prism));
+                let uid = crate::device::get_device_uid(id);
+                devices.push((id, name, input_ch, is_prism, uid));
             }
         }
     }

@@ -232,7 +232,7 @@ pub struct ActiveCaptureInfo {
 fn get_input_devices_legacy() -> Vec<InputDeviceInfo> {
     capture::get_input_devices()
         .into_iter()
-        .map(|(id, name, channels, is_prism)| InputDeviceInfo {
+        .map(|(id, name, channels, is_prism, _uid)| InputDeviceInfo {
             device_id: id,
             name,
             channels,
