@@ -46,21 +46,6 @@ English | **[日本語](README_ja.md)**
 4. **Launch Spectrum** and start routing audio!
 
 
-## Known Issues
-
-### AudioUnit Plugin UI — JUCE Preset Menus Not Working
-
-**Issue**: AudioUnit plugins built with the JUCE framework display their UI correctly, but preset menus (dropdown/popup menus) don't respond to clicks.
-
-**Cause**: JUCE plugins open menus in separate native windows. Currently, Spectrum's AudioUnit UI hosting doesn't propagate events to these detached windows properly.
-
-**Workaround**: 
-- Use plugin parameter controls directly instead of presets
-- Or use the plugin's standalone app for preset management, then reload the plugin in Spectrum
-
-**Status**: Investigating event propagation for separate NSWindow instances. See `docs/plugin-ui-menu-issue-investigation.md` for technical details.
-
-
 ## Development
 
 ### Repository Structure
